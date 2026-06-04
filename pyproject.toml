@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "momentum-factor-lab"
+version = "0.1.0"
+description = "Practical momentum factor comparison and recommendation lab for US stocks and ETFs."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+live = ["yfinance>=0.2.40"]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+momentum-factor-lab = "momentum_factor_lab.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["momentum_factor_lab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+src = ["momentum_factor_lab", "tests"]

@@ -22,3 +22,5 @@ credentials/
 *.pem
 
 .DS_Store
+
+*.egg-info/
