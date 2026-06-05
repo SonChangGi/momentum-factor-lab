@@ -314,7 +314,7 @@ def _resolve_selected_factor(
     )
 
 
-def _recommendation_status(config: RunConfig, market_data: MarketData, selection_source: str) -> tuple[str, bool]:
+def _recommendation_status(config: RunConfig, market_data: MarketData) -> tuple[str, bool]:
     if market_data.offline_sample:
         return ("sample_offline_not_current", False)
     if market_data.as_of is None:
@@ -322,8 +322,6 @@ def _recommendation_status(config: RunConfig, market_data: MarketData, selection
     age_days = (pd.Timestamp(datetime.now(UTC).date()) - pd.Timestamp(market_data.as_of).normalize()).days
     if age_days > config.stale_after_days:
         return (f"stale_live_data_{age_days}_days_old", False)
-    if selection_source != "predeclared":
-        return ("live_selected_factor_required", False)
     return ("current_live", True)
 
 
@@ -365,9 +363,11 @@ def _apply_tradability_gate(
     status: str,
     current_available: bool,
     subset_run: bool,
+    selection_source: str,
 ) -> tuple[str, bool, dict[str, Any]]:
     requirements = {
         "fresh_live_data": current_available,
+        "predeclared_selected_factor": selection_source == "predeclared",
         "full_uncapped_price_universe": not subset_run and config.max_price_symbols is None,
         "point_in_time_universe": _has_point_in_time_universe(market_data),
         "liquidity_filter_evidence": _has_liquidity_evidence(config, market_data),
@@ -408,7 +408,7 @@ def run_analysis(config: RunConfig) -> RunResult:
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
-    status, current_available = _recommendation_status(config, market_data, selection_source)
+    status, current_available = _recommendation_status(config, market_data)
     subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
     if subset_run and not market_data.offline_sample:
         requested = requested_price_symbols if requested_price_symbols is not None else len(prices.columns)
@@ -420,6 +420,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         status,
         current_available,
         subset_run,
+        selection_source,
     )
     if not current_available:
         recommendations["weight"] = 0.0
