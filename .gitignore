@@ -24,3 +24,5 @@ credentials/
 .DS_Store
 
 *.egg-info/
+
+.cache/

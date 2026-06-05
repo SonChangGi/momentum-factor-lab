@@ -26,6 +26,11 @@ def test_offline_run_generates_required_outputs(tmp_path):
         "config_assumptions",
         "universe",
         "factor_scores",
+        "factor_score_history_top20",
+        "data_sources",
+        "price_sources",
+        "factor_definitions",
+        "factor_validation",
         "backtest_metrics",
         "score_components",
         "benchmark_relative",
@@ -42,9 +47,15 @@ def test_offline_run_generates_required_outputs(tmp_path):
     assert "validation" in set(result.robustness["slice"])
     assert result.score_components.index[0] == result.selected_factor
     assert not result.benchmark_relative.empty
+    assert len(result.recommendations) == result.config.top_n
+    assert result.metadata["candidate_universe_size"] >= 2000
+    assert result.metadata["factor_count"] >= 18
+    assert result.metadata["factor_validation_status"] == "pass"
     assert {"variant_type", "variant", "parameter_set"}.issubset(result.sensitivity.columns)
     factor_sheet = workbook["factor_scores"]
+    history_sheet = workbook["factor_score_history_top20"]
     assert factor_sheet.max_row > len(result.market_data.prices.columns)
+    assert history_sheet.max_row < 1_048_576
 
 
 def test_live_failure_or_offline_status_never_claims_current(tmp_path, monkeypatch):

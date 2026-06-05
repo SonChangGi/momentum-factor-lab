@@ -32,3 +32,6 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 100
 src = ["momentum_factor_lab", "tests"]
+
+[tool.setuptools.package-data]
+momentum_factor_lab = ["resources/*.csv"]

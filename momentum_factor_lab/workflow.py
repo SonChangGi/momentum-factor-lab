@@ -13,7 +13,7 @@ from . import disclaimers
 from .backtest import BacktestResult, run_factor_backtest
 from .config import RunConfig
 from .data import MarketData, load_market_data
-from .factors import FACTOR_DESCRIPTIONS, compute_factor_scores, simple_momentum, total_return_momentum
+from .factors import FACTOR_DESCRIPTIONS, compute_factor_scores, factor_definitions_frame, simple_momentum, total_return_momentum, validate_factor_library
 from .metrics import TRADING_DAYS, annualized_volatility, metric_summary
 from .portfolio import balanced_weights, recommendation_table
 
@@ -32,6 +32,9 @@ class RunResult:
     robustness: pd.DataFrame
     sensitivity: pd.DataFrame
     benchmark_relative: pd.DataFrame
+    factor_validation: pd.DataFrame
+    factor_definitions: pd.DataFrame
+    data_sources: pd.DataFrame
     metadata: dict[str, Any]
     output_paths: dict[str, str]
 
@@ -297,6 +300,8 @@ def run_analysis(config: RunConfig) -> RunResult:
     market_data = load_market_data(config)
     prices = market_data.prices.dropna(axis=1, how="all")
     factor_scores = compute_factor_scores(prices)
+    factor_validation = validate_factor_library(prices)
+    factor_definitions = factor_definitions_frame()
     backtests = {
         name: run_factor_backtest(prices, scores, config, name)
         for name, scores in factor_scores.items()
@@ -307,8 +312,14 @@ def run_analysis(config: RunConfig) -> RunResult:
     selected_factor = str(score_components.index[0])
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
-    recommendations = recommendation_table(latest_scores, weights, top_n=max(config.top_n, 20))
+    recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
     status, current_available = _recommendation_status(config, market_data)
+    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")] if "source" in market_data.data_sources else pd.DataFrame()
+    subset_run = bool(subset_rows["subset_run"].iloc[-1]) if not subset_rows.empty else market_data.offline_sample
+    if subset_run and not market_data.offline_sample:
+        requested = int(subset_rows["requested_price_symbols"].iloc[-1])
+        candidates = int(subset_rows["candidate_symbols"].iloc[-1])
+        status = f"{status}_subset_run_{requested}_of_{candidates}"
     if not current_available and not market_data.offline_sample:
         recommendations["weight"] = 0.0
     recommendations["recommendation_status"] = status
@@ -332,6 +343,13 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_reason": selected_reason,
         "signal_date": str(prices.index.max().date()) if not prices.empty else None,
         "execution_delay": "one trading day after signal/rebalance schedule",
+        "portfolio_construction": f"long-only top-{config.top_n} factor portfolios at each rebalance, max weight {config.max_weight:.2%}",
+        "candidate_universe_size": len(market_data.candidate_universe),
+        "eligible_price_universe_size": len(prices.columns),
+        "excluded_symbols": len(market_data.exclusions),
+        "subset_run": subset_run,
+        "factor_count": len(factor_definitions),
+        "factor_validation_status": "pass" if factor_validation["status"].eq("pass").all() else "fail",
         "transaction_cost_bps": config.transaction_cost_bps,
         "slippage_bps": config.slippage_bps,
         "benchmark": config.benchmark,
@@ -352,6 +370,9 @@ def run_analysis(config: RunConfig) -> RunResult:
         robustness=robustness,
         sensitivity=sensitivity,
         benchmark_relative=benchmark_relative,
+        factor_validation=factor_validation,
+        factor_definitions=factor_definitions,
+        data_sources=market_data.data_sources,
         metadata=metadata,
         output_paths={},
     )
@@ -366,6 +387,10 @@ def write_run_results_json(result: RunResult, path: Path) -> None:
         "benchmark_relative": result.benchmark_relative.to_dict(orient="records"),
         "sensitivity": result.sensitivity.to_dict(orient="records"),
         "recommendations": result.recommendations.to_dict(orient="records"),
+        "data_sources": result.data_sources.to_dict(orient="records"),
+        "price_sources": result.market_data.price_sources.to_dict(orient="records"),
+        "factor_validation": result.factor_validation.to_dict(orient="records"),
+        "factor_definitions": result.factor_definitions.to_dict(orient="records"),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")

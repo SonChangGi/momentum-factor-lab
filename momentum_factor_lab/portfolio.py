@@ -7,10 +7,10 @@ def balanced_weights(
     scores: pd.Series,
     top_n: int = 15,
     max_weight: float = 0.10,
-    long_only: bool = True,
+    require_positive: bool = False,
 ) -> pd.Series:
     clean = scores.dropna().sort_values(ascending=False)
-    if long_only:
+    if require_positive:
         clean = clean[clean > 0]
     selected = clean.head(top_n)
     weights = pd.Series(0.0, index=scores.index, dtype=float)

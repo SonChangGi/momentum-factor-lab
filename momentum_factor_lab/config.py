@@ -13,19 +13,27 @@ class RunConfig:
     start_date: str = "2016-01-01"
     end_date: str | None = None
     rebalance_frequency: str = "ME"
-    top_n: int = 15
+    top_n: int = 20
     max_weight: float = 0.10
     transaction_cost_bps: float = 5.0
     slippage_bps: float = 5.0
     min_history_days: int = 252
     min_avg_dollar_volume: float = 5_000_000.0
+    min_avg_volume: float = 0.0
+    min_price: float = 5.0
     stale_after_days: int = 7
     benchmark: str = "SPY"
     offline_sample: bool = True
     output_dir: Path = Path("outputs")
     report_dir: Path = Path("reports")
+    cache_dir: Path = Path(".cache/momentum_factor_lab")
+    max_price_symbols: int | None = None
+    price_chunk_size: int = 150
+    stooq_fallback_limit: int = 0
+    retry_count: int = 1
+    retry_backoff_seconds: float = 0.5
+    universe_source_mode: str = "packaged"
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
-
 
     def validate(self) -> None:
         if self.top_n < 1:
@@ -40,8 +48,24 @@ class RunConfig:
             raise ValueError("min_history_days must be at least 1")
         if self.min_avg_dollar_volume < 0:
             raise ValueError("min_avg_dollar_volume must be non-negative")
+        if self.min_avg_volume < 0:
+            raise ValueError("min_avg_volume must be non-negative")
+        if self.min_price < 0:
+            raise ValueError("min_price must be non-negative")
         if self.stale_after_days < 0:
             raise ValueError("stale_after_days must be non-negative")
+        if self.max_price_symbols is not None and self.max_price_symbols < 1:
+            raise ValueError("max_price_symbols must be at least 1 when provided")
+        if self.price_chunk_size < 1:
+            raise ValueError("price_chunk_size must be at least 1")
+        if self.stooq_fallback_limit < 0:
+            raise ValueError("stooq_fallback_limit must be non-negative")
+        if self.retry_count < 0:
+            raise ValueError("retry_count must be non-negative")
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be non-negative")
+        if self.universe_source_mode not in {"packaged", "refresh"}:
+            raise ValueError("universe_source_mode must be 'packaged' or 'refresh'")
         if not self.benchmark.strip():
             raise ValueError("benchmark must be a non-empty symbol")
         try:
@@ -64,5 +88,7 @@ class RunConfig:
         data = asdict(self)
         data["output_dir"] = str(self.output_dir)
         data["report_dir"] = str(self.report_dir)
+        data["cache_dir"] = str(self.cache_dir)
         data["total_cost_rate"] = self.total_cost_rate
+        data["candidate_universe_size"] = len(self.universe)
         return data

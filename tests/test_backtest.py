@@ -39,3 +39,13 @@ def test_rebalance_to_zero_exits_prior_position_without_leverage():
     assert result.weights.sum(axis=1).max() <= 1.0
     assert result.weights["A"].iloc[-1] == 0.0
     assert result.weights["B"].iloc[-1] == 1.0
+
+
+def test_backtest_never_holds_more_than_top_20_names():
+    dates = pd.bdate_range("2021-01-01", periods=180)
+    symbols = [f"S{i:02d}" for i in range(30)]
+    prices = pd.DataFrame({symbol: np.linspace(100, 130 + i, len(dates)) for i, symbol in enumerate(symbols)}, index=dates)
+    scores = pd.DataFrame({symbol: 100 - i for i, symbol in enumerate(symbols)}, index=dates)
+    config = RunConfig(start_date="2021-01-01", end_date="2021-09-30", top_n=20, max_weight=0.05)
+    result = run_factor_backtest(prices, scores, config, "top20")
+    assert result.weights.gt(0).sum(axis=1).max() <= 20
