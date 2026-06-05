@@ -327,6 +327,68 @@ def _recommendation_status(config: RunConfig, market_data: MarketData, selection
     return ("current_live", True)
 
 
+def _live_subset_summary(market_data: MarketData) -> tuple[bool, int | None, int | None]:
+    if "source" not in market_data.data_sources:
+        return (market_data.offline_sample, None, None)
+    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
+    if subset_rows.empty:
+        return (market_data.offline_sample, None, None)
+    latest = subset_rows.iloc[-1]
+    subset_run = bool(latest.get("subset_run", market_data.offline_sample))
+    requested = latest.get("requested_price_symbols")
+    candidates = latest.get("candidate_symbols")
+    return (
+        subset_run,
+        int(requested) if pd.notna(requested) else None,
+        int(candidates) if pd.notna(candidates) else None,
+    )
+
+
+def _has_point_in_time_universe(market_data: MarketData) -> bool:
+    if "point_in_time_universe" not in market_data.data_sources:
+        return False
+    values = market_data.data_sources["point_in_time_universe"].dropna()
+    return bool(not values.empty and values.astype(bool).all())
+
+
+def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
+    if config.min_avg_dollar_volume <= 0 and config.min_avg_volume <= 0:
+        return True
+    if market_data.volumes.empty or market_data.prices.empty:
+        return False
+    return set(market_data.prices.columns).issubset(set(market_data.volumes.columns))
+
+
+def _apply_tradability_gate(
+    config: RunConfig,
+    market_data: MarketData,
+    status: str,
+    current_available: bool,
+    subset_run: bool,
+) -> tuple[str, bool, dict[str, Any]]:
+    requirements = {
+        "fresh_live_data": current_available,
+        "full_uncapped_price_universe": not subset_run and config.max_price_symbols is None,
+        "point_in_time_universe": _has_point_in_time_universe(market_data),
+        "liquidity_filter_evidence": _has_liquidity_evidence(config, market_data),
+    }
+    blocking = [name for name, satisfied in requirements.items() if not satisfied]
+    output_type = "live_tradable_recommendations" if current_available and not blocking else "research_signals"
+    gated_available = output_type == "live_tradable_recommendations"
+    if current_available and blocking:
+        status = f"{status}_research_only_missing_{'_and_'.join(blocking)}"
+    gate = {
+        "tradability_requirements": requirements,
+        "tradability_blockers": blocking,
+        "research_only": not gated_available,
+        "recommendation_output_key": "recommendations" if gated_available else "research_signals",
+        "recommendation_output_label": "Live tradable recommendations" if gated_available else "Research signals (not tradable)",
+        "recommendation_output_sheet": "recommendations" if gated_available else "research_signals",
+        "tradable_recommendations_available": gated_available,
+    }
+    return status, gated_available, gate
+
+
 def run_analysis(config: RunConfig) -> RunResult:
     config.validate()
     market_data = load_market_data(config)
@@ -346,16 +408,23 @@ def run_analysis(config: RunConfig) -> RunResult:
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
-    status, current_available = _recommendation_status(config, market_data, selection_source)
-    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")] if "source" in market_data.data_sources else pd.DataFrame()
-    subset_run = bool(subset_rows["subset_run"].iloc[-1]) if not subset_rows.empty else market_data.offline_sample
+    status, current_available = _recommendation_status(config, market_data)
+    subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
     if subset_run and not market_data.offline_sample:
-        requested = int(subset_rows["requested_price_symbols"].iloc[-1])
-        candidates = int(subset_rows["candidate_symbols"].iloc[-1])
+        requested = requested_price_symbols if requested_price_symbols is not None else len(prices.columns)
+        candidates = candidate_symbols if candidate_symbols is not None else len(market_data.candidate_universe)
         status = f"{status}_subset_run_{requested}_of_{candidates}"
-    if not current_available and not market_data.offline_sample:
+    status, current_available, tradability_gate = _apply_tradability_gate(
+        config,
+        market_data,
+        status,
+        current_available,
+        subset_run,
+    )
+    if not current_available:
         recommendations["weight"] = 0.0
     recommendations["recommendation_status"] = status
+    recommendations["recommendation_output"] = tradability_gate["recommendation_output_key"]
     recommendations["signal_date"] = str(prices.index.max().date()) if not prices.empty else "unavailable"
     recommendations["selected_factor"] = selected_factor
     recommendations["selected_factor_selection_source"] = selection_source
@@ -369,6 +438,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         "data_as_of": str(market_data.as_of.date()) if market_data.as_of is not None else None,
         "recommendation_status": status,
         "current_recommendations_available": current_available,
+        **tradability_gate,
         "selected_factor": selected_factor,
         "validation_selected_factor": validation_selected_factor,
         "selected_factor_selection_source": selection_source,
