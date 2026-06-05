@@ -26,13 +26,14 @@ Optional live-data smoke run:
 python -m pip install -e '.[live]'
 python -m momentum_factor_lab.cli run \
   --live \
+  --selected-factor mom_12_1 \
   --max-price-symbols 80 \
   --stooq-fallback-limit 3 \
   --output-dir outputs/live-smoke \
   --report-dir reports/live-smoke
 ```
 
-Full candidate-universe live runs omit `--max-price-symbols`, but free data providers can be slow, partial, or rate-limited. Any capped run is explicitly labeled as a subset run in JSON/PDF/Excel.
+Fresh live recommendations require `--selected-factor` so the current model portfolio uses a frozen/predeclared factor rather than a factor chosen by validation performance over the same live sample. Full candidate-universe live runs omit `--max-price-symbols`, but free data providers can be slow, partial, or rate-limited. Any capped run is explicitly labeled as a subset run in JSON/PDF/Excel.
 
 ## Outputs
 
