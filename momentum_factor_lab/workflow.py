@@ -52,21 +52,43 @@ def _slice_returns(returns: pd.Series, split_at: int) -> dict[str, pd.Series]:
     }
 
 
+def _slice_series_to_returns(series: pd.Series, returns: pd.Series) -> pd.Series:
+    if series.empty or returns.empty:
+        return series.iloc[0:0]
+    return series.loc[series.index.intersection(returns.index)]
+
+
 def _metrics_for_backtests(backtests: dict[str, BacktestResult]) -> tuple[pd.DataFrame, pd.DataFrame]:
     rows = []
     robustness_rows = []
     for name, result in backtests.items():
         split_at = int(len(result.returns) * 0.70)
         slices = _slice_returns(result.returns, split_at)
-        full = metric_summary(slices["full"], result.turnover)
-        train = metric_summary(slices["train"], result.turnover)
-        validation = metric_summary(slices["validation"], result.turnover)
+        full = metric_summary(
+            slices["full"],
+            _slice_series_to_returns(result.turnover, slices["full"]),
+            _slice_series_to_returns(result.costs, slices["full"]),
+        )
+        train = metric_summary(
+            slices["train"],
+            _slice_series_to_returns(result.turnover, slices["train"]),
+            _slice_series_to_returns(result.costs, slices["train"]),
+        )
+        validation = metric_summary(
+            slices["validation"],
+            _slice_series_to_returns(result.turnover, slices["validation"]),
+            _slice_series_to_returns(result.costs, slices["validation"]),
+        )
         row = {"factor": name, **{f"full_{k}": v for k, v in full.items()}}
         row.update({f"train_{k}": v for k, v in train.items()})
         row.update({f"validation_{k}": v for k, v in validation.items()})
         rows.append(row)
         for slice_name, series in slices.items():
-            m = metric_summary(series, result.turnover)
+            m = metric_summary(
+                series,
+                _slice_series_to_returns(result.turnover, series),
+                _slice_series_to_returns(result.costs, series),
+            )
             robustness_rows.append({"factor": name, "slice": slice_name, **m})
     return pd.DataFrame(rows).set_index("factor"), pd.DataFrame(robustness_rows)
 
@@ -118,7 +140,11 @@ def _benchmark_relative_metrics(backtests: dict[str, BacktestResult], prices: pd
         aligned = pd.concat([result.returns.rename("strategy"), benchmark_returns], axis=1).dropna()
         if aligned.empty:
             continue
-        strategy_metrics = metric_summary(aligned["strategy"], result.turnover)
+        strategy_metrics = metric_summary(
+            aligned["strategy"],
+            _slice_series_to_returns(result.turnover, aligned["strategy"]),
+            _slice_series_to_returns(result.costs, aligned["strategy"]),
+        )
         benchmark_metrics = metric_summary(aligned["benchmark"])
         excess = aligned["strategy"] - aligned["benchmark"]
         tracking_error = annualized_volatility(excess)
@@ -249,7 +275,7 @@ def _parameter_sensitivity(
                 "variant_type": "factor_parameter",
                 "variant": variant,
                 "parameter_set": parameter_set,
-                **metric_summary(result.returns, result.turnover),
+                **metric_summary(result.returns, result.turnover, result.costs),
             }
         )
 
@@ -265,7 +291,7 @@ def _parameter_sensitivity(
                 "variant_type": "portfolio_parameter",
                 "variant": f"top_n_{top_n}",
                 "parameter_set": f"top_n={top_n}; max_weight={config.max_weight}",
-                **metric_summary(result.returns, result.turnover),
+                **metric_summary(result.returns, result.turnover, result.costs),
             }
         )
     for max_weight in max_weight_candidates:
@@ -278,7 +304,7 @@ def _parameter_sensitivity(
                 "variant_type": "portfolio_parameter",
                 "variant": f"max_weight_{max_weight}",
                 "parameter_set": f"top_n={config.top_n}; max_weight={max_weight}",
-                **metric_summary(result.returns, result.turnover),
+                **metric_summary(result.returns, result.turnover, result.costs),
             }
         )
     return pd.DataFrame(rows).sort_values(["variant_type", "variant"]).reset_index(drop=True)
@@ -310,6 +336,7 @@ def run_analysis(config: RunConfig) -> RunResult:
     benchmark_relative = _benchmark_relative_metrics(backtests, prices, config)
     score_components = _score_factors(metrics)
     selected_factor = str(score_components.index[0])
+    selected_metrics = metrics.loc[selected_factor]
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
@@ -353,6 +380,11 @@ def run_analysis(config: RunConfig) -> RunResult:
         "transaction_cost_bps": config.transaction_cost_bps,
         "slippage_bps": config.slippage_bps,
         "benchmark": config.benchmark,
+        "selected_factor_avg_turnover": float(selected_metrics.get("full_avg_turnover", 0.0)),
+        "selected_factor_total_turnover": float(selected_metrics.get("full_total_turnover", 0.0)),
+        "selected_factor_annualized_turnover": float(selected_metrics.get("full_annualized_turnover", 0.0)),
+        "selected_factor_total_cost": float(selected_metrics.get("full_total_cost", 0.0)),
+        "selected_factor_annualized_cost_drag": float(selected_metrics.get("full_annualized_cost_drag", 0.0)),
         "survivorship_bias_caveat": disclaimers.DATA_LIMITATIONS,
         "non_advice_disclaimer": disclaimers.NON_ADVICE,
         "live_data_gate": disclaimers.LIVE_DATA_GATE,
