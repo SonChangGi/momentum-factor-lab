@@ -15,16 +15,37 @@ from momentum_factor_lab.workflow import run_analysis, write_run_results_json
 LIQUIDITY_CAPACITY_COLUMNS = {
     "avg_share_volume_63d",
     "avg_dollar_volume_63d",
+    "price_observations_63d",
+    "volume_observations_63d",
+    "dollar_volume_observations_63d",
+    "min_liquidity_observations_required",
     "min_avg_volume_required",
     "min_avg_dollar_volume_required",
     "liquidity_evidence_status",
     "liquidity_filter_pass",
+    "proposed_weight",
+    "target_aum",
+    "max_adv_participation",
+    "target_notional",
+    "max_trade_notional_by_adv",
+    "capacity_notional_limit",
+    "capacity_aum_limit",
+    "adv_participation",
+    "capacity_utilization",
     "capacity_status",
+    "capacity_pass",
     "capacity_warning",
 }
 
 
-def _live_fixture_market_data(config: RunConfig, *, subset_run: bool, point_in_time: bool = False) -> MarketData:
+def _live_fixture_market_data(
+    config: RunConfig,
+    *,
+    subset_run: bool,
+    point_in_time: bool = False,
+    requested_symbols: int | None = None,
+    eligible_symbols: int | None = None,
+) -> MarketData:
     sample_config = replace(
         config,
         offline_sample=True,
@@ -32,7 +53,10 @@ def _live_fixture_market_data(config: RunConfig, *, subset_run: bool, point_in_t
     )
     sample = generate_offline_sample_data(sample_config)
     candidate_symbols = len(sample.candidate_universe)
-    requested_symbols = min(len(sample.prices.columns), config.max_price_symbols or len(sample.prices.columns)) if subset_run else candidate_symbols + 1
+    if requested_symbols is None:
+        requested_symbols = min(len(sample.prices.columns), config.max_price_symbols or len(sample.prices.columns)) if subset_run else len(sample.prices.columns)
+    if eligible_symbols is None:
+        eligible_symbols = len(sample.prices.columns)
     summary = pd.DataFrame(
         [
             {
@@ -41,7 +65,7 @@ def _live_fixture_market_data(config: RunConfig, *, subset_run: bool, point_in_t
                 "records": len(sample.prices.columns),
                 "candidate_symbols": candidate_symbols,
                 "requested_price_symbols": requested_symbols,
-                "eligible_price_symbols": len(sample.prices.columns),
+                "eligible_price_symbols": eligible_symbols,
                 "excluded_symbols": 0,
                 "subset_run": subset_run,
                 "point_in_time_universe": point_in_time,
@@ -208,6 +232,8 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
     )
 
     def rank_other_factor_first(metrics):
@@ -236,7 +262,8 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
     assert result.recommendations["avg_share_volume_63d"].notna().all()
     assert result.recommendations["avg_dollar_volume_63d"].notna().all()
     assert result.recommendations["liquidity_evidence_status"].eq("pass").all()
-    assert result.recommendations["capacity_status"].eq("not_estimated_missing_aum_and_participation_limit").all()
+    assert result.recommendations["capacity_status"].eq("pass").all()
+    assert result.recommendations["target_notional"].gt(0).all()
 
 
 def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
@@ -248,6 +275,8 @@ def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
     )
     monkeypatch.setattr(
         "momentum_factor_lab.workflow.load_market_data",
@@ -301,6 +330,8 @@ def test_missing_volume_data_has_explicit_liquidity_capacity_warning(tmp_path, m
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
     )
     market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
     market_data.volumes = pd.DataFrame(index=market_data.prices.index)
@@ -311,7 +342,142 @@ def test_missing_volume_data_has_explicit_liquidity_capacity_warning(tmp_path, m
     assert LIQUIDITY_CAPACITY_COLUMNS.issubset(result.recommendations.columns)
     assert result.recommendations["liquidity_evidence_status"].eq("missing_liquidity_evidence").all()
     assert not result.recommendations["liquidity_filter_pass"].any()
-    assert result.recommendations["capacity_warning"].str.contains("Capacity is not estimated").all()
+    assert result.recommendations["capacity_status"].eq("missing_or_failed_liquidity_evidence").all()
+    assert "row_level_liquidity_pass" in result.metadata["tradability_blockers"]
+    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_sparse_liquidity_observations_block_tradable_output(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    market_data.volumes.iloc[:-1, :] = pd.NA
+    market_data.volumes.iloc[-1, :] = 1_000_000_000
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert result.recommendations["volume_observations_63d"].eq(1).all()
+    assert result.recommendations["liquidity_evidence_status"].eq("insufficient_liquidity_observations").all()
+    assert "row_level_liquidity_pass" in result.metadata["tradability_blockers"]
+    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_live_tradable_output_requires_capacity_inputs(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert not result.metadata["current_recommendations_available"]
+    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
+    assert result.recommendations["capacity_status"].eq("not_estimated_missing_aum_and_participation_limit").all()
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_capacity_adv_participation_limit_blocks_tradable_output(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=10_000_000_000,
+        max_adv_participation=0.0001,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert result.recommendations["liquidity_evidence_status"].eq("pass").all()
+    assert result.recommendations["capacity_status"].eq("exceeds_adv_participation_limit").all()
+    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_small_user_universe_is_research_only_unless_approved_with_provenance(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+        universe=["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN"],
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert len(result.market_data.candidate_universe) < result.config.min_tradable_universe_size
+    assert not result.metadata["current_recommendations_available"]
+    assert "broad_or_approved_tradable_universe" in result.metadata["tradability_blockers"]
+
+
+def test_incomplete_requested_price_coverage_blocks_tradable_output(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(
+            config,
+            subset_run=False,
+            point_in_time=True,
+            requested_symbols=100,
+            eligible_symbols=24,
+        ),
+    )
+
+    result = run_analysis(config)
+
+    assert "full_uncapped_price_universe" in result.metadata["tradability_blockers"]
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
 
 
 def test_json_export_preserves_recommendation_status_and_source_contract(tmp_path):

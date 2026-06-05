@@ -12,4 +12,9 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "point-in-time universe evidence" in readme
     assert "liquidity evidence" in readme
     assert "capacity warnings" in combined
+    assert "--target-aum" in readme
+    assert "--max-adv-participation" in readme
+    assert "--min-liquidity-observations" in readme
+    assert "eligible symbols covering the requested price symbols" in methodology
+    assert "current free/public live runs are intentionally research-only" in readme
     assert "Backtest portfolios are research diagnostics" in methodology

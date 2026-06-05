@@ -36,10 +36,34 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--min-avg-volume", type=float, default=0.0)
     run.add_argument("--min-history-days", type=int, default=252)
     run.add_argument(
+        "--min-liquidity-observations",
+        type=int,
+        default=63,
+        help="Minimum non-null price/volume/dollar-volume observations required in the 63-day liquidity window",
+    )
+    run.add_argument("--target-aum", type=float, default=None, help="Target AUM used only for capacity diagnostics/gating")
+    run.add_argument(
+        "--max-adv-participation",
+        type=float,
+        default=None,
+        help="Maximum share of 63-day ADV a target position may consume before tradable output is blocked",
+    )
+    run.add_argument(
         "--selected-factor",
         default=None,
         help="Frozen/predeclared factor required for live tradable recommendations; validation rankings remain audit-only.",
     )
+    run.add_argument(
+        "--point-in-time-universe-provenance",
+        default=None,
+        help="Explicit provenance/attestation for point-in-time universe evidence; current public universes remain research-only without it.",
+    )
+    run.add_argument(
+        "--approved-tradable-universe",
+        action="store_true",
+        help="Attest that a user-supplied small universe is an approved tradable universe; still requires PIT provenance and capacity gates.",
+    )
+    run.add_argument("--min-tradable-universe-size", type=int, default=2_000)
     run.add_argument("--json", action="store_true", help="Emit machine-readable summary")
     return parser
 
@@ -65,7 +89,13 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         min_avg_volume=args.min_avg_volume,
         min_history_days=args.min_history_days,
+        min_liquidity_observations=args.min_liquidity_observations,
         selected_factor=args.selected_factor,
+        target_aum=args.target_aum,
+        max_adv_participation=args.max_adv_participation,
+        point_in_time_universe_provenance=args.point_in_time_universe_provenance,
+        approved_tradable_universe=args.approved_tradable_universe,
+        min_tradable_universe_size=args.min_tradable_universe_size,
     )
     result = write_reports(run_analysis(config))
     output_key = result.metadata["recommendation_output_key"]
@@ -73,6 +103,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         "selected_factor": result.selected_factor,
         "recommendation_status": result.metadata["recommendation_status"],
         "current_recommendations_available": result.metadata["current_recommendations_available"],
+        "fresh_live_data_available": result.metadata["fresh_live_data_available"],
         "recommendation_output": result.metadata["recommendation_output_label"],
         "data_as_of": result.metadata["data_as_of"],
         "provider": result.metadata["provider"],
@@ -92,6 +123,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         print(f"Selected factor: {summary['selected_factor']}")
         print(f"Output status: {summary['recommendation_status']}")
         print(f"Output type: {summary['recommendation_output']}")
+        print(f"Fresh live data available: {summary['fresh_live_data_available']}")
         blockers = summary["tradability_blockers"]
         print(f"Tradability blockers: {', '.join(blockers) if blockers else 'none'}")
         print(f"Liquidity/capacity: {summary['recommendation_capacity_warning']}")

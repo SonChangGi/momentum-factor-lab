@@ -57,6 +57,9 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         "eligible_price_symbols",
         "excluded_symbols",
         "subset_run",
+        "point_in_time_universe",
+        "tradable_universe_approved",
+        "universe_provenance",
         "cache_path",
         "retries",
         "error",
@@ -80,14 +83,43 @@ def _candidate_universe(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
         )
         return result.frame, result.data_sources
     frame = universe_frame_for_symbols(config.universe)
+    source_name = "packaged-default-universe" if len(frame) > len(SAMPLE_UNIVERSE) else "user-supplied-universe"
     return frame, pd.DataFrame(
         [
             {
-                "source": "packaged-default-universe" if len(frame) > len(SAMPLE_UNIVERSE) else "user-supplied-universe",
+                "source": source_name,
                 "status": "loaded",
                 "records": len(frame),
+                "candidate_symbols": len(frame),
+                "point_in_time_universe": False,
+                "tradable_universe_approved": False,
+                "universe_provenance": source_name.replace("-", " "),
                 "cache_path": "package-resource",
                 "retries": 0,
+            }
+        ]
+    )
+
+
+def _point_in_time_provenance_source(config: RunConfig, candidate: pd.DataFrame) -> pd.DataFrame:
+    if config.point_in_time_universe_provenance is None and not config.approved_tradable_universe:
+        return _source_frame([])
+    provenance = (config.point_in_time_universe_provenance or "").strip()
+    return _source_frame(
+        [
+            {
+                "source": "user-point-in-time-universe-provenance",
+                "status": "attested" if provenance else "missing_provenance",
+                "records": len(candidate),
+                "candidate_symbols": len(candidate),
+                "point_in_time_universe": bool(provenance),
+                "tradable_universe_approved": bool(config.approved_tradable_universe),
+                "universe_provenance": provenance,
+                "retries": 0,
+                "note": (
+                    "User-supplied point-in-time/tradable-universe provenance. The lab records this evidence "
+                    "for gating but does not independently validate survivorship-free historical membership."
+                ),
             }
         ]
     )
@@ -150,10 +182,13 @@ def generate_offline_sample_data(config: RunConfig) -> MarketData:
                         "eligible_price_symbols": len(symbols),
                         "excluded_symbols": 0,
                         "subset_run": True,
+                        "point_in_time_universe": False,
+                        "tradable_universe_approved": False,
                         "note": "Offline CI/sample mode uses deterministic synthetic prices while preserving broad candidate-universe metadata.",
                     }
                 ]
             ),
+            _point_in_time_provenance_source(config, candidate),
         ],
         ignore_index=True,
     )
@@ -507,6 +542,8 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "eligible_price_symbols": len(prices.columns),
                 "excluded_symbols": len(exclusions),
                 "subset_run": subset_run,
+                "point_in_time_universe": False,
+                "tradable_universe_approved": False,
                 "note": (
                     "Model-portfolio outputs are based only on eligible price symbols after history, "
                     "liquidity, and freshness filters; tradability gates decide whether rows are exported "
@@ -515,7 +552,10 @@ def download_live_data(config: RunConfig) -> MarketData:
             }
         ]
     )
-    data_sources = pd.concat([universe_sources, yf_sources, stooq_sources, summary], ignore_index=True)
+    data_sources = pd.concat(
+        [universe_sources, yf_sources, stooq_sources, summary, _point_in_time_provenance_source(config, candidate)],
+        ignore_index=True,
+    )
     return MarketData(
         prices=prices,
         volumes=volumes,

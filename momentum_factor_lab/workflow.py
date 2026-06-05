@@ -39,6 +39,36 @@ class RunResult:
     output_paths: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class TradabilityAssessment:
+    status: str
+    fresh_live_data_available: bool
+    tradable_output_available: bool
+    requirements: dict[str, bool]
+    blockers: list[str]
+    output_key: str
+    output_label: str
+    output_sheet: str
+
+    @property
+    def research_only(self) -> bool:
+        return not self.tradable_output_available
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "fresh_live_data_available": self.fresh_live_data_available,
+            "current_recommendations_available": self.tradable_output_available,
+            "tradability_requirements": self.requirements,
+            "tradability_blockers": self.blockers,
+            "research_only": self.research_only,
+            "recommendation_output_key": self.output_key,
+            "recommendation_output_label": self.output_label,
+            "recommendation_output_sheet": self.output_sheet,
+            "tradable_recommendations_available": self.tradable_output_available,
+            "tradable_output_available": self.tradable_output_available,
+        }
+
+
 def _slice_returns(returns: pd.Series, split_at: int) -> dict[str, pd.Series]:
     if returns.empty:
         return {"full": returns, "train": returns, "validation": returns, "recent": returns}
@@ -372,18 +402,51 @@ def _has_point_in_time_universe(market_data: MarketData) -> bool:
     if "point_in_time_universe" not in market_data.data_sources:
         return False
     values = market_data.data_sources["point_in_time_universe"].dropna()
-    return bool(not values.empty and values.astype(bool).all())
+    return bool(not values.empty and values.astype(bool).any())
 
 
 def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
-    if config.min_avg_dollar_volume <= 0 and config.min_avg_volume <= 0:
-        return True
     if market_data.volumes.empty or market_data.prices.empty:
         return False
     return set(market_data.prices.columns).issubset(set(market_data.volumes.columns))
 
 
+def _has_broad_or_approved_tradable_universe(config: RunConfig, market_data: MarketData) -> bool:
+    if len(market_data.candidate_universe) >= config.min_tradable_universe_size:
+        return True
+    if "tradable_universe_approved" not in market_data.data_sources:
+        return False
+    approved = market_data.data_sources["tradable_universe_approved"].dropna()
+    return bool(config.approved_tradable_universe and not approved.empty and approved.astype(bool).any())
+
+
+def _has_full_uncapped_price_universe(config: RunConfig, market_data: MarketData, subset_run: bool) -> bool:
+    if subset_run or config.max_price_symbols is not None:
+        return False
+    if "source" not in market_data.data_sources:
+        return False
+    summary = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
+    if summary.empty:
+        return False
+    latest = summary.iloc[-1]
+    requested = latest.get("requested_price_symbols")
+    eligible = latest.get("eligible_price_symbols")
+    if pd.isna(requested) or pd.isna(eligible):
+        return False
+    return int(eligible) >= int(requested)
+
+
 def _recommendation_liquidity_status(row: pd.Series, config: RunConfig) -> str:
+    required = config.min_liquidity_observations
+    observed_counts = [
+        row["price_observations_63d"],
+        row["volume_observations_63d"],
+        row["dollar_volume_observations_63d"],
+    ]
+    if any(pd.isna(count) or int(count) == 0 for count in observed_counts):
+        return "missing_liquidity_evidence"
+    if any(int(count) < required for count in observed_counts):
+        return "insufficient_liquidity_observations"
     avg_share_volume = row["avg_share_volume_63d"]
     avg_dollar_volume = row["avg_dollar_volume_63d"]
     if pd.isna(avg_share_volume) or pd.isna(avg_dollar_volume):
@@ -395,6 +458,36 @@ def _recommendation_liquidity_status(row: pd.Series, config: RunConfig) -> str:
     return "pass"
 
 
+def _recommendation_capacity_status(row: pd.Series, config: RunConfig) -> str:
+    if config.target_aum is None or config.max_adv_participation is None:
+        return "not_estimated_missing_aum_and_participation_limit"
+    if row["liquidity_evidence_status"] != "pass":
+        return "missing_or_failed_liquidity_evidence"
+    target_notional = row["target_notional"]
+    max_trade_notional = row["max_trade_notional_by_adv"]
+    if pd.isna(target_notional) or pd.isna(max_trade_notional) or max_trade_notional <= 0:
+        return "missing_capacity_evidence"
+    if target_notional <= max_trade_notional:
+        return "pass"
+    return "exceeds_adv_participation_limit"
+
+
+def _recommendation_capacity_warning(row: pd.Series) -> str:
+    status = row["capacity_status"]
+    if status == "pass":
+        return "Capacity check passed against configured target AUM and max ADV participation."
+    if status == "not_estimated_missing_aum_and_participation_limit":
+        return (
+            "Capacity is not estimated because no target AUM and max participation limit are configured; "
+            "weights are not tradable recommendations."
+        )
+    if status == "exceeds_adv_participation_limit":
+        return "Target notional exceeds the configured ADV participation limit; row is not tradable."
+    if status == "missing_or_failed_liquidity_evidence":
+        return "Capacity cannot be assessed because row-level liquidity evidence is missing or failed."
+    return "Capacity evidence is incomplete; row is not tradable."
+
+
 def _attach_recommendation_liquidity_diagnostics(
     recommendations: pd.DataFrame,
     market_data: MarketData,
@@ -403,53 +496,78 @@ def _attach_recommendation_liquidity_diagnostics(
     frame = recommendations.copy()
     prices = market_data.prices.reindex(columns=frame["symbol"]).tail(63)
     volumes = market_data.volumes.reindex(index=prices.index, columns=frame["symbol"]).tail(63)
+    dollar_volume = prices.mul(volumes)
     avg_share_volume = volumes.mean()
-    avg_dollar_volume = prices.mul(volumes).mean()
+    avg_dollar_volume = dollar_volume.mean()
 
     frame["avg_share_volume_63d"] = frame["symbol"].map(avg_share_volume).astype(float)
     frame["avg_dollar_volume_63d"] = frame["symbol"].map(avg_dollar_volume).astype(float)
+    frame["price_observations_63d"] = frame["symbol"].map(prices.count()).fillna(0).astype(int)
+    frame["volume_observations_63d"] = frame["symbol"].map(volumes.count()).fillna(0).astype(int)
+    frame["dollar_volume_observations_63d"] = frame["symbol"].map(dollar_volume.count()).fillna(0).astype(int)
+    frame["min_liquidity_observations_required"] = int(config.min_liquidity_observations)
     frame["min_avg_volume_required"] = float(config.min_avg_volume)
     frame["min_avg_dollar_volume_required"] = float(config.min_avg_dollar_volume)
     frame["liquidity_evidence_status"] = frame.apply(_recommendation_liquidity_status, axis=1, config=config)
     frame["liquidity_filter_pass"] = frame["liquidity_evidence_status"].eq("pass")
-    frame["capacity_status"] = "not_estimated_missing_aum_and_participation_limit"
-    frame["capacity_warning"] = (
-        "Capacity is not estimated because no target AUM and max participation limit are configured; "
-        "use the exported 63-day ADV fields before treating weights as scalable."
+    frame["proposed_weight"] = frame["weight"].astype(float)
+    frame["target_aum"] = float(config.target_aum) if config.target_aum is not None else np.nan
+    frame["max_adv_participation"] = float(config.max_adv_participation) if config.max_adv_participation is not None else np.nan
+    frame["target_notional"] = frame["weight"] * config.target_aum if config.target_aum is not None else np.nan
+    frame["max_trade_notional_by_adv"] = (
+        frame["avg_dollar_volume_63d"] * config.max_adv_participation if config.max_adv_participation is not None else np.nan
     )
+    frame["capacity_notional_limit"] = frame["max_trade_notional_by_adv"]
+    frame["capacity_aum_limit"] = frame["capacity_notional_limit"].divide(frame["proposed_weight"].replace(0, np.nan))
+    frame["adv_participation"] = frame["target_notional"].divide(frame["avg_dollar_volume_63d"].replace(0, np.nan))
+    frame["capacity_utilization"] = frame["target_notional"].divide(frame["max_trade_notional_by_adv"].replace(0, np.nan))
+    frame["capacity_status"] = frame.apply(_recommendation_capacity_status, axis=1, config=config)
+    frame["capacity_pass"] = frame["capacity_status"].eq("pass")
+    frame["capacity_warning"] = frame.apply(_recommendation_capacity_warning, axis=1)
     return frame
+
+
+def _row_level_liquidity_pass(recommendations: pd.DataFrame) -> bool:
+    return bool(not recommendations.empty and recommendations["liquidity_filter_pass"].astype(bool).all())
+
+
+def _row_level_capacity_pass(recommendations: pd.DataFrame) -> bool:
+    return bool(not recommendations.empty and recommendations["capacity_status"].eq("pass").all())
 
 
 def _apply_tradability_gate(
     config: RunConfig,
     market_data: MarketData,
+    recommendations: pd.DataFrame,
     status: str,
     current_available: bool,
     subset_run: bool,
     selection_source: str,
-) -> tuple[str, bool, dict[str, Any]]:
+) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
         "predeclared_selected_factor": selection_source == "predeclared",
-        "full_uncapped_price_universe": not subset_run and config.max_price_symbols is None,
+        "full_uncapped_price_universe": _has_full_uncapped_price_universe(config, market_data, subset_run),
+        "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
         "point_in_time_universe": _has_point_in_time_universe(market_data),
         "liquidity_filter_evidence": _has_liquidity_evidence(config, market_data),
+        "row_level_liquidity_pass": _row_level_liquidity_pass(recommendations),
+        "capacity_estimated_and_pass": _row_level_capacity_pass(recommendations),
     }
     blocking = [name for name, satisfied in requirements.items() if not satisfied]
-    output_type = "live_tradable_recommendations" if current_available and not blocking else "research_signals"
-    gated_available = output_type == "live_tradable_recommendations"
+    gated_available = current_available and not blocking
     if current_available and blocking:
         status = f"{status}_research_only_missing_{'_and_'.join(blocking)}"
-    gate = {
-        "tradability_requirements": requirements,
-        "tradability_blockers": blocking,
-        "research_only": not gated_available,
-        "recommendation_output_key": "recommendations" if gated_available else "research_signals",
-        "recommendation_output_label": "Live tradable recommendations" if gated_available else "Research signals (not tradable)",
-        "recommendation_output_sheet": "recommendations" if gated_available else "research_signals",
-        "tradable_recommendations_available": gated_available,
-    }
-    return status, gated_available, gate
+    return TradabilityAssessment(
+        status=status,
+        fresh_live_data_available=current_available,
+        tradable_output_available=gated_available,
+        requirements=requirements,
+        blockers=blocking,
+        output_key="recommendations" if gated_available else "research_signals",
+        output_label="Live tradable recommendations" if gated_available else "Research signals (not tradable)",
+        output_sheet="recommendations" if gated_available else "research_signals",
+    )
 
 
 def run_analysis(config: RunConfig) -> RunResult:
@@ -473,24 +591,26 @@ def run_analysis(config: RunConfig) -> RunResult:
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
     recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
-    status, current_available = _recommendation_status(config, market_data)
+    status, fresh_live_data_available = _recommendation_status(config, market_data)
     subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
     if subset_run and not market_data.offline_sample:
         requested = requested_price_symbols if requested_price_symbols is not None else len(prices.columns)
         candidates = candidate_symbols if candidate_symbols is not None else len(market_data.candidate_universe)
         status = f"{status}_subset_run_{requested}_of_{candidates}"
-    status, current_available, tradability_gate = _apply_tradability_gate(
+    tradability_assessment = _apply_tradability_gate(
         config,
         market_data,
+        recommendations,
         status,
-        current_available,
+        fresh_live_data_available,
         subset_run,
         selection_source,
     )
-    if not current_available:
+    status = tradability_assessment.status
+    if not tradability_assessment.tradable_output_available:
         recommendations["weight"] = 0.0
     recommendations["recommendation_status"] = status
-    recommendations["recommendation_output"] = tradability_gate["recommendation_output_key"]
+    recommendations["recommendation_output"] = tradability_assessment.output_key
     recommendations["signal_date"] = str(prices.index.max().date()) if not prices.empty else "unavailable"
     recommendations["selected_factor"] = selected_factor
     recommendations["selected_factor_selection_source"] = selection_source
@@ -503,8 +623,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         "live_error": market_data.live_error,
         "data_as_of": str(market_data.as_of.date()) if market_data.as_of is not None else None,
         "recommendation_status": status,
-        "current_recommendations_available": current_available,
-        **tradability_gate,
+        **tradability_assessment.to_metadata(),
         "selected_factor": selected_factor,
         "validation_selected_factor": validation_selected_factor,
         "selected_factor_selection_source": selection_source,
@@ -528,11 +647,8 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_factor_total_cost": float(selected_metrics.get("full_total_cost", 0.0)),
         "selected_factor_annualized_cost_drag": float(selected_metrics.get("full_annualized_cost_drag", 0.0)),
         "recommendation_liquidity_lookback_days": 63,
-        "recommendation_capacity_status": "not_estimated_missing_aum_and_participation_limit",
-        "recommendation_capacity_warning": (
-            "Recommendation rows include 63-day liquidity evidence, but capacity is not estimated "
-            "without target AUM and max participation inputs."
-        ),
+        "recommendation_capacity_status_counts": recommendations["capacity_status"].value_counts().to_dict(),
+        "recommendation_capacity_warning": "; ".join(sorted(set(recommendations["capacity_warning"].dropna()))),
         "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
         "survivorship_bias_caveat": disclaimers.DATA_LIMITATIONS,
         "non_advice_disclaimer": disclaimers.NON_ADVICE,

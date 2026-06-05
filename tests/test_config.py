@@ -25,6 +25,12 @@ def test_config_defaults_to_top_20_and_large_universe():
         ({"retry_count": -1}, "retry_count"),
         ({"min_price": -1}, "min_price"),
         ({"selected_factor": ""}, "selected_factor"),
+        ({"target_aum": 0}, "target_aum"),
+        ({"max_adv_participation": 0}, "max_adv_participation"),
+        ({"max_adv_participation": 1.1}, "max_adv_participation"),
+        ({"point_in_time_universe_provenance": ""}, "point_in_time_universe_provenance"),
+        ({"min_tradable_universe_size": 0}, "min_tradable_universe_size"),
+        ({"min_liquidity_observations": 0}, "min_liquidity_observations"),
     ],
 )
 def test_config_validation_rejects_invalid_risk_inputs(kwargs, message):

@@ -34,6 +34,12 @@ class RunConfig:
     retry_backoff_seconds: float = 0.5
     universe_source_mode: str = "packaged"
     selected_factor: str | None = None
+    target_aum: float | None = None
+    max_adv_participation: float | None = None
+    point_in_time_universe_provenance: str | None = None
+    approved_tradable_universe: bool = False
+    min_tradable_universe_size: int = 2_000
+    min_liquidity_observations: int = 63
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
 
     def validate(self) -> None:
@@ -69,6 +75,16 @@ class RunConfig:
             raise ValueError("universe_source_mode must be 'packaged' or 'refresh'")
         if self.selected_factor is not None and not self.selected_factor.strip():
             raise ValueError("selected_factor must be a non-empty factor name when provided")
+        if self.target_aum is not None and self.target_aum <= 0:
+            raise ValueError("target_aum must be positive when provided")
+        if self.max_adv_participation is not None and not 0 < self.max_adv_participation <= 1:
+            raise ValueError("max_adv_participation must be in (0, 1] when provided")
+        if self.point_in_time_universe_provenance is not None and not self.point_in_time_universe_provenance.strip():
+            raise ValueError("point_in_time_universe_provenance must be non-empty when provided")
+        if self.min_tradable_universe_size < 1:
+            raise ValueError("min_tradable_universe_size must be at least 1")
+        if self.min_liquidity_observations < 1:
+            raise ValueError("min_liquidity_observations must be at least 1")
         if not self.benchmark.strip():
             raise ValueError("benchmark must be a non-empty symbol")
         try:

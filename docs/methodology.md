@@ -12,12 +12,15 @@ Runtime separates:
 
 Only eligible symbols can enter factor backtests or model-portfolio output rows. Current live tradable recommendations are emitted only when all tradability requirements pass; otherwise the output is labeled `research_signals`, weights are zeroed, and reports include candidate/requested/eligible/exclusion counts, tradability blockers, liquidity evidence, and capacity warnings.
 
+The tradability gate separates live-data freshness from actual tradable output. A run must have a predeclared factor, full uncapped requested price coverage with eligible symbols covering the requested price symbols, point-in-time universe provenance, row-level liquidity pass, and row-level capacity pass. Broad packaged/refresh universes must meet the configured 2,000-symbol minimum; smaller user-supplied universes stay research-only unless explicitly marked as approved tradable universes and backed by point-in-time provenance. Row-level liquidity requires the configured minimum number of non-null 63-day price, volume, and dollar-volume observations.
+
 ## Data collection
 
 - Listing metadata can use the packaged seed or optional public-source refresh.
 - yfinance is the primary daily adjusted-price provider and is downloaded in configurable chunks.
 - Stooq daily CSV is a bounded fallback for missing symbols. It is labeled separately because close-price/adjustment semantics can differ from yfinance.
 - Source summary sheets include cache, retry, partial-failure, subset-run, and provider notes.
+- Free/public current-universe sources are not treated as survivorship-free historical membership. Point-in-time provenance can be recorded for gating, but the lab does not independently validate external membership data.
 
 ## Factor library
 
@@ -55,7 +58,7 @@ Each factor is backtested as a long-only top-20 portfolio by default. Portfolio 
 
 Factor selection uses validation-first composite scoring across Sharpe, Sortino, Calmar, max drawdown, CAGR, turnover, and train/validation stability. Benchmark-relative metrics include excess return, tracking error, information ratio, and beta to the benchmark.
 
-Backtest portfolios are research diagnostics. Live tradable recommendations require the separate tradability gate and predeclared-factor controls before rows are exported as `recommendations` rather than zero-weight `research_signals`.
+Backtest portfolios are research diagnostics. Live tradable recommendations require the separate tradability gate, predeclared-factor controls, point-in-time universe evidence, and configured capacity inputs (`target_aum` plus `max_adv_participation`) before rows are exported as `recommendations` rather than zero-weight `research_signals`.
 
 ## Reporting scalability
 
