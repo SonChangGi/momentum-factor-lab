@@ -146,3 +146,25 @@ def test_json_export_preserves_recommendation_status_and_source_contract(tmp_pat
     assert {row["signal_date"] for row in payload["recommendations"]} == {payload["metadata"]["signal_date"]}
     assert payload["data_sources"]
     assert payload["price_sources"]
+
+
+def test_json_export_preserves_selected_turnover_cost_metadata(tmp_path):
+    config = RunConfig(
+        start_date="2019-01-01",
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=True,
+    )
+    result = run_analysis(config)
+    json_path = tmp_path / "run_results.json"
+    write_run_results_json(result, json_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    metadata = payload["metadata"]
+    selected_metrics = result.metrics.loc[result.selected_factor]
+
+    assert metadata["selected_factor_avg_turnover"] == selected_metrics["full_avg_turnover"]
+    assert metadata["selected_factor_total_turnover"] == selected_metrics["full_total_turnover"]
+    assert metadata["selected_factor_annualized_turnover"] == selected_metrics["full_annualized_turnover"]
+    assert metadata["selected_factor_total_cost"] == selected_metrics["full_total_cost"]
+    assert metadata["selected_factor_annualized_cost_drag"] == selected_metrics["full_annualized_cost_drag"]
