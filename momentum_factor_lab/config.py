@@ -33,6 +33,7 @@ class RunConfig:
     retry_count: int = 1
     retry_backoff_seconds: float = 0.5
     universe_source_mode: str = "packaged"
+    selected_factor: str | None = None
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
 
     def validate(self) -> None:
@@ -66,6 +67,8 @@ class RunConfig:
             raise ValueError("retry_backoff_seconds must be non-negative")
         if self.universe_source_mode not in {"packaged", "refresh"}:
             raise ValueError("universe_source_mode must be 'packaged' or 'refresh'")
+        if self.selected_factor is not None and not self.selected_factor.strip():
+            raise ValueError("selected_factor must be a non-empty factor name when provided")
         if not self.benchmark.strip():
             raise ValueError("benchmark must be a non-empty symbol")
         try:

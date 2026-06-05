@@ -284,7 +284,37 @@ def _parameter_sensitivity(
     return pd.DataFrame(rows).sort_values(["variant_type", "variant"]).reset_index(drop=True)
 
 
-def _recommendation_status(config: RunConfig, market_data: MarketData) -> tuple[str, bool]:
+def _resolve_selected_factor(
+    config: RunConfig,
+    factor_scores: dict[str, pd.DataFrame],
+    validation_selected_factor: str,
+) -> tuple[str, str, str]:
+    if config.selected_factor is None:
+        return (
+            validation_selected_factor,
+            "validation_performance",
+            (
+                f"{validation_selected_factor} selected by validation-first composite score for "
+                "research comparison only; fresh live recommendations require a predeclared "
+                "selected_factor so current holdings are not chosen with same-sample validation performance."
+            ),
+        )
+
+    selected_factor = config.selected_factor.strip()
+    if selected_factor not in factor_scores:
+        available = ", ".join(sorted(factor_scores))
+        raise ValueError(f"selected_factor must be one of: {available}")
+    return (
+        selected_factor,
+        "predeclared",
+        (
+            f"{selected_factor} selected from the predeclared/frozen run configuration; "
+            "validation rankings are reported for audit and are not used to choose current recommendations."
+        ),
+    )
+
+
+def _recommendation_status(config: RunConfig, market_data: MarketData, selection_source: str) -> tuple[str, bool]:
     if market_data.offline_sample:
         return ("sample_offline_not_current", False)
     if market_data.as_of is None:
@@ -292,6 +322,8 @@ def _recommendation_status(config: RunConfig, market_data: MarketData) -> tuple[
     age_days = (pd.Timestamp(datetime.now(UTC).date()) - pd.Timestamp(market_data.as_of).normalize()).days
     if age_days > config.stale_after_days:
         return (f"stale_live_data_{age_days}_days_old", False)
+    if selection_source != "predeclared":
+        return ("live_selected_factor_required", False)
     return ("current_live", True)
 
 
@@ -309,11 +341,12 @@ def run_analysis(config: RunConfig) -> RunResult:
     metrics, robustness = _metrics_for_backtests(backtests)
     benchmark_relative = _benchmark_relative_metrics(backtests, prices, config)
     score_components = _score_factors(metrics)
-    selected_factor = str(score_components.index[0])
+    validation_selected_factor = str(score_components.index[0])
+    selected_factor, selection_source, selected_reason = _resolve_selected_factor(config, factor_scores, validation_selected_factor)
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
-    status, current_available = _recommendation_status(config, market_data)
+    status, current_available = _recommendation_status(config, market_data, selection_source)
     subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")] if "source" in market_data.data_sources else pd.DataFrame()
     subset_run = bool(subset_rows["subset_run"].iloc[-1]) if not subset_rows.empty else market_data.offline_sample
     if subset_run and not market_data.offline_sample:
@@ -324,12 +357,10 @@ def run_analysis(config: RunConfig) -> RunResult:
         recommendations["weight"] = 0.0
     recommendations["recommendation_status"] = status
     recommendations["signal_date"] = str(prices.index.max().date()) if not prices.empty else "unavailable"
+    recommendations["selected_factor"] = selected_factor
+    recommendations["selected_factor_selection_source"] = selection_source
 
     sensitivity = _parameter_sensitivity(prices, selected_factor, config, factor_scores[selected_factor])
-    selected_reason = (
-        f"{selected_factor} selected by validation-first composite score using OOS/fixed train-test "
-        "risk-adjusted, drawdown-aware, turnover, and stability components."
-    )
     metadata = {
         "run_timestamp_utc": datetime.now(UTC).isoformat(),
         "provider": market_data.provider,
@@ -339,6 +370,8 @@ def run_analysis(config: RunConfig) -> RunResult:
         "recommendation_status": status,
         "current_recommendations_available": current_available,
         "selected_factor": selected_factor,
+        "validation_selected_factor": validation_selected_factor,
+        "selected_factor_selection_source": selection_source,
         "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
         "selected_reason": selected_reason,
         "signal_date": str(prices.index.max().date()) if not prices.empty else None,
