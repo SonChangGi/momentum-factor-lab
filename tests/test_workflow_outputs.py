@@ -3,6 +3,7 @@ from pathlib import Path
 import openpyxl
 
 from momentum_factor_lab.config import RunConfig
+from momentum_factor_lab.data import generate_offline_sample_data
 from momentum_factor_lab.report import write_reports
 from momentum_factor_lab.workflow import run_analysis
 
@@ -52,6 +53,7 @@ def test_offline_run_generates_required_outputs(tmp_path):
     assert result.metadata["factor_count"] >= 18
     assert result.metadata["factor_validation_status"] == "pass"
     assert {"variant_type", "variant", "parameter_set"}.issubset(result.sensitivity.columns)
+    assert result.metadata["selected_factor_selection_source"] == "validation_performance"
     factor_sheet = workbook["factor_scores"]
     history_sheet = workbook["factor_score_history_top20"]
     assert factor_sheet.max_row > len(result.market_data.prices.columns)
@@ -63,3 +65,59 @@ def test_live_failure_or_offline_status_never_claims_current(tmp_path, monkeypat
     result = run_analysis(config)
     assert result.metadata["recommendation_status"] != "current_live"
     assert not result.metadata["current_recommendations_available"]
+
+
+def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(tmp_path, monkeypatch):
+    market_data = generate_offline_sample_data(RunConfig(start_date="2023-01-01"))
+    market_data.offline_sample = False
+    market_data.as_of = market_data.prices.index.max()
+
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda config: market_data)
+
+    result = run_analysis(
+        RunConfig(
+            start_date="2023-01-01",
+            end_date=str(market_data.prices.index.max().date()),
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=False,
+        )
+    )
+
+    assert result.metadata["selected_factor_selection_source"] == "validation_performance"
+    assert result.metadata["recommendation_status"] == "live_selected_factor_required"
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):
+    market_data = generate_offline_sample_data(RunConfig(start_date="2023-01-01"))
+    market_data.offline_sample = False
+    market_data.as_of = market_data.prices.index.max()
+
+    def rank_other_factor_first(metrics):
+        ranked = metrics.assign(composite_score=0.0)[["composite_score"]]
+        ranked.loc["mom_12_1", "composite_score"] = 1.0
+        return ranked.sort_values("composite_score", ascending=False)
+
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda config: market_data)
+    monkeypatch.setattr("momentum_factor_lab.workflow._score_factors", rank_other_factor_first)
+
+    result = run_analysis(
+        RunConfig(
+            start_date="2023-01-01",
+            end_date=str(market_data.prices.index.max().date()),
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=False,
+            selected_factor="mom_1m",
+        )
+    )
+
+    assert result.metadata["validation_selected_factor"] == "mom_12_1"
+    assert result.selected_factor == "mom_1m"
+    assert result.metadata["selected_factor_selection_source"] == "predeclared"
+    assert result.metadata["recommendation_status"] == "current_live"
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["selected_factor"].eq("mom_1m").all()
+    assert result.recommendations["selected_factor_selection_source"].eq("predeclared").all()

@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--min-avg-dollar-volume", type=float, default=5_000_000.0)
     run.add_argument("--min-avg-volume", type=float, default=0.0)
     run.add_argument("--min-history-days", type=int, default=252)
+    run.add_argument(
+        "--selected-factor",
+        default=None,
+        help="Frozen/predeclared factor to use for live recommendations; validation rankings remain audit-only.",
+    )
     run.add_argument("--json", action="store_true", help="Emit machine-readable summary")
     return parser
 
@@ -60,6 +65,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         min_avg_volume=args.min_avg_volume,
         min_history_days=args.min_history_days,
+        selected_factor=args.selected_factor,
     )
     result = write_reports(run_analysis(config))
     summary = {
@@ -72,6 +78,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         "eligible_price_universe_size": result.metadata["eligible_price_universe_size"],
         "factor_count": result.metadata["factor_count"],
         "factor_validation_status": result.metadata["factor_validation_status"],
+        "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
         "outputs": result.output_paths,
         "top_recommendations": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
     }
