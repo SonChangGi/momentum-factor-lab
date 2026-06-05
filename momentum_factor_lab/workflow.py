@@ -408,8 +408,9 @@ def run_analysis(config: RunConfig) -> RunResult:
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
-    status, current_available = _recommendation_status(config, market_data)
-    subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
+    status, current_available = _recommendation_status(config, market_data, selection_source)
+    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")] if "source" in market_data.data_sources else pd.DataFrame()
+    subset_run = bool(subset_rows["subset_run"].iloc[-1]) if not subset_rows.empty else market_data.offline_sample
     if subset_run and not market_data.offline_sample:
         requested = requested_price_symbols if requested_price_symbols is not None else len(prices.columns)
         candidates = candidate_symbols if candidate_symbols is not None else len(market_data.candidate_universe)
