@@ -63,9 +63,18 @@ def calmar_ratio(returns: pd.Series) -> float:
     return float(cagr(returns) / mdd)
 
 
-def metric_summary(returns: pd.Series, turnover: pd.Series | None = None) -> dict[str, float]:
+def metric_summary(
+    returns: pd.Series,
+    turnover: pd.Series | None = None,
+    costs: pd.Series | None = None,
+) -> dict[str, float]:
     returns = returns.dropna()
     mdd = max_drawdown(returns)
+    observations = float(len(returns))
+    turnover_events = turnover.dropna() if turnover is not None else pd.Series(dtype=float)
+    cost_series = costs.dropna() if costs is not None else pd.Series(dtype=float)
+    total_turnover = float(turnover_events.sum()) if not turnover_events.empty else 0.0
+    total_cost = float(cost_series.sum()) if not cost_series.empty else 0.0
     return {
         "cagr": cagr(returns),
         "annual_return": float(returns.mean() * TRADING_DAYS) if not returns.empty else 0.0,
@@ -75,6 +84,12 @@ def metric_summary(returns: pd.Series, turnover: pd.Series | None = None) -> dic
         "calmar": calmar_ratio(returns),
         "max_drawdown": mdd,
         "mdd": mdd,
-        "avg_turnover": float(turnover.mean()) if turnover is not None and not turnover.empty else 0.0,
-        "observations": float(len(returns)),
+        "avg_turnover": float(turnover_events.mean()) if not turnover_events.empty else 0.0,
+        "total_turnover": total_turnover,
+        "turnover_events": float(len(turnover_events)),
+        "annualized_turnover": total_turnover / observations * TRADING_DAYS if observations else 0.0,
+        "total_cost": total_cost,
+        "avg_daily_cost": total_cost / observations if observations else 0.0,
+        "annualized_cost_drag": total_cost / observations * TRADING_DAYS if observations else 0.0,
+        "observations": observations,
     }

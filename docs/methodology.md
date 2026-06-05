@@ -10,7 +10,7 @@ Runtime separates:
 2. **requested price universe** — candidate list after optional `--max-price-symbols` cap;
 3. **eligible price universe** — symbols with enough price history, fresh prices, minimum price, and liquidity/volume evidence.
 
-Only eligible symbols can enter factor backtests or recommendations. Reports include candidate/requested/eligible/exclusion counts and reasons.
+Only eligible symbols can enter factor backtests or model-portfolio output rows. Current live tradable recommendations are emitted only when all tradability requirements pass; otherwise the output is labeled `research_signals`, weights are zeroed, and reports include candidate/requested/eligible/exclusion counts, tradability blockers, liquidity evidence, and capacity warnings.
 
 ## Data collection
 
@@ -54,6 +54,8 @@ The runtime audit is exported to PDF, Excel, and JSON as `factor_validation`.
 Each factor is backtested as a long-only top-20 portfolio by default. Portfolio targets are generated from the previous trading day’s factor signal and applied with a one-trading-day execution delay. Turnover, transaction cost, and slippage are included.
 
 Factor selection uses validation-first composite scoring across Sharpe, Sortino, Calmar, max drawdown, CAGR, turnover, and train/validation stability. Benchmark-relative metrics include excess return, tracking error, information ratio, and beta to the benchmark.
+
+Backtest portfolios are research diagnostics. Live tradable recommendations require the separate tradability gate and predeclared-factor controls before rows are exported as `recommendations` rather than zero-weight `research_signals`.
 
 ## Reporting scalability
 

@@ -49,3 +49,15 @@ def test_backtest_never_holds_more_than_top_20_names():
     config = RunConfig(start_date="2021-01-01", end_date="2021-09-30", top_n=20, max_weight=0.05)
     result = run_factor_backtest(prices, scores, config, "top20")
     assert result.weights.gt(0).sum(axis=1).max() <= 20
+
+
+def test_turnover_cost_diagnostics_match_configured_cost_rate():
+    dates = pd.bdate_range("2021-01-01", periods=90)
+    prices = pd.DataFrame({"A": np.linspace(100, 130, len(dates)), "B": np.linspace(100, 120, len(dates))}, index=dates)
+    scores = pd.DataFrame({"A": 1.0, "B": 0.5}, index=dates)
+    config = RunConfig(transaction_cost_bps=25, slippage_bps=25, top_n=1, max_weight=1.0)
+
+    result = run_factor_backtest(prices, scores, config, "cost_rate")
+
+    assert result.turnover.sum() > 0
+    assert np.isclose(result.costs.sum(), result.turnover.sum() * config.total_cost_rate)

@@ -507,7 +507,11 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "eligible_price_symbols": len(prices.columns),
                 "excluded_symbols": len(exclusions),
                 "subset_run": subset_run,
-                "note": "Recommendations are based only on eligible price symbols after history/liquidity/freshness filters.",
+                "note": (
+                    "Model-portfolio outputs are based only on eligible price symbols after history, "
+                    "liquidity, and freshness filters; tradability gates decide whether rows are exported "
+                    "as live recommendations or zero-weight research_signals."
+                ),
             }
         ]
     )

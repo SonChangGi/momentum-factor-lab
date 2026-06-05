@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,8 +8,20 @@ import pandas as pd
 
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import MarketData, generate_offline_sample_data
-from momentum_factor_lab.report import write_reports
-from momentum_factor_lab.workflow import run_analysis
+from momentum_factor_lab.report import write_pdf, write_reports
+from momentum_factor_lab.workflow import run_analysis, write_run_results_json
+
+
+LIQUIDITY_CAPACITY_COLUMNS = {
+    "avg_share_volume_63d",
+    "avg_dollar_volume_63d",
+    "min_avg_volume_required",
+    "min_avg_dollar_volume_required",
+    "liquidity_evidence_status",
+    "liquidity_filter_pass",
+    "capacity_status",
+    "capacity_warning",
+}
 
 
 def _live_fixture_market_data(config: RunConfig, *, subset_run: bool, point_in_time: bool = False) -> MarketData:
@@ -219,3 +232,204 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
     assert result.metadata["tradability_blockers"] == []
     assert result.recommendations["selected_factor"].eq("mom_1m").all()
     assert result.recommendations["selected_factor_selection_source"].eq("predeclared").all()
+    assert LIQUIDITY_CAPACITY_COLUMNS.issubset(result.recommendations.columns)
+    assert result.recommendations["avg_share_volume_63d"].notna().all()
+    assert result.recommendations["avg_dollar_volume_63d"].notna().all()
+    assert result.recommendations["liquidity_evidence_status"].eq("pass").all()
+    assert result.recommendations["capacity_status"].eq("not_estimated_missing_aum_and_participation_limit").all()
+
+
+def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = write_reports(run_analysis(config))
+    json_path = tmp_path / "run_results.json"
+    write_run_results_json(result, json_path)
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
+
+    assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert "recommendations" in payload
+    assert "research_signals" not in payload
+    assert "recommendations" in workbook.sheetnames
+    assert "research_signals" not in workbook.sheetnames
+
+
+def test_stale_live_data_zeroes_recommendation_weights(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=1,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    market_data.as_of = pd.Timestamp("2020-01-01")
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert result.metadata["recommendation_status"].startswith("stale_live_data_")
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+    assert result.recommendations["recommendation_status"].eq(result.metadata["recommendation_status"]).all()
+    assert result.recommendations["signal_date"].eq(str(market_data.prices.index.max().date())).all()
+
+
+def test_missing_volume_data_has_explicit_liquidity_capacity_warning(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        min_avg_volume=0,
+        min_avg_dollar_volume=0,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    market_data.volumes = pd.DataFrame(index=market_data.prices.index)
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert LIQUIDITY_CAPACITY_COLUMNS.issubset(result.recommendations.columns)
+    assert result.recommendations["liquidity_evidence_status"].eq("missing_liquidity_evidence").all()
+    assert not result.recommendations["liquidity_filter_pass"].any()
+    assert result.recommendations["capacity_warning"].str.contains("Capacity is not estimated").all()
+
+
+def test_json_export_preserves_recommendation_status_and_source_contract(tmp_path):
+    config = RunConfig(
+        start_date="2019-01-01",
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=True,
+    )
+    result = run_analysis(config)
+    json_path = tmp_path / "run_results.json"
+    write_run_results_json(result, json_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    output_key = payload["metadata"]["recommendation_output_key"]
+    rows = payload[output_key]
+    recommendation_status = payload["metadata"]["recommendation_status"]
+
+    assert payload["metadata"]["current_recommendations_available"] is False
+    assert output_key == "research_signals"
+    assert rows
+    assert LIQUIDITY_CAPACITY_COLUMNS.issubset(rows[0])
+    assert {row["recommendation_status"] for row in rows} == {recommendation_status}
+    assert {row["signal_date"] for row in rows} == {payload["metadata"]["signal_date"]}
+    assert {row["capacity_status"] for row in rows} == {"not_estimated_missing_aum_and_participation_limit"}
+    assert payload["data_sources"]
+    assert payload["price_sources"]
+
+
+def test_json_export_preserves_selected_turnover_cost_metadata(tmp_path):
+    config = RunConfig(
+        start_date="2019-01-01",
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=True,
+    )
+    result = run_analysis(config)
+    json_path = tmp_path / "run_results.json"
+    write_run_results_json(result, json_path)
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    metadata = payload["metadata"]
+    selected_metrics = result.metrics.loc[result.selected_factor]
+
+    assert metadata["selected_factor_avg_turnover"] == selected_metrics["full_avg_turnover"]
+    assert metadata["selected_factor_total_turnover"] == selected_metrics["full_total_turnover"]
+    assert metadata["selected_factor_annualized_turnover"] == selected_metrics["full_annualized_turnover"]
+    assert metadata["selected_factor_total_cost"] == selected_metrics["full_total_cost"]
+    assert metadata["selected_factor_annualized_cost_drag"] == selected_metrics["full_annualized_cost_drag"]
+
+
+def test_research_only_pdf_labels_output_as_research_signals_not_recommendations(tmp_path, monkeypatch):
+    result = run_analysis(
+        RunConfig(
+            start_date="2019-01-01",
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=True,
+        )
+    )
+    text_pages: list[tuple[str, list[str]]] = []
+    table_titles: list[str] = []
+
+    def capture_text_page(pdf, title, lines):
+        text_pages.append((title, lines))
+
+    def capture_table_page(pdf, title, frame, max_rows=18):
+        table_titles.append(title)
+
+    monkeypatch.setattr("momentum_factor_lab.report._text_page", capture_text_page)
+    monkeypatch.setattr("momentum_factor_lab.report._table_page", capture_table_page)
+
+    write_pdf(result, tmp_path / "report.pdf")
+
+    executive_lines = "\n".join(text_pages[0][1])
+    assert "Output type: Research signals (not tradable)" in executive_lines
+    assert "Tradability blockers:" in executive_lines
+    assert "Liquidity/capacity:" in executive_lines
+    assert "Research signals (not tradable)" in table_titles
+    assert "Current Top-20 Recommendations" not in table_titles
+
+
+def test_report_exports_turnover_cost_diagnostic_columns(tmp_path):
+    result = write_reports(
+        run_analysis(
+            RunConfig(
+                start_date="2019-01-01",
+                output_dir=tmp_path / "outputs",
+                report_dir=tmp_path / "reports",
+                offline_sample=True,
+            )
+        )
+    )
+    workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
+    headers = [cell.value for cell in next(workbook["backtest_metrics"].iter_rows(max_row=1))]
+
+    assert {"full_total_turnover", "full_annualized_turnover", "full_total_cost", "full_annualized_cost_drag"}.issubset(headers)
+
+
+def test_liquidity_capacity_thresholds_and_counts_are_exported(tmp_path):
+    result = write_reports(
+        run_analysis(
+            RunConfig(
+                start_date="2019-01-01",
+                output_dir=tmp_path / "outputs",
+                report_dir=tmp_path / "reports",
+                offline_sample=True,
+                min_avg_volume=123,
+                min_avg_dollar_volume=456,
+            )
+        )
+    )
+    output_sheet = result.metadata["recommendation_output_sheet"]
+    workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
+    headers = [cell.value for cell in next(workbook[output_sheet].iter_rows(max_row=1))]
+
+    assert result.metadata["recommendation_liquidity_status_counts"]
+    assert LIQUIDITY_CAPACITY_COLUMNS.issubset(headers)
+    assert result.recommendations["min_avg_volume_required"].eq(123.0).all()
+    assert result.recommendations["min_avg_dollar_volume_required"].eq(456.0).all()
+    assert result.recommendations["capacity_warning"].str.contains("Capacity is not estimated").all()

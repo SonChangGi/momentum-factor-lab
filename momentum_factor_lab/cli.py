@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--selected-factor",
         default=None,
-        help="Frozen/predeclared factor to use for live recommendations; validation rankings remain audit-only.",
+        help="Frozen/predeclared factor required for live tradable recommendations; validation rankings remain audit-only.",
     )
     run.add_argument("--json", action="store_true", help="Emit machine-readable summary")
     return parser
@@ -81,6 +81,8 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         "factor_count": result.metadata["factor_count"],
         "factor_validation_status": result.metadata["factor_validation_status"],
         "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
+        "tradability_blockers": result.metadata.get("tradability_blockers", []),
+        "recommendation_capacity_warning": result.metadata.get("recommendation_capacity_warning"),
         "outputs": result.output_paths,
         f"top_{output_key}": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
     }
@@ -88,8 +90,11 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         print(json.dumps(summary, indent=2, default=str))
     else:
         print(f"Selected factor: {summary['selected_factor']}")
-        print(f"Recommendation status: {summary['recommendation_status']}")
-        print(f"Recommendation output: {summary['recommendation_output']}")
+        print(f"Output status: {summary['recommendation_status']}")
+        print(f"Output type: {summary['recommendation_output']}")
+        blockers = summary["tradability_blockers"]
+        print(f"Tradability blockers: {', '.join(blockers) if blockers else 'none'}")
+        print(f"Liquidity/capacity: {summary['recommendation_capacity_warning']}")
         print(f"Data as of: {summary['data_as_of']} via {summary['provider']}")
         print(
             "Universe: "

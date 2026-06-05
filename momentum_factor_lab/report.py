@@ -135,6 +135,8 @@ def _table_page(pdf: PdfPages, title: str, frame: pd.DataFrame, max_rows: int = 
 def write_pdf(result: RunResult, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     selected = result.selected_factor
+    blockers = result.metadata.get("tradability_blockers", [])
+    blocker_text = ", ".join(blockers) if blockers else "none"
     with PdfPages(path) as pdf:
         _text_page(
             pdf,
@@ -142,8 +144,10 @@ def write_pdf(result: RunResult, path: Path) -> None:
             [
                 f"Selected factor: {selected}",
                 f"Selection rationale: {result.selected_reason}",
-                f"Recommendation status: {result.metadata['recommendation_status']}",
-                f"Recommendation output: {result.metadata.get('recommendation_output_label', 'Recommendations')}",
+                f"Output status: {result.metadata['recommendation_status']}",
+                f"Output type: {result.metadata.get('recommendation_output_label', 'Model-portfolio output rows')}",
+                f"Tradability blockers: {blocker_text}",
+                f"Liquidity/capacity: {result.metadata.get('recommendation_capacity_warning', 'not reported')}",
                 f"Data source: {result.metadata['provider']} | data as of: {result.metadata['data_as_of']} | run: {result.metadata['run_timestamp_utc']}",
                 f"Universe: {result.metadata['candidate_universe_size']} candidates; {result.metadata['eligible_price_universe_size']} eligible price symbols; {result.metadata['excluded_symbols']} exclusions.",
                 f"Portfolio construction: {result.metadata['portfolio_construction']}",
@@ -174,7 +178,7 @@ def write_pdf(result: RunResult, path: Path) -> None:
         _table_page(pdf, "Selected-Factor Parameter Sensitivity", result.sensitivity)
         _table_page(
             pdf,
-            result.metadata.get("recommendation_output_label", "Current Top-20 Recommendations"),
+            result.metadata.get("recommendation_output_label", "Top model-portfolio output rows"),
             result.recommendations,
             max_rows=result.config.top_n,
         )
