@@ -1,3 +1,5 @@
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from datetime import UTC, datetime
 
@@ -5,9 +7,48 @@ import openpyxl
 import pandas as pd
 
 from momentum_factor_lab.config import RunConfig
-from momentum_factor_lab.data import generate_offline_sample_data
+from momentum_factor_lab.data import MarketData, generate_offline_sample_data
 from momentum_factor_lab.report import write_reports
 from momentum_factor_lab.workflow import run_analysis
+
+
+def _live_fixture_market_data(config: RunConfig, *, subset_run: bool, point_in_time: bool = False) -> MarketData:
+    sample_config = replace(
+        config,
+        offline_sample=True,
+        end_date=datetime.now(UTC).date().isoformat(),
+    )
+    sample = generate_offline_sample_data(sample_config)
+    candidate_symbols = len(sample.candidate_universe)
+    requested_symbols = min(len(sample.prices.columns), config.max_price_symbols or len(sample.prices.columns)) if subset_run else candidate_symbols + 1
+    summary = pd.DataFrame(
+        [
+            {
+                "source": "live-run-summary",
+                "status": "partial_subset" if subset_run else "full_requested_universe",
+                "records": len(sample.prices.columns),
+                "candidate_symbols": candidate_symbols,
+                "requested_price_symbols": requested_symbols,
+                "eligible_price_symbols": len(sample.prices.columns),
+                "excluded_symbols": 0,
+                "subset_run": subset_run,
+                "point_in_time_universe": point_in_time,
+            }
+        ]
+    )
+    return MarketData(
+        prices=sample.prices,
+        volumes=sample.volumes,
+        provider="test-live-data",
+        fetched_at=datetime.now(UTC),
+        as_of=sample.prices.index.max(),
+        exclusions=sample.exclusions,
+        offline_sample=False,
+        candidate_universe=sample.candidate_universe,
+        eligible_universe=sample.eligible_universe,
+        price_sources=sample.price_sources,
+        data_sources=summary,
+    )
 
 
 def test_offline_run_generates_required_outputs(tmp_path):
@@ -39,7 +80,7 @@ def test_offline_run_generates_required_outputs(tmp_path):
         "benchmark_relative",
         "selected_factor_scores",
         "selected_factor",
-        "recommendations",
+        "research_signals",
         "exclusions",
         "robustness",
         "sensitivity",
@@ -69,57 +110,54 @@ def test_live_failure_or_offline_status_never_claims_current(tmp_path, monkeypat
     assert not result.metadata["current_recommendations_available"]
 
 
-def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(tmp_path, monkeypatch):
-    market_data = generate_offline_sample_data(RunConfig(start_date="2023-01-01"))
-    market_data.offline_sample = False
-    market_data.as_of = pd.Timestamp(datetime.now(UTC).date())
-
-    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda config: market_data)
-
-    result = run_analysis(
-        RunConfig(
-            start_date="2023-01-01",
-            end_date=str(market_data.prices.index.max().date()),
-            output_dir=tmp_path / "outputs",
-            report_dir=tmp_path / "reports",
-            offline_sample=False,
-        )
+def test_subset_live_run_is_research_only_with_zero_tradable_weights(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        max_price_symbols=8,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=True),
     )
 
-    assert result.metadata["selected_factor_selection_source"] == "validation_performance"
-    assert result.metadata["recommendation_status"] == "live_selected_factor_required"
+    result = write_reports(run_analysis(config))
+
+    assert "subset_run" in result.metadata["recommendation_status"]
     assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert not result.metadata["tradable_recommendations_available"]
+    assert result.metadata["recommendation_output_key"] == "research_signals"
+    assert result.metadata["research_only"]
+    assert "full_uncapped_price_universe" in result.metadata["tradability_blockers"]
+    assert result.recommendations["weight"].sum() == 0.0
+    assert set(result.recommendations["recommendation_output"]) == {"research_signals"}
+    workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
+    assert "research_signals" in workbook.sheetnames
+    assert "recommendations" not in workbook.sheetnames
 
 
-def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):
-    market_data = generate_offline_sample_data(RunConfig(start_date="2023-01-01"))
-    market_data.offline_sample = False
-    market_data.as_of = pd.Timestamp(datetime.now(UTC).date())
-
-    def rank_other_factor_first(metrics):
-        ranked = metrics.assign(composite_score=0.0)[["composite_score"]]
-        ranked.loc["mom_12_1", "composite_score"] = 1.0
-        return ranked.sort_values("composite_score", ascending=False)
-
-    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda config: market_data)
-    monkeypatch.setattr("momentum_factor_lab.workflow._score_factors", rank_other_factor_first)
-
-    result = run_analysis(
-        RunConfig(
-            start_date="2023-01-01",
-            end_date=str(market_data.prices.index.max().date()),
-            output_dir=tmp_path / "outputs",
-            report_dir=tmp_path / "reports",
-            offline_sample=False,
-            selected_factor="mom_1m",
-        )
+def test_full_live_run_without_point_in_time_evidence_is_research_only(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=False),
     )
 
-    assert result.metadata["validation_selected_factor"] == "mom_12_1"
-    assert result.selected_factor == "mom_1m"
-    assert result.metadata["selected_factor_selection_source"] == "predeclared"
-    assert result.metadata["recommendation_status"] == "current_live"
-    assert result.metadata["current_recommendations_available"]
-    assert result.recommendations["selected_factor"].eq("mom_1m").all()
-    assert result.recommendations["selected_factor_selection_source"].eq("predeclared").all()
+    result = run_analysis(config)
+
+    assert "research_only_missing" in result.metadata["recommendation_status"]
+    assert not result.metadata["current_recommendations_available"]
+    assert "point_in_time_universe" in result.metadata["tradability_blockers"]
+    assert result.metadata["recommendation_output_key"] == "research_signals"
+    assert result.recommendations["weight"].sum() == 0.0
