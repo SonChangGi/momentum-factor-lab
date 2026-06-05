@@ -1,7 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from datetime import UTC, datetime
 
 import openpyxl
 import pandas as pd
@@ -161,3 +160,62 @@ def test_full_live_run_without_point_in_time_evidence_is_research_only(tmp_path,
     assert "point_in_time_universe" in result.metadata["tradability_blockers"]
     assert result.metadata["recommendation_output_key"] == "research_signals"
     assert result.recommendations["weight"].sum() == 0.0
+
+
+def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert result.metadata["selected_factor_selection_source"] == "validation_performance"
+    assert "research_only_missing" in result.metadata["recommendation_status"]
+    assert not result.metadata["current_recommendations_available"]
+    assert not result.metadata["tradable_recommendations_available"]
+    assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+    )
+
+    def rank_other_factor_first(metrics):
+        ranked = metrics.assign(composite_score=0.0)[["composite_score"]]
+        ranked.loc["mom_12_1", "composite_score"] = 1.0
+        return ranked.sort_values("composite_score", ascending=False)
+
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+    monkeypatch.setattr("momentum_factor_lab.workflow._score_factors", rank_other_factor_first)
+
+    result = run_analysis(config)
+
+    assert result.metadata["validation_selected_factor"] == "mom_12_1"
+    assert result.selected_factor == "mom_1m"
+    assert result.metadata["selected_factor_selection_source"] == "predeclared"
+    assert result.metadata["recommendation_status"] == "current_live"
+    assert result.metadata["current_recommendations_available"]
+    assert result.metadata["tradable_recommendations_available"]
+    assert result.metadata["tradability_blockers"] == []
+    assert result.recommendations["selected_factor"].eq("mom_1m").all()
+    assert result.recommendations["selected_factor_selection_source"].eq("predeclared").all()
