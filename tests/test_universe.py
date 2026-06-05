@@ -107,3 +107,27 @@ def test_packaged_universe_excludes_leveraged_inverse_short_products():
     assert is_excluded_instrument_name("GraniteShares 1.25x Long TSLA Daily ETF")
     assert "TSL" not in set(frame["symbol"])
     assert is_excluded_instrument_name("ProShares UltraShort QQQ")
+
+
+def test_public_universe_refresh_records_partial_source_without_pit(monkeypatch, tmp_path):
+    nasdaq_payload = "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\nAAA|AAA Corp|Q|N|N|100|N|N\nETFZ|ETFZ ETF|Q|N|N|100|Y|N\nFile Creation Time: today"
+    other_payload = "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol\nBBB|BBB Corp|N|BBB|N|100|N|BBB\nFile Creation Time: today"
+
+    def fake_fetch(url, cache_dir, cache_name, retry_count, retry_backoff_seconds, user_agent=None):
+        if cache_name == "sec_company_tickers_exchange.json":
+            return None, {"source": url, "status": "failed", "error": "HTTP Error 403: Forbidden", "retries": 0}
+        payloads = {"nasdaqlisted.txt": nasdaq_payload, "otherlisted.txt": other_payload}
+        return payloads[cache_name], {"source": url, "status": "fixture", "cache_path": str(tmp_path / cache_name), "retries": 0}
+
+    monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
+
+    result = build_public_universe_frame(cache_dir=tmp_path, user_agent="test contact@example.com")
+
+    assert list(result.frame["symbol"]) == ["AAA", "BBB"]
+    assert not result.frame["is_etf"].any()
+    summary = result.data_sources[result.data_sources["source"].eq("public-universe-refresh")].iloc[0]
+    assert summary["status"] == "partial_source_current_universe"
+    assert not bool(summary["point_in_time_universe"])
+    sec_row = result.data_sources[result.data_sources["status"].eq("failed")].iloc[0]
+    assert sec_row["records"] == 0
+    assert bool(sec_row["sec_user_agent_configured"])

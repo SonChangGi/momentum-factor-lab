@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,7 +12,7 @@ import pandas as pd
 from . import disclaimers
 from .backtest import BacktestResult, run_factor_backtest
 from .config import RunConfig
-from .data import MarketData, load_market_data
+from .data import MarketData, build_eligibility_mask, load_market_data
 from .factors import FACTOR_DESCRIPTIONS, compute_factor_scores, factor_definitions_frame, simple_momentum, total_return_momentum, validate_factor_library
 from .metrics import TRADING_DAYS, annualized_volatility, metric_summary
 from .portfolio import balanced_weights, recommendation_table
@@ -38,6 +38,8 @@ class RunResult:
     data_sources: pd.DataFrame
     metadata: dict[str, Any]
     output_paths: dict[str, str]
+    cost_stress: pd.DataFrame = field(default_factory=pd.DataFrame)
+    selection_history: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +150,29 @@ def _metrics_for_backtests(backtests: dict[str, BacktestResult]) -> tuple[pd.Dat
             )
             robustness_rows.append({"factor": name, "slice": slice_name, **m})
     return pd.DataFrame(rows).set_index("factor"), pd.DataFrame(robustness_rows)
+
+
+def _cost_stress_grid(backtests: dict[str, BacktestResult], config: RunConfig) -> pd.DataFrame:
+    scenarios = [
+        ("base_configured_cost", config.transaction_cost_bps + config.slippage_bps, "configured flat bps baseline"),
+        ("high_cost_stress", config.cost_stress_high_bps, "high flat bps stress scenario"),
+    ]
+    rows: list[dict[str, object]] = []
+    for factor, result in backtests.items():
+        turnover = float(result.turnover.sum()) if not result.turnover.empty else 0.0
+        for scenario, bps, note in scenarios:
+            rows.append(
+                {
+                    "factor": factor,
+                    "scenario": scenario,
+                    "cost_bps": float(bps),
+                    "total_turnover": turnover,
+                    "stressed_total_cost": turnover * float(bps) / 10_000.0,
+                    "base_metrics_preserved": True,
+                    "note": note,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def _percentile(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
@@ -324,10 +349,17 @@ def _parameter_sensitivity(
     selected_factor: str,
     config: RunConfig,
     base_scores: pd.DataFrame,
+    eligibility_mask: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for variant, scores, parameter_set in _selected_factor_variants(prices, selected_factor, base_scores):
-        result = run_factor_backtest(prices, scores, config, f"{selected_factor}:{variant}")
+        result = run_factor_backtest(
+            prices,
+            scores,
+            config,
+            f"{selected_factor}:{variant}",
+            eligibility_mask=eligibility_mask,
+        )
         rows.append(
             {
                 "factor": selected_factor,
@@ -343,7 +375,13 @@ def _parameter_sensitivity(
     for top_n in top_n_candidates:
         if top_n == config.top_n:
             continue
-        result = run_factor_backtest(prices, base_scores, replace(config, top_n=top_n), f"{selected_factor}:top_n_{top_n}")
+        result = run_factor_backtest(
+            prices,
+            base_scores,
+            replace(config, top_n=top_n),
+            f"{selected_factor}:top_n_{top_n}",
+            eligibility_mask=eligibility_mask,
+        )
         rows.append(
             {
                 "factor": selected_factor,
@@ -356,7 +394,13 @@ def _parameter_sensitivity(
     for max_weight in max_weight_candidates:
         if max_weight == config.max_weight:
             continue
-        result = run_factor_backtest(prices, base_scores, replace(config, max_weight=max_weight), f"{selected_factor}:max_weight_{max_weight}")
+        result = run_factor_backtest(
+            prices,
+            base_scores,
+            replace(config, max_weight=max_weight),
+            f"{selected_factor}:max_weight_{max_weight}",
+            eligibility_mask=eligibility_mask,
+        )
         rows.append(
             {
                 "factor": selected_factor,
@@ -369,33 +413,92 @@ def _parameter_sensitivity(
     return pd.DataFrame(rows).sort_values(["variant_type", "variant"]).reset_index(drop=True)
 
 
+def _walk_forward_selection_history(backtests: dict[str, BacktestResult], config: RunConfig) -> pd.DataFrame:
+    if not backtests:
+        return pd.DataFrame(columns=["selection_date", "selected_factor", "selection_window", "selection_source"])
+    index = next(iter(backtests.values())).returns.index
+    frequency = "ME" if config.rebalance_frequency == "M" else config.rebalance_frequency
+    selection_dates = pd.Series(index=index, data=index).resample(frequency).last().dropna().values
+    rows: list[dict[str, object]] = []
+    min_window = min(252, max(21, len(index) // 3))
+    for raw_date in selection_dates:
+        selection_date = pd.Timestamp(raw_date)
+        past_metrics: dict[str, float] = {}
+        for name, result in backtests.items():
+            past = result.returns.loc[result.returns.index < selection_date].tail(252)
+            if len(past) < min_window:
+                continue
+            past_metrics[name] = metric_summary(past)["sharpe"]
+        if not past_metrics:
+            continue
+        selected = max(past_metrics, key=lambda name: (past_metrics[name], name))
+        rows.append(
+            {
+                "selection_date": selection_date,
+                "selected_factor": selected,
+                "selection_source": "walk_forward",
+                "selection_window": "prior_252_trading_days",
+                "candidate_factor_count": len(past_metrics),
+                "best_prior_sharpe": past_metrics[selected],
+                "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _resolve_selected_factor(
     config: RunConfig,
     factor_scores: dict[str, pd.DataFrame],
     validation_selected_factor: str,
-) -> tuple[str, str, str]:
-    if config.selected_factor is None:
+    selection_history: pd.DataFrame | None = None,
+) -> tuple[str, str, str, bool]:
+    mode = config.effective_factor_selection_mode
+    if mode == "predeclared":
+        if config.selected_factor is None:
+            raise ValueError("factor_selection_mode='predeclared' requires --selected-factor")
+        selected_factor = config.selected_factor.strip()
+        if selected_factor not in factor_scores:
+            available = ", ".join(sorted(factor_scores))
+            raise ValueError(f"selected_factor must be one of: {available}")
         return (
-            validation_selected_factor,
-            "validation_performance",
+            selected_factor,
+            "predeclared",
             (
-                f"{validation_selected_factor} selected by validation-first composite score for "
-                "research comparison only; fresh live recommendations require a predeclared "
-                "selected_factor so current holdings are not chosen with same-sample validation performance."
+                f"{selected_factor} selected from the predeclared/frozen run configuration; "
+                "validation rankings are reported for audit and are not used to choose current recommendations."
             ),
+            False,
         )
-
-    selected_factor = config.selected_factor.strip()
-    if selected_factor not in factor_scores:
-        available = ", ".join(sorted(factor_scores))
-        raise ValueError(f"selected_factor must be one of: {available}")
+    if mode == "walk_forward":
+        if selection_history is None or selection_history.empty:
+            return (
+                validation_selected_factor,
+                "walk_forward_insufficient_history",
+                (
+                    "Walk-forward mode was requested but insufficient prior-window history was available; "
+                    "the validation-selected factor is reported as research-only."
+                ),
+                True,
+            )
+        selected_factor = str(selection_history.iloc[-1]["selected_factor"])
+        return (
+            selected_factor,
+            "walk_forward",
+            (
+                f"{selected_factor} selected by frozen walk-forward policy using only prior windows; "
+                "validation rankings are reported separately for audit."
+            ),
+            False,
+        )
     return (
-        selected_factor,
-        "predeclared",
+        validation_selected_factor,
+        "research_validation",
         (
-            f"{selected_factor} selected from the predeclared/frozen run configuration; "
-            "validation rankings are reported for audit and are not used to choose current recommendations."
+            f"{validation_selected_factor} selected by validation-first composite score for "
+            "research comparison only; fresh live recommendations require a predeclared or walk-forward "
+            "selected factor so current holdings are not chosen with same-sample validation performance."
         ),
+        True,
     )
 
 
@@ -427,11 +530,25 @@ def _live_subset_summary(market_data: MarketData) -> tuple[bool, int | None, int
     )
 
 
+def _user_universe_provenance_rows(market_data: MarketData) -> pd.DataFrame:
+    required = {"source", "point_in_time_universe", "universe_provenance"}
+    if not required.issubset(market_data.data_sources.columns):
+        return pd.DataFrame()
+    provenance_rows = market_data.data_sources[
+        market_data.data_sources["source"].eq("user-point-in-time-universe-provenance")
+    ]
+    if provenance_rows.empty:
+        return provenance_rows
+    provenance = provenance_rows["universe_provenance"].fillna("").astype(str).str.strip()
+    return provenance_rows[provenance.ne("")]
+
+
 def _has_point_in_time_universe(market_data: MarketData) -> bool:
-    if "point_in_time_universe" not in market_data.data_sources:
+    provenance_rows = _user_universe_provenance_rows(market_data)
+    if provenance_rows.empty:
         return False
-    values = market_data.data_sources["point_in_time_universe"].dropna()
-    return bool(not values.empty and values.astype(bool).any())
+    attested = provenance_rows["point_in_time_universe"].fillna(False).astype(bool)
+    return bool(attested.any())
 
 
 def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
@@ -446,10 +563,13 @@ def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
 def _has_broad_or_approved_tradable_universe(config: RunConfig, market_data: MarketData) -> bool:
     if len(market_data.candidate_universe) >= config.min_tradable_universe_size:
         return True
-    if "tradable_universe_approved" not in market_data.data_sources:
+    if not config.approved_tradable_universe:
         return False
-    approved = market_data.data_sources["tradable_universe_approved"].dropna()
-    return bool(config.approved_tradable_universe and not approved.empty and approved.astype(bool).any())
+    provenance_rows = _user_universe_provenance_rows(market_data)
+    if provenance_rows.empty or "tradable_universe_approved" not in provenance_rows:
+        return False
+    approved = provenance_rows["tradable_universe_approved"].fillna(False).astype(bool)
+    return bool(approved.any())
 
 
 def _has_full_uncapped_price_universe(config: RunConfig, market_data: MarketData, subset_run: bool) -> bool:
@@ -575,10 +695,10 @@ def _apply_tradability_gate(
     current_available: bool,
     subset_run: bool,
     selection_source: str,
-) -> TradabilityAssessment:
+    ) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "predeclared_selected_factor": selection_source == "predeclared",
+        "predeclared_selected_factor": selection_source in {"predeclared", "walk_forward"},
         "full_uncapped_price_universe": _has_full_uncapped_price_universe(config, market_data, subset_run),
         "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
         "point_in_time_universe": _has_point_in_time_universe(market_data),
@@ -612,17 +732,33 @@ def run_analysis(config: RunConfig) -> RunResult:
     factor_scores = compute_factor_scores(analysis_prices)
     factor_validation = validate_factor_library(analysis_prices)
     factor_definitions = factor_definitions_frame()
+    eligibility_mask = build_eligibility_mask(
+        analysis_prices,
+        market_data.volumes.reindex(index=analysis_prices.index, columns=analysis_prices.columns),
+        config,
+    )
     backtests = {
-        name: run_factor_backtest(analysis_prices, scores, config, name)
+        name: run_factor_backtest(analysis_prices, scores, config, name, eligibility_mask=eligibility_mask)
         for name, scores in factor_scores.items()
     }
     metrics, robustness = _metrics_for_backtests(backtests)
+    cost_stress = _cost_stress_grid(backtests, config)
     benchmark_relative = _benchmark_relative_metrics(backtests, prices, config)
     score_components = _score_factors(metrics)
     validation_selected_factor = str(score_components.index[0])
-    selected_factor, selection_source, selected_reason = _resolve_selected_factor(config, factor_scores, validation_selected_factor)
+    selection_history = _walk_forward_selection_history(backtests, config) if config.effective_factor_selection_mode == "walk_forward" else pd.DataFrame()
+    selected_factor, selection_source, selected_reason, same_sample_blocked = _resolve_selected_factor(
+        config,
+        factor_scores,
+        validation_selected_factor,
+        selection_history,
+    )
     selected_metrics = metrics.loc[selected_factor]
-    latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
+    latest_signal_date = analysis_prices.index.max()
+    latest_scores = factor_scores[selected_factor].loc[latest_signal_date]
+    if latest_signal_date in eligibility_mask.index:
+        latest_scores = latest_scores.where(eligibility_mask.loc[latest_signal_date])
+    latest_scores = latest_scores.dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
     recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
@@ -650,7 +786,13 @@ def run_analysis(config: RunConfig) -> RunResult:
     recommendations["selected_factor"] = selected_factor
     recommendations["selected_factor_selection_source"] = selection_source
 
-    sensitivity = _parameter_sensitivity(analysis_prices, selected_factor, config, factor_scores[selected_factor])
+    sensitivity = _parameter_sensitivity(
+        analysis_prices,
+        selected_factor,
+        config,
+        factor_scores[selected_factor],
+        eligibility_mask=eligibility_mask,
+    )
     metadata = {
         "run_timestamp_utc": datetime.now(UTC).isoformat(),
         "provider": market_data.provider,
@@ -661,12 +803,20 @@ def run_analysis(config: RunConfig) -> RunResult:
         **tradability_assessment.to_metadata(),
         "selected_factor": selected_factor,
         "validation_selected_factor": validation_selected_factor,
+        "factor_selection_mode": config.effective_factor_selection_mode,
         "selected_factor_selection_source": selection_source,
+        "selected_factor_selection_window": config.selection_window,
+        "selection_window": config.selection_window,
+        "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
+        "same_sample_selection_blocked_for_tradable": same_sample_blocked,
         "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
         "selected_reason": selected_reason,
         "signal_date": str(analysis_prices.index.max().date()) if not analysis_prices.empty else None,
         "execution_delay": "one trading day after signal/rebalance schedule",
         "portfolio_construction": f"long-only top-{config.top_n} factor portfolios at each rebalance, max weight {config.max_weight:.2%}",
+        "universe_profile": config.universe_profile,
+        "universe_source_mode": config.universe_source_mode,
+        "point_in_time_universe": _has_point_in_time_universe(market_data),
         "candidate_universe_size": len(market_data.candidate_universe),
         "eligible_price_universe_size": len(analysis_prices.columns),
         "fetched_price_symbol_count": len(prices.columns),
@@ -678,6 +828,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         "factor_validation_status": "pass" if factor_validation["status"].eq("pass").all() else "fail",
         "transaction_cost_bps": config.transaction_cost_bps,
         "slippage_bps": config.slippage_bps,
+        "cost_stress_high_bps": config.cost_stress_high_bps,
         "benchmark": normalize_symbol(config.benchmark),
         "selected_factor_avg_turnover": float(selected_metrics.get("full_avg_turnover", 0.0)),
         "selected_factor_total_turnover": float(selected_metrics.get("full_total_turnover", 0.0)),
@@ -688,6 +839,10 @@ def run_analysis(config: RunConfig) -> RunResult:
         "recommendation_capacity_status_counts": recommendations["capacity_status"].value_counts().to_dict(),
         "recommendation_capacity_warning": "; ".join(sorted(set(recommendations["capacity_warning"].dropna()))),
         "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
+        "multiple_testing_warning": (
+            "Many explainable momentum factors are compared; validation, predeclared/walk-forward selection, "
+            "and multiple-testing/data-snooping warnings are required before treating outputs as investable."
+        ),
         "survivorship_bias_caveat": disclaimers.DATA_LIMITATIONS,
         "non_advice_disclaimer": disclaimers.NON_ADVICE,
         "live_data_gate": disclaimers.LIVE_DATA_GATE,
@@ -710,6 +865,8 @@ def run_analysis(config: RunConfig) -> RunResult:
         data_sources=market_data.data_sources,
         metadata=metadata,
         output_paths={},
+        cost_stress=cost_stress,
+        selection_history=selection_history,
     )
 
 
@@ -722,6 +879,8 @@ def write_run_results_json(result: RunResult, path: Path) -> None:
         "score_components": result.score_components.reset_index(names="factor").to_dict(orient="records"),
         "benchmark_relative": result.benchmark_relative.to_dict(orient="records"),
         "sensitivity": result.sensitivity.to_dict(orient="records"),
+        "cost_stress": result.cost_stress.to_dict(orient="records"),
+        "selection_history": result.selection_history.to_dict(orient="records"),
         output_key: result.recommendations.to_dict(orient="records"),
         "data_sources": result.data_sources.to_dict(orient="records"),
         "price_sources": result.market_data.price_sources.to_dict(orient="records"),

@@ -61,3 +61,38 @@ def test_turnover_cost_diagnostics_match_configured_cost_rate():
 
     assert result.turnover.sum() > 0
     assert np.isclose(result.costs.sum(), result.turnover.sum() * config.total_cost_rate)
+
+
+def test_backtest_applies_eligibility_mask_at_signal_date_before_selection():
+    dates = pd.bdate_range("2021-01-01", periods=90)
+    prices = pd.DataFrame({"A": np.linspace(100, 140, len(dates)), "B": np.linspace(100, 120, len(dates))}, index=dates)
+    scores = pd.DataFrame({"A": 10.0, "B": 1.0}, index=dates)
+    eligibility = pd.DataFrame(True, index=dates, columns=prices.columns)
+    first_rebalance = pd.Series(index=dates, data=dates).resample("ME").last().dropna().iloc[0]
+    first_signal = dates[dates.get_loc(first_rebalance) - 1]
+    eligibility.loc[first_signal, "A"] = False
+    config = RunConfig(start_date="2021-01-01", end_date="2021-05-01", top_n=1, max_weight=1.0)
+
+    result = run_factor_backtest(prices, scores, config, "eligible", eligibility)
+
+    first_weight_day = result.weights.index[result.weights.sum(axis=1).gt(0)][0]
+    assert result.weights.loc[first_weight_day, "A"] == 0.0
+    assert result.weights.loc[first_weight_day, "B"] == 1.0
+
+
+def test_drifted_turnover_differs_from_naive_target_turnover_when_prices_move():
+    dates = pd.bdate_range("2021-01-01", periods=160)
+    prices = pd.DataFrame(
+        {
+            "A": np.r_[np.linspace(100, 120, 80), np.linspace(120, 240, 80)],
+            "B": np.r_[np.linspace(100, 110, 80), np.linspace(110, 90, 80)],
+        },
+        index=dates,
+    )
+    scores = pd.DataFrame({"A": 1.0, "B": 0.9}, index=dates)
+    config = RunConfig(start_date="2021-01-01", end_date="2021-08-31", top_n=2, max_weight=0.5)
+
+    result = run_factor_backtest(prices, scores, config, "drift")
+
+    assert result.turnover.sum() != result.naive_turnover.sum()
+    assert not result.pre_trade_weights.empty

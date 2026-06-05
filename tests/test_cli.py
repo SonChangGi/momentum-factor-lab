@@ -26,7 +26,10 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
                 "eligible_price_universe_size": 6,
                 "factor_count": 22,
                 "factor_validation_status": "pass",
+                "universe_profile": config.universe_profile,
+                "factor_selection_mode": config.effective_factor_selection_mode,
                 "selected_factor_selection_source": "predeclared",
+                "same_sample_selection_blocked_for_tradable": False,
                 "tradability_blockers": ["test"],
                 "recommendation_capacity_warning": "test warning",
             },
@@ -43,8 +46,22 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
             "--live",
             "--universe",
             "SPY,QQQ,AAPL,MSFT,NVDA,AMZN",
+            "--universe-profile",
+            "aggressive_stock_only",
+            "--universe-source-mode",
+            "refresh",
             "--selected-factor",
             "mom_1m",
+            "--factor-selection-mode",
+            "predeclared",
+            "--selection-window",
+            "policy-v1",
+            "--frozen-policy-path",
+            str(tmp_path / "policy.json"),
+            "--cost-stress-high-bps",
+            "75",
+            "--sec-user-agent",
+            "momentum-factor-lab-test contact@example.com",
             "--target-aum",
             "100000",
             "--max-adv-participation",
@@ -68,6 +85,16 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
     config = captured["config"]
 
     assert summary["fresh_live_data_available"]
+    assert summary["universe_profile"] == "aggressive_stock_only"
+    assert summary["factor_selection_mode"] == "predeclared"
+    assert not summary["same_sample_selection_blocked_for_tradable"]
+    assert config.universe_profile == "aggressive_stock_only"
+    assert config.universe_source_mode == "refresh"
+    assert config.factor_selection_mode == "predeclared"
+    assert config.selection_window == "policy-v1"
+    assert config.frozen_policy_path == tmp_path / "policy.json"
+    assert config.cost_stress_high_bps == 75
+    assert config.sec_user_agent == "momentum-factor-lab-test contact@example.com"
     assert config.target_aum == 100_000
     assert config.max_adv_participation == 0.05
     assert config.point_in_time_universe_provenance == "test PIT source as-of 2026-06-05"

@@ -26,7 +26,7 @@ The tradability gate separates live-data freshness from actual tradable output. 
 
 ## Factor library
 
-The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 22 factors:
+The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 55 factors:
 
 - traditional skipped return: 12-1, 9-1, 6-1;
 - recent momentum: 3m, 1m;
@@ -42,7 +42,12 @@ The factor registry is `FactorSpec` based. Each factor has a name, category, for
 - low-vol momentum;
 - relative-strength percentile;
 - trend quality;
-- gap-resistant clipped-return momentum.
+- gap-resistant clipped-return momentum;
+- robust median/winsorized variants;
+- volatility/downside/ulcer-adjusted variants;
+- moving-average slope/stack variants;
+- multiple breakout and acceleration horizons;
+- range-position and path-efficiency quality variants.
 
 ## Formula validation
 

@@ -9,7 +9,11 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     combined = f"{readme}\n{methodology}\n{pyproject}\n{disclaimers}"
 
     assert "research_signals" in combined
+    assert "recommendations" in combined
+    assert "factor_validation" in combined
+    assert "factor_score_history_top20" in combined
     assert "zero weights" in combined or "weights are zeroed" in combined
+    assert "row-level liquidity/capacity" in combined
     assert "Live tradable recommendations require `--selected-factor`" in readme
     assert "point-in-time universe evidence" in readme
     assert "liquidity evidence" in readme

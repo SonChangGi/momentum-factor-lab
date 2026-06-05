@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -16,6 +18,15 @@ SEC_COMPANY_TICKERS_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_ex
 NASDAQ_LISTED_URL = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NASDAQ_OTHER_LISTED_URL = "http://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 USER_AGENT = "momentum-factor-lab/0.1 free-public-data research"
+SEC_USER_AGENT_ENV = "MOMENTUM_FACTOR_LAB_SEC_USER_AGENT"
+
+
+def effective_user_agent(user_agent: str | None = None) -> str:
+    return (
+        (user_agent or "").strip()
+        or os.environ.get(SEC_USER_AGENT_ENV, "").strip()
+        or USER_AGENT
+    )
 
 CORE_STOCK_SAMPLE_SYMBOLS = [
     "AAPL",
@@ -335,6 +346,7 @@ def _fetch_text_with_cache(
     cache_name: str,
     retry_count: int,
     retry_backoff_seconds: float,
+    user_agent: str | None = None,
 ) -> tuple[str | None, dict[str, object]]:
     cache_path = cache_dir / cache_name if cache_dir is not None else None
     if cache_path is not None and cache_path.exists():
@@ -347,7 +359,7 @@ def _fetch_text_with_cache(
     last_error = None
     for attempt in range(retry_count + 1):
         try:
-            with urlopen(Request(url, headers={"User-Agent": USER_AGENT}), timeout=30) as response:
+            with urlopen(Request(url, headers={"User-Agent": effective_user_agent(user_agent)}), timeout=30) as response:
                 text = response.read().decode("utf-8", errors="replace")
             if cache_path is not None:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,9 +388,11 @@ def build_public_universe_frame(
     cache_dir: Path | None = None,
     retry_count: int = 1,
     retry_backoff_seconds: float = 0.5,
+    user_agent: str | None = None,
 ) -> UniverseSourceResult:
     frames: list[pd.DataFrame] = []
     source_rows: list[dict[str, object]] = []
+    request_user_agent = effective_user_agent(user_agent)
     fetches = [
         (SEC_COMPANY_TICKERS_EXCHANGE_URL, "sec_company_tickers_exchange.json", parse_sec_company_tickers_exchange),
         (
@@ -401,7 +415,20 @@ def build_public_universe_frame(
         ),
     ]
     for url, cache_name, parser in fetches:
-        text, source = _fetch_text_with_cache(url, cache_dir, cache_name, retry_count, retry_backoff_seconds)
+        fetch_kwargs = {"user_agent": request_user_agent} if "user_agent" in inspect.signature(_fetch_text_with_cache).parameters else {}
+        text, source = _fetch_text_with_cache(
+            url,
+            cache_dir,
+            cache_name,
+            retry_count,
+            retry_backoff_seconds,
+            **fetch_kwargs,
+        )
+        source = {
+            **source,
+            "sec_user_agent_configured": request_user_agent != USER_AGENT,
+            "sec_user_agent_env": SEC_USER_AGENT_ENV,
+        }
         if text is None:
             source_rows.append({**source, "records": 0})
             continue
@@ -418,6 +445,10 @@ def build_public_universe_frame(
                         "source": "packaged-default-universe",
                         "status": "fallback_after_public_source_failure",
                         "records": len(packaged),
+                        "candidate_symbols": len(packaged),
+                        "point_in_time_universe": False,
+                        "tradable_universe_approved": False,
+                        "universe_provenance": "packaged stock-only fallback after public source failure",
                     },
                     *source_rows,
                 ]
@@ -426,7 +457,22 @@ def build_public_universe_frame(
     combined = _merge_universe_sources(pd.concat(frames, ignore_index=True))
     combined = combined.sort_values(["is_etf", "symbol"], ascending=[True, True])
     combined = stock_only_universe_frame(combined)
-    return UniverseSourceResult(combined, pd.DataFrame(source_rows))
+    failed = any(str(row.get("status")) == "failed" for row in source_rows)
+    summary_status = "partial_source_current_universe" if failed else "loaded_current_universe"
+    summary = {
+        "source": "public-universe-refresh",
+        "status": summary_status,
+        "records": len(combined),
+        "candidate_symbols": len(combined),
+        "point_in_time_universe": False,
+        "tradable_universe_approved": False,
+        "universe_provenance": "current public Nasdaq/SEC symbol directories; not historical PIT membership",
+        "note": (
+            "Public refresh files are current-universe discovery inputs. SEC/Nasdaq failures are recorded "
+            "as partial-source status and never imply survivorship-free point-in-time provenance."
+        ),
+    }
+    return UniverseSourceResult(combined, pd.DataFrame([summary, *source_rows]))
 
 
 def _merge_universe_sources(frame: pd.DataFrame) -> pd.DataFrame:

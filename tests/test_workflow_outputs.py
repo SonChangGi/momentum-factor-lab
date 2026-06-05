@@ -78,6 +78,26 @@ def _live_fixture_market_data(
             }
         ]
     )
+    if point_in_time:
+        summary = pd.concat(
+            [
+                summary,
+                pd.DataFrame(
+                    [
+                        {
+                            "source": "user-point-in-time-universe-provenance",
+                            "status": "attested",
+                            "records": candidate_symbols,
+                            "candidate_symbols": candidate_symbols,
+                            "point_in_time_universe": True,
+                            "tradable_universe_approved": bool(config.approved_tradable_universe),
+                            "universe_provenance": "test PIT membership provenance as-of fixture date",
+                        }
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
     return MarketData(
         prices=sample.prices,
         volumes=sample.volumes,
@@ -126,6 +146,15 @@ def test_offline_run_generates_required_outputs(tmp_path):
         "exclusions",
         "robustness",
         "sensitivity",
+        "status_panel",
+        "factor_family_leaderboard",
+        "factor_overlap_top20",
+        "regime_performance",
+        "tradability_gate",
+        "universe_provenance",
+        "liquidity_capacity",
+        "cost_stress",
+        "selection_history",
     }
     assert required.issubset(set(workbook.sheetnames))
     assert result.metadata["recommendation_status"] == "sample_offline_not_current"
@@ -148,10 +177,10 @@ def test_offline_run_generates_required_outputs(tmp_path):
         assert {"SPY", "QQQ"}.isdisjoint(set(backtest.weights.columns))
     assert not result.benchmark_relative.empty
     assert set(result.benchmark_relative["benchmark"]) == {"SPY"}
-    assert result.metadata["factor_count"] >= 18
+    assert result.metadata["factor_count"] >= 55
     assert result.metadata["factor_validation_status"] == "pass"
     assert {"variant_type", "variant", "parameter_set"}.issubset(result.sensitivity.columns)
-    assert result.metadata["selected_factor_selection_source"] == "validation_performance"
+    assert result.metadata["selected_factor_selection_source"] == "research_validation"
     factor_sheet = workbook["factor_scores"]
     history_sheet = workbook["factor_score_history_top20"]
     assert factor_sheet.max_row > len(result.market_data.eligible_universe)
@@ -306,6 +335,33 @@ def test_full_live_run_without_point_in_time_evidence_is_research_only(tmp_path,
     assert result.recommendations["weight"].sum() == 0.0
 
 
+def test_current_live_source_flag_never_satisfies_point_in_time_gate(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=False)
+    market_data.data_sources.loc[
+        market_data.data_sources["source"].eq("live-run-summary"),
+        ["point_in_time_universe", "universe_provenance"],
+    ] = [True, "current live source/profile as-of run date"]
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert result.metadata["tradability_requirements"]["point_in_time_universe"] is False
+    assert "point_in_time_universe" in result.metadata["tradability_blockers"]
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
 def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
@@ -322,12 +378,47 @@ def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(
 
     result = run_analysis(config)
 
-    assert result.metadata["selected_factor_selection_source"] == "validation_performance"
+    assert result.metadata["selected_factor_selection_source"] == "research_validation"
     assert "research_only_missing" in result.metadata["recommendation_status"]
     assert not result.metadata["current_recommendations_available"]
     assert not result.metadata["tradable_recommendations_available"]
     assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
     assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_validation_ranked_factor_exports_research_signals_not_recommendations(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = write_reports(run_analysis(config))
+
+    assert result.metadata["selected_factor_selection_source"] == "research_validation"
+    assert result.metadata["recommendation_output_key"] == "research_signals"
+    assert not result.metadata["tradable_recommendations_available"]
+    assert result.metadata["tradability_blockers"] == ["predeclared_selected_factor"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+    payload = json.loads(Path(result.output_paths["json"]).read_text(encoding="utf-8"))
+    assert "research_signals" in payload
+    assert "recommendations" not in payload
+    assert {row["selected_factor_selection_source"] for row in payload["research_signals"]} == {"research_validation"}
+    assert {row["weight"] for row in payload["research_signals"]} == {0.0}
+
+    workbook = openpyxl.load_workbook(Path(result.output_paths["xlsx"]), read_only=True)
+    assert "research_signals" in workbook.sheetnames
+    assert "recommendations" not in workbook.sheetnames
 
 
 def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):
@@ -358,7 +449,9 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
 
     assert result.metadata["validation_selected_factor"] == "mom_12_1"
     assert result.selected_factor == "mom_1m"
+    assert result.metadata["factor_selection_mode"] == "predeclared"
     assert result.metadata["selected_factor_selection_source"] == "predeclared"
+    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
     assert result.metadata["recommendation_status"] == "current_live"
     assert result.metadata["current_recommendations_available"]
     assert result.metadata["tradable_recommendations_available"]
@@ -391,12 +484,25 @@ def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path
     )
 
     result = write_reports(run_analysis(config))
-    json_path = tmp_path / "run_results.json"
-    write_run_results_json(result, json_path)
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    for kind, output_path in result.output_paths.items():
+        path = Path(output_path)
+        assert path.exists()
+        assert path.parent in {config.output_dir, config.report_dir}
+        if kind == "json":
+            assert path.name.startswith("run_results_")
+            assert path.suffix == ".json"
+        elif kind == "pdf":
+            assert path.name.startswith("momentum_factor_report_")
+            assert path.suffix == ".pdf"
+        elif kind == "xlsx":
+            assert path.name.startswith("momentum_factor_analysis_")
+            assert path.suffix == ".xlsx"
+
+    payload = json.loads(Path(result.output_paths["json"]).read_text(encoding="utf-8"))
     workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
 
     assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert payload["metadata"]["recommendation_output_key"] == "recommendations"
     assert "recommendations" in payload
     assert "research_signals" not in payload
     assert "recommendations" in workbook.sheetnames
@@ -557,6 +663,72 @@ def test_small_user_universe_is_research_only_unless_approved_with_provenance(tm
     assert "broad_or_approved_tradable_universe" in result.metadata["tradability_blockers"]
 
 
+def test_current_source_approval_cannot_label_small_universe_tradable(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+        universe=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"],
+        approved_tradable_universe=True,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    market_data.data_sources.loc[
+        market_data.data_sources["source"].eq("user-point-in-time-universe-provenance"),
+        "tradable_universe_approved",
+    ] = False
+    market_data.data_sources.loc[
+        market_data.data_sources["source"].eq("live-run-summary"),
+        ["tradable_universe_approved", "universe_provenance"],
+    ] = [True, "current source/profile approval is not user universe provenance"]
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert result.metadata["tradability_requirements"]["point_in_time_universe"] is True
+    assert result.metadata["tradability_requirements"]["broad_or_approved_tradable_universe"] is False
+    assert "broad_or_approved_tradable_universe" in result.metadata["tradability_blockers"]
+    assert result.metadata["recommendation_output_label"] == "Research signals (not tradable)"
+    assert result.metadata["recommendation_output_key"] == "research_signals"
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_small_user_universe_with_approved_provenance_can_use_tradable_labels(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+        universe=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"],
+        approved_tradable_universe=True,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert len(result.market_data.candidate_universe) < result.config.min_tradable_universe_size
+    assert result.metadata["tradability_blockers"] == []
+    assert result.metadata["recommendation_output_label"] == "Live tradable recommendations"
+    assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert result.metadata["current_recommendations_available"]
+    assert result.metadata["tradable_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
+
+
 def test_incomplete_requested_price_coverage_blocks_tradable_output(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
@@ -667,6 +839,52 @@ def test_research_only_pdf_labels_output_as_research_signals_not_recommendations
     assert "Current Top-20 Recommendations" not in table_titles
 
 
+def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+    result = run_analysis(config)
+    text_pages: list[tuple[str, list[str]]] = []
+    table_pages: dict[str, pd.DataFrame] = {}
+
+    def capture_text_page(pdf, title, lines):
+        text_pages.append((title, lines))
+
+    def capture_table_page(pdf, title, frame, max_rows=18):
+        table_pages[title] = frame
+
+    monkeypatch.setattr("momentum_factor_lab.report._text_page", capture_text_page)
+    monkeypatch.setattr("momentum_factor_lab.report._table_page", capture_table_page)
+
+    write_pdf(result, tmp_path / "report.pdf")
+
+    executive_lines = "\n".join(text_pages[0][1])
+    output_title = "Live tradable recommendations"
+    assert f"Output type: {output_title}" in executive_lines
+    assert "Tradability blockers: none" in executive_lines
+    assert output_title in table_pages
+    assert "Research signals (not tradable)" not in table_pages
+    assert {
+        "recommendation_status",
+        "signal_date",
+        "recommendation_output",
+        "selected_factor_selection_source",
+    }.issubset(table_pages[output_title].columns)
+    assert LIQUIDITY_CAPACITY_COLUMNS.issubset(table_pages[output_title].columns)
+
+
 def test_report_exports_turnover_cost_diagnostic_columns(tmp_path):
     result = write_reports(
         run_analysis(
@@ -706,3 +924,70 @@ def test_liquidity_capacity_thresholds_and_counts_are_exported(tmp_path):
     assert result.recommendations["min_avg_volume_required"].eq(123.0).all()
     assert result.recommendations["min_avg_dollar_volume_required"].eq(456.0).all()
     assert result.recommendations["capacity_warning"].str.contains("Capacity is not estimated").all()
+
+
+
+def test_research_validation_mode_records_same_sample_blocker(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        factor_selection_mode="research_validation",
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert result.metadata["factor_selection_mode"] == "research_validation"
+    assert result.metadata["selected_factor_selection_source"] == "research_validation"
+    assert result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
+def test_walk_forward_mode_records_prior_window_selection_history(tmp_path):
+    result = run_analysis(
+        RunConfig(
+            start_date="2019-01-01",
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=True,
+            factor_selection_mode="walk_forward",
+        )
+    )
+
+    assert result.metadata["factor_selection_mode"] == "walk_forward"
+    assert result.metadata["selected_factor_selection_source"] == "walk_forward"
+    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert not result.selection_history.empty
+    assert result.selection_history["selection_source"].eq("walk_forward").all()
+
+
+def test_cost_stress_export_is_separate_from_base_metrics(tmp_path):
+    result = write_reports(
+        run_analysis(
+            RunConfig(
+                start_date="2019-01-01",
+                output_dir=tmp_path / "outputs",
+                report_dir=tmp_path / "reports",
+                offline_sample=True,
+                cost_stress_high_bps=75,
+            )
+        )
+    )
+    json_path = tmp_path / "run_results.json"
+    write_run_results_json(result, json_path)
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
+
+    assert "cost_stress" in workbook.sheetnames
+    assert "cost_stress" in payload
+    scenarios = {row["scenario"] for row in payload["cost_stress"]}
+    assert {"base_configured_cost", "high_cost_stress"}.issubset(scenarios)
+    assert result.metrics.loc[result.selected_factor, "full_total_cost"] == result.metadata["selected_factor_total_cost"]

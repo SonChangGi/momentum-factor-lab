@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import pandas as pd
 
+from .metrics import metric_summary
 from .workflow import RunResult, write_run_results_json
 
 EXCEL_ROW_LIMIT = 1_048_576
@@ -37,6 +38,122 @@ def _latest_factor_scores_frame(result: RunResult) -> pd.DataFrame:
     if len(frame) >= EXCEL_ROW_LIMIT:
         frame = frame.sort_values(["factor", "score"], ascending=[True, False]).groupby("factor").head(5_000)
     return frame
+
+
+def _status_panel_frame(result: RunResult) -> pd.DataFrame:
+    fields = [
+        "recommendation_status",
+        "recommendation_output_label",
+        "research_only",
+        "tradable_output_available",
+        "universe_profile",
+        "universe_source_mode",
+        "factor_selection_mode",
+        "selected_factor",
+        "validation_selected_factor",
+        "selected_factor_selection_source",
+        "same_sample_selection_blocked_for_tradable",
+        "point_in_time_universe",
+        "subset_run",
+        "candidate_universe_size",
+        "eligible_price_universe_size",
+        "multiple_testing_warning",
+    ]
+    return pd.DataFrame(
+        [{"field": field, "value": result.metadata.get(field)} for field in fields],
+        columns=["field", "value"],
+    )
+
+
+def _factor_family_leaderboard_frame(result: RunResult) -> pd.DataFrame:
+    definitions = result.factor_definitions[["factor", "category"]].copy()
+    scores = result.score_components.reset_index(names="factor")
+    merged = definitions.merge(scores, on="factor", how="left")
+    if merged.empty:
+        return pd.DataFrame(columns=["category", "best_factor", "best_composite_score", "factor_count"])
+    rows = []
+    for category, group in merged.groupby("category", dropna=False):
+        ranked = group.sort_values("composite_score", ascending=False)
+        best = ranked.iloc[0]
+        rows.append(
+            {
+                "category": category,
+                "best_factor": best["factor"],
+                "best_composite_score": best.get("composite_score"),
+                "factor_count": len(group),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("best_composite_score", ascending=False)
+
+
+def _factor_overlap_top20_frame(result: RunResult) -> pd.DataFrame:
+    if result.selected_factor not in result.factor_scores:
+        return pd.DataFrame(columns=["factor", "overlap_with_selected_top20", "consensus_symbols"])
+    selected_top = set(result.factor_scores[result.selected_factor].iloc[-1].dropna().sort_values(ascending=False).head(20).index)
+    rows = []
+    symbol_counts: dict[str, int] = {}
+    for factor, scores in result.factor_scores.items():
+        top = list(scores.iloc[-1].dropna().sort_values(ascending=False).head(20).index)
+        for symbol in top:
+            symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+        rows.append(
+            {
+                "factor": factor,
+                "overlap_with_selected_top20": len(selected_top.intersection(top)),
+                "top20_symbols": ", ".join(top),
+            }
+        )
+    consensus = ", ".join(symbol for symbol, _ in sorted(symbol_counts.items(), key=lambda item: (-item[1], item[0]))[:20])
+    frame = pd.DataFrame(rows).sort_values("overlap_with_selected_top20", ascending=False)
+    frame["consensus_symbols"] = consensus
+    return frame
+
+
+def _regime_performance_frame(result: RunResult) -> pd.DataFrame:
+    regimes = [
+        ("2016_2019", "2016-01-01", "2019-12-31"),
+        ("2020", "2020-01-01", "2020-12-31"),
+        ("2021_2022", "2021-01-01", "2022-12-31"),
+        ("2023_current", "2023-01-01", None),
+    ]
+    rows: list[dict[str, object]] = []
+    for factor, backtest in result.backtests.items():
+        for regime, start, end in regimes:
+            returns = backtest.returns.loc[start:end] if end else backtest.returns.loc[start:]
+            if returns.empty:
+                continue
+            turnover = backtest.turnover.loc[backtest.turnover.index.intersection(returns.index)]
+            costs = backtest.costs.loc[backtest.costs.index.intersection(returns.index)]
+            rows.append({"factor": factor, "regime": regime, **metric_summary(returns, turnover, costs)})
+    return pd.DataFrame(rows)
+
+
+def _tradability_gate_frame(result: RunResult) -> pd.DataFrame:
+    requirements = result.metadata.get("tradability_requirements", {}) or {}
+    blockers = set(result.metadata.get("tradability_blockers", []) or [])
+    return pd.DataFrame(
+        [
+            {"requirement": name, "passed": bool(passed), "blocking": name in blockers}
+            for name, passed in requirements.items()
+        ],
+        columns=["requirement", "passed", "blocking"],
+    )
+
+
+def _liquidity_capacity_frame(result: RunResult) -> pd.DataFrame:
+    columns = [
+        "rank",
+        "symbol",
+        "proposed_weight",
+        "avg_share_volume_63d",
+        "avg_dollar_volume_63d",
+        "liquidity_evidence_status",
+        "capacity_status",
+        "capacity_warning",
+        "adv_participation",
+        "capacity_utilization",
+    ]
+    return result.recommendations[[col for col in columns if col in result.recommendations]].copy()
 
 
 def _factor_history_top_frame(result: RunResult) -> pd.DataFrame:
@@ -77,6 +194,15 @@ def write_excel(result: RunResult, path: Path) -> None:
         result.market_data.price_sources.to_excel(writer, sheet_name="price_sources", index=False)
         result.factor_definitions.to_excel(writer, sheet_name="factor_definitions", index=False)
         result.factor_validation.to_excel(writer, sheet_name="factor_validation", index=False)
+        _status_panel_frame(result).to_excel(writer, sheet_name="status_panel", index=False)
+        _factor_family_leaderboard_frame(result).to_excel(writer, sheet_name="factor_family_leaderboard", index=False)
+        _factor_overlap_top20_frame(result).to_excel(writer, sheet_name="factor_overlap_top20", index=False)
+        _regime_performance_frame(result).to_excel(writer, sheet_name="regime_performance", index=False)
+        _tradability_gate_frame(result).to_excel(writer, sheet_name="tradability_gate", index=False)
+        result.data_sources.to_excel(writer, sheet_name="universe_provenance", index=False)
+        _liquidity_capacity_frame(result).to_excel(writer, sheet_name="liquidity_capacity", index=False)
+        result.cost_stress.to_excel(writer, sheet_name="cost_stress", index=False)
+        result.selection_history.to_excel(writer, sheet_name="selection_history", index=False)
         _latest_factor_scores_frame(result).to_excel(writer, sheet_name="factor_scores", index=False)
         _factor_history_top_frame(result).to_excel(writer, sheet_name="factor_score_history_top20", index=False)
         selected_scores.rename("selected_factor_score").to_frame().rename_axis("symbol").reset_index().to_excel(
@@ -161,7 +287,12 @@ def write_pdf(result: RunResult, path: Path) -> None:
         )
         _table_page(pdf, "Data Sources and Coverage", result.data_sources)
         _table_page(pdf, "Symbol-level Price Sources", result.market_data.price_sources, max_rows=24)
-        _table_page(pdf, "Factor Definitions", result.factor_definitions[["factor", "category", "formula"]], max_rows=22)
+        _table_page(pdf, "Tradability Gate Checklist", _tradability_gate_frame(result))
+        _table_page(pdf, "Universe Source / Provenance Dashboard", result.data_sources)
+        _table_page(pdf, "Factor Family Leaderboard", _factor_family_leaderboard_frame(result))
+        _table_page(pdf, "Factor Overlap / Top-20 Consensus", _factor_overlap_top20_frame(result))
+        _table_page(pdf, "Cost Stress Scenarios", result.cost_stress)
+        _table_page(pdf, "Factor Definitions", result.factor_definitions[["factor", "category", "formula"]], max_rows=45)
         _table_page(pdf, "Factor Validation Audit", result.factor_validation[["factor", "status", "finite_coverage", "no_lookahead_check"]], max_rows=24)
         metric_cols = ["validation_sharpe", "validation_sortino", "validation_calmar", "validation_max_drawdown", "full_avg_turnover"]
         _table_page(pdf, "Factor Comparison — Validation and Risk Metrics", result.metrics[metric_cols].reset_index(names="factor"))

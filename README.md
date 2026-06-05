@@ -8,7 +8,7 @@ Practical momentum factor research/backtesting lab for broad US individual stock
 - Supports optional public-source refresh from SEC company tickers and Nasdaq Trader symbol directories.
 - User-supplied `--universe` symbols are fail-closed: they are intersected with packaged/public stock metadata, so unknown symbol-only inputs are not assumed to be individual stocks.
 - Downloads daily adjusted prices from yfinance in chunks, with bounded Stooq fallback and source/provenance reporting; benchmark ETF prices may be fetched only for benchmark-relative metrics.
-- Compares **22 explainable momentum factors** across traditional, recent, composite, trend, risk-adjusted, drawdown, breakout, reversal, acceleration, consistency, and robust-return families.
+- Compares **55 explainable momentum factors** across traditional, recent, composite, trend, risk-adjusted, drawdown, breakout, reversal, acceleration, consistency, and robust-return families.
 - Backtests each factor as a long-only **top-20 portfolio** at each rebalance with one-day execution delay and transaction/slippage assumptions.
 - Selects a best factor using validation-first risk-adjusted scoring, not in-sample return alone.
 - Generates a readable PDF report and Excel workbook with data-source coverage, factor formulas, validation audit, benchmark-relative metrics, sensitivity, robustness, and gated model-portfolio outputs: live tradable recommendations only when all tradability gates pass, otherwise zero-weight research signals with row-level liquidity and capacity evidence.

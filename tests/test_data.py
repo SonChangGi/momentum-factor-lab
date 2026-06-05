@@ -116,3 +116,59 @@ def test_provider_summary_marks_cached_stooq_as_mixed():
     )
     assert _provider_label_from_sources(stooq_sources) == "yfinance-free-public-data+stooq-fallback"
     assert _provider_label_from_sources(pd.DataFrame()) == "yfinance-free-public-data"
+
+
+def test_build_eligibility_mask_uses_rebalance_date_liquidity_and_history():
+    from momentum_factor_lab.data import build_eligibility_mask
+
+    dates = pd.bdate_range("2024-01-01", periods=80)
+    prices = pd.DataFrame(
+        {
+            "GOOD": np.linspace(20, 30, len(dates)),
+            "LATE": [np.nan] * 30 + list(np.linspace(20, 25, 50)),
+            "LOWP": np.linspace(1, 2, len(dates)),
+            "ILLIQ": np.linspace(20, 21, len(dates)),
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame(
+        {
+            "GOOD": 1_000_000,
+            "LATE": 1_000_000,
+            "LOWP": 1_000_000,
+            "ILLIQ": 10,
+        },
+        index=dates,
+    )
+    config = RunConfig(
+        min_history_days=40,
+        min_price=5,
+        min_avg_dollar_volume=1_000_000,
+        min_liquidity_observations=20,
+    )
+
+    mask = build_eligibility_mask(prices, volumes, config)
+
+    assert mask.loc[dates[45], "GOOD"]
+    assert not mask.loc[dates[45], "LATE"]
+    assert mask.loc[dates[-1], "LATE"]
+    assert not mask["LOWP"].any()
+    assert not mask["ILLIQ"].any()
+
+
+def test_aggressive_profile_lowers_endpoint_discovery_not_configured_gate():
+    dates = pd.bdate_range("2024-01-01", periods=260)
+    prices = pd.DataFrame({"MID": np.linspace(10, 12, len(dates))}, index=dates)
+    volumes = pd.DataFrame({"MID": 150_000}, index=dates)  # about $1.8m ADV, below default $5m.
+    candidate = _candidate_frame(["MID"])
+    aggressive = RunConfig(universe_profile="aggressive_stock_only", min_avg_dollar_volume=5_000_000)
+    large = RunConfig(universe_profile="large_liquid", min_avg_dollar_volume=5_000_000)
+
+    aggressive_prices, _, aggressive_eligible, _ = _eligible_filter(prices, volumes, candidate, aggressive)
+    large_prices, _, large_eligible, _ = _eligible_filter(prices, volumes, candidate, large)
+
+    assert list(aggressive_prices.columns) == ["MID"]
+    assert list(aggressive_eligible["symbol"]) == ["MID"]
+    assert large_prices.empty
+    assert large_eligible.empty
+    assert aggressive.min_avg_dollar_volume == 5_000_000

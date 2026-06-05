@@ -23,7 +23,7 @@ def test_synthetic_2000_symbol_all_factor_top20_scale_and_report(tmp_path):
     returns = style_drift + common + idiosyncratic
     prices = pd.DataFrame(50 * np.exp(np.cumsum(returns, axis=0)), index=dates, columns=cols)
     scores = compute_factor_scores(prices)
-    assert len(scores) >= 18
+    assert len(scores) >= 55
     config = RunConfig(start_date="2023-01-02", end_date="2024-03-22", top_n=20, max_weight=0.05)
     backtests = {
         name: run_factor_backtest(prices, factor_scores, config, name)

@@ -8,6 +8,9 @@ def test_config_defaults_to_top_20_and_large_stock_only_universe():
     config = RunConfig()
     packaged = load_packaged_universe_frame()
     assert config.top_n == 20
+    assert config.universe_profile == "large_liquid"
+    assert config.factor_selection_mode == "research_validation"
+    assert config.effective_factor_selection_mode == "research_validation"
     assert len(config.universe) >= 2000
     assert len(packaged) >= 2000
     assert not packaged["is_etf"].any()
@@ -35,9 +38,28 @@ def test_config_defaults_to_top_20_and_large_stock_only_universe():
         ({"point_in_time_universe_provenance": ""}, "point_in_time_universe_provenance"),
         ({"min_tradable_universe_size": 0}, "min_tradable_universe_size"),
         ({"min_liquidity_observations": 0}, "min_liquidity_observations"),
+        ({"universe_profile": "all_assets"}, "universe_profile"),
+        ({"factor_selection_mode": "best_live"}, "factor_selection_mode"),
+        ({"selection_window": ""}, "selection_window"),
+        ({"cost_stress_high_bps": -1}, "cost_stress_high_bps"),
+        ({"sec_user_agent": ""}, "sec_user_agent"),
     ],
 )
 def test_config_validation_rejects_invalid_risk_inputs(kwargs, message):
     config = RunConfig(**kwargs)
     with pytest.raises(ValueError, match=message):
         config.validate()
+
+
+def test_selected_factor_defaults_to_predeclared_effective_mode():
+    config = RunConfig(selected_factor="mom_1m")
+
+    assert config.factor_selection_mode == "research_validation"
+    assert config.effective_factor_selection_mode == "predeclared"
+
+
+def test_aggressive_profile_lowers_discovery_threshold_only():
+    config = RunConfig(universe_profile="aggressive_stock_only", min_avg_dollar_volume=5_000_000)
+
+    assert config.discovery_min_avg_dollar_volume == 1_000_000
+    assert config.min_avg_dollar_volume == 5_000_000

@@ -81,27 +81,48 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
 
 
 def _candidate_universe(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if config.universe_source_mode == "refresh" and not config.offline_sample:
+    refresh_requested = config.universe_source_mode == "refresh" or config.universe_profile in {
+        "extended_current",
+        "aggressive_stock_only",
+    }
+    if refresh_requested and not config.offline_sample:
         result = build_public_universe_frame(
             cache_dir=config.cache_dir / "universe",
             retry_count=config.retry_count,
             retry_backoff_seconds=config.retry_backoff_seconds,
+            user_agent=config.sec_user_agent,
         )
-        return result.frame, result.data_sources
+        data_sources = result.data_sources.copy()
+        data_sources["universe_profile"] = config.universe_profile
+        data_sources["universe_source_mode"] = "refresh"
+        data_sources["point_in_time_universe"] = False
+        data_sources["tradable_universe_approved"] = False
+        return result.frame, data_sources
     frame = universe_frame_for_symbols(config.universe)
     source_name = "packaged-default-universe" if len(frame) > len(SAMPLE_UNIVERSE) else "user-supplied-universe"
+    status = "loaded"
+    note = None
+    if refresh_requested and config.offline_sample:
+        status = "packaged_fallback_for_offline_profile"
+        note = (
+            "Offline/sample mode keeps the reproducible packaged stock-only universe; current refresh "
+            "profiles remain research-only unless run live and supplied PIT evidence."
+        )
     return frame, pd.DataFrame(
         [
             {
                 "source": source_name,
-                "status": "loaded",
+                "status": status,
                 "records": len(frame),
                 "candidate_symbols": len(frame),
                 "point_in_time_universe": False,
                 "tradable_universe_approved": False,
                 "universe_provenance": source_name.replace("-", " "),
+                "universe_profile": config.universe_profile,
+                "universe_source_mode": config.universe_source_mode,
                 "cache_path": "package-resource",
                 "retries": 0,
+                "note": note,
             }
         ]
     )
@@ -446,6 +467,30 @@ def _apply_stooq_fallback(
     return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
 
 
+def build_eligibility_mask(
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    config: RunConfig,
+    *,
+    liquidity_window: int = 63,
+) -> pd.DataFrame:
+    prices = prices.sort_index()
+    volumes = volumes.reindex(index=prices.index, columns=prices.columns)
+    price_observations = prices.notna().rolling(config.min_history_days, min_periods=1).sum()
+    history_ok = price_observations >= config.min_history_days
+    price_ok = prices >= config.min_price
+    volume_observations = volumes.notna().rolling(liquidity_window, min_periods=1).sum()
+    volume_obs_ok = volume_observations >= config.min_liquidity_observations
+    avg_volume = volumes.rolling(liquidity_window, min_periods=1).mean()
+    dollar_volume = prices.mul(volumes)
+    avg_dollar = dollar_volume.rolling(liquidity_window, min_periods=1).mean()
+    volume_ok = avg_volume >= config.min_avg_volume if config.min_avg_volume > 0 else pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    dollar_ok = avg_dollar >= config.min_avg_dollar_volume if config.min_avg_dollar_volume > 0 else pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    fresh_ok = prices.notna()
+    mask = history_ok & price_ok & volume_obs_ok & volume_ok & dollar_ok & fresh_ok
+    return mask.fillna(False).astype(bool)
+
+
 def _eligible_filter(
     prices: pd.DataFrame,
     volumes: pd.DataFrame,
@@ -495,7 +540,7 @@ def _eligible_filter(
             if avg_volume < config.min_avg_volume:
                 exclusions.append({"symbol": symbol, "reason": "below average share-volume filter", "observed": avg_volume})
                 continue
-            if avg_dollar < config.min_avg_dollar_volume:
+            if avg_dollar < config.discovery_min_avg_dollar_volume:
                 exclusions.append({"symbol": symbol, "reason": "below average dollar-volume filter", "observed": avg_dollar})
                 continue
         keep.append(raw_symbol)

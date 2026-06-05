@@ -32,7 +32,13 @@ class RunConfig:
     stooq_fallback_limit: int = 0
     retry_count: int = 1
     retry_backoff_seconds: float = 0.5
+    cost_stress_high_bps: float = 50.0
+    sec_user_agent: str | None = None
     universe_source_mode: str = "packaged"
+    universe_profile: str = "large_liquid"
+    factor_selection_mode: str = "research_validation"
+    selection_window: str = "validation_split_70_30"
+    frozen_policy_path: Path | None = None
     selected_factor: str | None = None
     target_aum: float | None = None
     max_adv_participation: float | None = None
@@ -73,6 +79,16 @@ class RunConfig:
             raise ValueError("retry_backoff_seconds must be non-negative")
         if self.universe_source_mode not in {"packaged", "refresh"}:
             raise ValueError("universe_source_mode must be 'packaged' or 'refresh'")
+        if self.universe_profile not in {"large_liquid", "extended_current", "aggressive_stock_only"}:
+            raise ValueError("universe_profile must be large_liquid, extended_current, or aggressive_stock_only")
+        if self.factor_selection_mode not in {"research_validation", "predeclared", "walk_forward"}:
+            raise ValueError("factor_selection_mode must be research_validation, predeclared, or walk_forward")
+        if not self.selection_window.strip():
+            raise ValueError("selection_window must be non-empty")
+        if self.cost_stress_high_bps < 0:
+            raise ValueError("cost_stress_high_bps must be non-negative")
+        if self.sec_user_agent is not None and not self.sec_user_agent.strip():
+            raise ValueError("sec_user_agent must be non-empty when provided")
         if self.selected_factor is not None and not self.selected_factor.strip():
             raise ValueError("selected_factor must be a non-empty factor name when provided")
         if self.target_aum is not None and self.target_aum <= 0:
@@ -96,6 +112,18 @@ class RunConfig:
             raise ValueError("start_date must be on or before end_date")
 
     @property
+    def effective_factor_selection_mode(self) -> str:
+        if self.factor_selection_mode == "research_validation" and self.selected_factor is not None:
+            return "predeclared"
+        return self.factor_selection_mode
+
+    @property
+    def discovery_min_avg_dollar_volume(self) -> float:
+        if self.universe_profile == "aggressive_stock_only":
+            return min(self.min_avg_dollar_volume, 1_000_000.0)
+        return self.min_avg_dollar_volume
+
+    @property
     def total_cost_rate(self) -> float:
         return (self.transaction_cost_bps + self.slippage_bps) / 10_000.0
 
@@ -110,4 +138,8 @@ class RunConfig:
         data["cache_dir"] = str(self.cache_dir)
         data["total_cost_rate"] = self.total_cost_rate
         data["candidate_universe_size"] = len(self.universe)
+        data["effective_factor_selection_mode"] = self.effective_factor_selection_mode
+        data["discovery_min_avg_dollar_volume"] = self.discovery_min_avg_dollar_volume
+        if self.frozen_policy_path is not None:
+            data["frozen_policy_path"] = str(self.frozen_policy_path)
         return data

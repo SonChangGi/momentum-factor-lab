@@ -24,6 +24,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--cache-dir", default=".cache/momentum_factor_lab")
     run.add_argument("--universe", default=None, help="Comma-separated symbols; omitted uses packaged 2,000+ universe")
     run.add_argument("--universe-source-mode", choices=["packaged", "refresh"], default="packaged")
+    run.add_argument(
+        "--universe-profile",
+        choices=["large_liquid", "extended_current", "aggressive_stock_only"],
+        default="large_liquid",
+        help="Candidate-universe profile; refresh/current profiles remain research-only without PIT evidence.",
+    )
     run.add_argument("--top-n", type=int, default=20)
     run.add_argument("--max-weight", type=float, default=0.10)
     run.add_argument("--max-price-symbols", type=int, default=None, help="Optional live/smoke cap; reports are marked subset when used")
@@ -31,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--stooq-fallback-limit", type=int, default=0)
     run.add_argument("--retry-count", type=int, default=1)
     run.add_argument("--retry-backoff-seconds", type=float, default=0.5)
+    run.add_argument("--cost-stress-high-bps", type=float, default=50.0)
+    run.add_argument(
+        "--sec-user-agent",
+        default=None,
+        help="SEC EDGAR User-Agent/contact string; can also be set with MOMENTUM_FACTOR_LAB_SEC_USER_AGENT.",
+    )
     run.add_argument("--min-price", type=float, default=5.0)
     run.add_argument("--min-avg-dollar-volume", type=float, default=5_000_000.0)
     run.add_argument("--min-avg-volume", type=float, default=0.0)
@@ -53,6 +65,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Frozen/predeclared factor required for live tradable recommendations; validation rankings remain audit-only.",
     )
+    run.add_argument(
+        "--factor-selection-mode",
+        choices=["research_validation", "predeclared", "walk_forward"],
+        default="research_validation",
+        help="How the selected factor is controlled for anti-overfit gating.",
+    )
+    run.add_argument("--selection-window", default="validation_split_70_30")
+    run.add_argument("--frozen-policy-path", default=None)
     run.add_argument(
         "--point-in-time-universe-provenance",
         default=None,
@@ -78,6 +98,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         offline_sample=not args.live,
         universe=normalize_symbols(args.universe),
         universe_source_mode=args.universe_source_mode,
+        universe_profile=args.universe_profile,
         top_n=args.top_n,
         max_weight=args.max_weight,
         max_price_symbols=args.max_price_symbols,
@@ -85,11 +106,16 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         stooq_fallback_limit=args.stooq_fallback_limit,
         retry_count=args.retry_count,
         retry_backoff_seconds=args.retry_backoff_seconds,
+        cost_stress_high_bps=args.cost_stress_high_bps,
+        sec_user_agent=args.sec_user_agent,
         min_price=args.min_price,
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         min_avg_volume=args.min_avg_volume,
         min_history_days=args.min_history_days,
         min_liquidity_observations=args.min_liquidity_observations,
+        factor_selection_mode=args.factor_selection_mode,
+        selection_window=args.selection_window,
+        frozen_policy_path=Path(args.frozen_policy_path) if args.frozen_policy_path else None,
         selected_factor=args.selected_factor,
         target_aum=args.target_aum,
         max_adv_participation=args.max_adv_participation,
@@ -111,7 +137,10 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         "eligible_price_universe_size": result.metadata["eligible_price_universe_size"],
         "factor_count": result.metadata["factor_count"],
         "factor_validation_status": result.metadata["factor_validation_status"],
+        "universe_profile": result.metadata["universe_profile"],
+        "factor_selection_mode": result.metadata["factor_selection_mode"],
         "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
+        "same_sample_selection_blocked_for_tradable": result.metadata["same_sample_selection_blocked_for_tradable"],
         "tradability_blockers": result.metadata.get("tradability_blockers", []),
         "recommendation_capacity_warning": result.metadata.get("recommendation_capacity_warning"),
         "outputs": result.output_paths,
