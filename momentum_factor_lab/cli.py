@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--min-avg-dollar-volume", type=float, default=5_000_000.0)
     run.add_argument("--min-avg-volume", type=float, default=0.0)
     run.add_argument("--min-history-days", type=int, default=252)
+    run.add_argument(
+        "--selected-factor",
+        default=None,
+        help="Frozen/predeclared factor to use for live recommendations; validation rankings remain audit-only.",
+    )
     run.add_argument("--json", action="store_true", help="Emit machine-readable summary")
     return parser
 
@@ -60,26 +65,31 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         min_avg_volume=args.min_avg_volume,
         min_history_days=args.min_history_days,
+        selected_factor=args.selected_factor,
     )
     result = write_reports(run_analysis(config))
+    output_key = result.metadata["recommendation_output_key"]
     summary = {
         "selected_factor": result.selected_factor,
         "recommendation_status": result.metadata["recommendation_status"],
         "current_recommendations_available": result.metadata["current_recommendations_available"],
+        "recommendation_output": result.metadata["recommendation_output_label"],
         "data_as_of": result.metadata["data_as_of"],
         "provider": result.metadata["provider"],
         "candidate_universe_size": result.metadata["candidate_universe_size"],
         "eligible_price_universe_size": result.metadata["eligible_price_universe_size"],
         "factor_count": result.metadata["factor_count"],
         "factor_validation_status": result.metadata["factor_validation_status"],
+        "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
         "outputs": result.output_paths,
-        "top_recommendations": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
+        f"top_{output_key}": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
     }
     if args.json:
         print(json.dumps(summary, indent=2, default=str))
     else:
         print(f"Selected factor: {summary['selected_factor']}")
         print(f"Recommendation status: {summary['recommendation_status']}")
+        print(f"Recommendation output: {summary['recommendation_output']}")
         print(f"Data as of: {summary['data_as_of']} via {summary['provider']}")
         print(
             "Universe: "
@@ -90,7 +100,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         print("Outputs:")
         for key, value in result.output_paths.items():
             print(f"  {key}: {value}")
-        print("Top recommendations:")
+        print(f"Top {output_key.replace('_', ' ')}:")
         print(result.recommendations.head(result.config.top_n).to_string(index=False))
     return summary
 

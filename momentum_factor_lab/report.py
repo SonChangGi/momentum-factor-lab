@@ -85,7 +85,11 @@ def write_excel(result: RunResult, path: Path) -> None:
         result.score_components.reset_index(names="factor").to_excel(writer, sheet_name="score_components", index=False)
         result.benchmark_relative.to_excel(writer, sheet_name="benchmark_relative", index=False)
         pd.DataFrame([result.metadata]).to_excel(writer, sheet_name="selected_factor", index=False)
-        result.recommendations.to_excel(writer, sheet_name="recommendations", index=False)
+        result.recommendations.to_excel(
+            writer,
+            sheet_name=result.metadata.get("recommendation_output_sheet", "recommendations"),
+            index=False,
+        )
         result.market_data.exclusions.to_excel(writer, sheet_name="exclusions", index=False)
         result.robustness.to_excel(writer, sheet_name="robustness", index=False)
         result.sensitivity.to_excel(writer, sheet_name="sensitivity", index=False)
@@ -139,6 +143,7 @@ def write_pdf(result: RunResult, path: Path) -> None:
                 f"Selected factor: {selected}",
                 f"Selection rationale: {result.selected_reason}",
                 f"Recommendation status: {result.metadata['recommendation_status']}",
+                f"Recommendation output: {result.metadata.get('recommendation_output_label', 'Recommendations')}",
                 f"Data source: {result.metadata['provider']} | data as of: {result.metadata['data_as_of']} | run: {result.metadata['run_timestamp_utc']}",
                 f"Universe: {result.metadata['candidate_universe_size']} candidates; {result.metadata['eligible_price_universe_size']} eligible price symbols; {result.metadata['excluded_symbols']} exclusions.",
                 f"Portfolio construction: {result.metadata['portfolio_construction']}",
@@ -167,7 +172,12 @@ def write_pdf(result: RunResult, path: Path) -> None:
         _table_page(pdf, "Benchmark-relative Metrics", result.benchmark_relative[benchmark_cols])
         _table_page(pdf, "Selected-Factor Score Components", result.score_components.reset_index(names="factor"))
         _table_page(pdf, "Selected-Factor Parameter Sensitivity", result.sensitivity)
-        _table_page(pdf, "Current / Sample Top-20 Recommendations", result.recommendations, max_rows=result.config.top_n)
+        _table_page(
+            pdf,
+            result.metadata.get("recommendation_output_label", "Current Top-20 Recommendations"),
+            result.recommendations,
+            max_rows=result.config.top_n,
+        )
         _table_page(pdf, "Robustness Slices", result.robustness[result.robustness["factor"].eq(selected)])
 
         fig, ax = plt.subplots(figsize=(11, 6.5))

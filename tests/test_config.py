@@ -24,6 +24,7 @@ def test_config_defaults_to_top_20_and_large_universe():
         ({"stooq_fallback_limit": -1}, "stooq_fallback_limit"),
         ({"retry_count": -1}, "retry_count"),
         ({"min_price": -1}, "min_price"),
+        ({"selected_factor": ""}, "selected_factor"),
     ],
 )
 def test_config_validation_rejects_invalid_risk_inputs(kwargs, message):

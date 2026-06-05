@@ -310,6 +310,36 @@ def _parameter_sensitivity(
     return pd.DataFrame(rows).sort_values(["variant_type", "variant"]).reset_index(drop=True)
 
 
+def _resolve_selected_factor(
+    config: RunConfig,
+    factor_scores: dict[str, pd.DataFrame],
+    validation_selected_factor: str,
+) -> tuple[str, str, str]:
+    if config.selected_factor is None:
+        return (
+            validation_selected_factor,
+            "validation_performance",
+            (
+                f"{validation_selected_factor} selected by validation-first composite score for "
+                "research comparison only; fresh live recommendations require a predeclared "
+                "selected_factor so current holdings are not chosen with same-sample validation performance."
+            ),
+        )
+
+    selected_factor = config.selected_factor.strip()
+    if selected_factor not in factor_scores:
+        available = ", ".join(sorted(factor_scores))
+        raise ValueError(f"selected_factor must be one of: {available}")
+    return (
+        selected_factor,
+        "predeclared",
+        (
+            f"{selected_factor} selected from the predeclared/frozen run configuration; "
+            "validation rankings are reported for audit and are not used to choose current recommendations."
+        ),
+    )
+
+
 def _recommendation_status(config: RunConfig, market_data: MarketData) -> tuple[str, bool]:
     if market_data.offline_sample:
         return ("sample_offline_not_current", False)
@@ -319,6 +349,107 @@ def _recommendation_status(config: RunConfig, market_data: MarketData) -> tuple[
     if age_days > config.stale_after_days:
         return (f"stale_live_data_{age_days}_days_old", False)
     return ("current_live", True)
+
+
+def _live_subset_summary(market_data: MarketData) -> tuple[bool, int | None, int | None]:
+    if "source" not in market_data.data_sources:
+        return (market_data.offline_sample, None, None)
+    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
+    if subset_rows.empty:
+        return (market_data.offline_sample, None, None)
+    latest = subset_rows.iloc[-1]
+    subset_run = bool(latest.get("subset_run", market_data.offline_sample))
+    requested = latest.get("requested_price_symbols")
+    candidates = latest.get("candidate_symbols")
+    return (
+        subset_run,
+        int(requested) if pd.notna(requested) else None,
+        int(candidates) if pd.notna(candidates) else None,
+    )
+
+
+def _has_point_in_time_universe(market_data: MarketData) -> bool:
+    if "point_in_time_universe" not in market_data.data_sources:
+        return False
+    values = market_data.data_sources["point_in_time_universe"].dropna()
+    return bool(not values.empty and values.astype(bool).all())
+
+
+def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
+    if config.min_avg_dollar_volume <= 0 and config.min_avg_volume <= 0:
+        return True
+    if market_data.volumes.empty or market_data.prices.empty:
+        return False
+    return set(market_data.prices.columns).issubset(set(market_data.volumes.columns))
+
+
+def _recommendation_liquidity_status(row: pd.Series, config: RunConfig) -> str:
+    avg_share_volume = row["avg_share_volume_63d"]
+    avg_dollar_volume = row["avg_dollar_volume_63d"]
+    if pd.isna(avg_share_volume) or pd.isna(avg_dollar_volume):
+        return "missing_liquidity_evidence"
+    if config.min_avg_volume > 0 and avg_share_volume < config.min_avg_volume:
+        return "below_min_avg_volume"
+    if config.min_avg_dollar_volume > 0 and avg_dollar_volume < config.min_avg_dollar_volume:
+        return "below_min_avg_dollar_volume"
+    return "pass"
+
+
+def _attach_recommendation_liquidity_diagnostics(
+    recommendations: pd.DataFrame,
+    market_data: MarketData,
+    config: RunConfig,
+) -> pd.DataFrame:
+    frame = recommendations.copy()
+    prices = market_data.prices.reindex(columns=frame["symbol"]).tail(63)
+    volumes = market_data.volumes.reindex(index=prices.index, columns=frame["symbol"]).tail(63)
+    avg_share_volume = volumes.mean()
+    avg_dollar_volume = prices.mul(volumes).mean()
+
+    frame["avg_share_volume_63d"] = frame["symbol"].map(avg_share_volume).astype(float)
+    frame["avg_dollar_volume_63d"] = frame["symbol"].map(avg_dollar_volume).astype(float)
+    frame["min_avg_volume_required"] = float(config.min_avg_volume)
+    frame["min_avg_dollar_volume_required"] = float(config.min_avg_dollar_volume)
+    frame["liquidity_evidence_status"] = frame.apply(_recommendation_liquidity_status, axis=1, config=config)
+    frame["liquidity_filter_pass"] = frame["liquidity_evidence_status"].eq("pass")
+    frame["capacity_status"] = "not_estimated_missing_aum_and_participation_limit"
+    frame["capacity_warning"] = (
+        "Capacity is not estimated because no target AUM and max participation limit are configured; "
+        "use the exported 63-day ADV fields before treating weights as scalable."
+    )
+    return frame
+
+
+def _apply_tradability_gate(
+    config: RunConfig,
+    market_data: MarketData,
+    status: str,
+    current_available: bool,
+    subset_run: bool,
+    selection_source: str,
+) -> tuple[str, bool, dict[str, Any]]:
+    requirements = {
+        "fresh_live_data": current_available,
+        "predeclared_selected_factor": selection_source == "predeclared",
+        "full_uncapped_price_universe": not subset_run and config.max_price_symbols is None,
+        "point_in_time_universe": _has_point_in_time_universe(market_data),
+        "liquidity_filter_evidence": _has_liquidity_evidence(config, market_data),
+    }
+    blocking = [name for name, satisfied in requirements.items() if not satisfied]
+    output_type = "live_tradable_recommendations" if current_available and not blocking else "research_signals"
+    gated_available = output_type == "live_tradable_recommendations"
+    if current_available and blocking:
+        status = f"{status}_research_only_missing_{'_and_'.join(blocking)}"
+    gate = {
+        "tradability_requirements": requirements,
+        "tradability_blockers": blocking,
+        "research_only": not gated_available,
+        "recommendation_output_key": "recommendations" if gated_available else "research_signals",
+        "recommendation_output_label": "Live tradable recommendations" if gated_available else "Research signals (not tradable)",
+        "recommendation_output_sheet": "recommendations" if gated_available else "research_signals",
+        "tradable_recommendations_available": gated_available,
+    }
+    return status, gated_available, gate
 
 
 def run_analysis(config: RunConfig) -> RunResult:
@@ -335,28 +466,36 @@ def run_analysis(config: RunConfig) -> RunResult:
     metrics, robustness = _metrics_for_backtests(backtests)
     benchmark_relative = _benchmark_relative_metrics(backtests, prices, config)
     score_components = _score_factors(metrics)
-    selected_factor = str(score_components.index[0])
+    validation_selected_factor = str(score_components.index[0])
+    selected_factor, selection_source, selected_reason = _resolve_selected_factor(config, factor_scores, validation_selected_factor)
     selected_metrics = metrics.loc[selected_factor]
     latest_scores = factor_scores[selected_factor].iloc[-1].dropna()
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
+    recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
     status, current_available = _recommendation_status(config, market_data)
-    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")] if "source" in market_data.data_sources else pd.DataFrame()
-    subset_run = bool(subset_rows["subset_run"].iloc[-1]) if not subset_rows.empty else market_data.offline_sample
+    subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
     if subset_run and not market_data.offline_sample:
-        requested = int(subset_rows["requested_price_symbols"].iloc[-1])
-        candidates = int(subset_rows["candidate_symbols"].iloc[-1])
+        requested = requested_price_symbols if requested_price_symbols is not None else len(prices.columns)
+        candidates = candidate_symbols if candidate_symbols is not None else len(market_data.candidate_universe)
         status = f"{status}_subset_run_{requested}_of_{candidates}"
-    if not current_available and not market_data.offline_sample:
+    status, current_available, tradability_gate = _apply_tradability_gate(
+        config,
+        market_data,
+        status,
+        current_available,
+        subset_run,
+        selection_source,
+    )
+    if not current_available:
         recommendations["weight"] = 0.0
     recommendations["recommendation_status"] = status
+    recommendations["recommendation_output"] = tradability_gate["recommendation_output_key"]
     recommendations["signal_date"] = str(prices.index.max().date()) if not prices.empty else "unavailable"
+    recommendations["selected_factor"] = selected_factor
+    recommendations["selected_factor_selection_source"] = selection_source
 
     sensitivity = _parameter_sensitivity(prices, selected_factor, config, factor_scores[selected_factor])
-    selected_reason = (
-        f"{selected_factor} selected by validation-first composite score using OOS/fixed train-test "
-        "risk-adjusted, drawdown-aware, turnover, and stability components."
-    )
     metadata = {
         "run_timestamp_utc": datetime.now(UTC).isoformat(),
         "provider": market_data.provider,
@@ -365,7 +504,10 @@ def run_analysis(config: RunConfig) -> RunResult:
         "data_as_of": str(market_data.as_of.date()) if market_data.as_of is not None else None,
         "recommendation_status": status,
         "current_recommendations_available": current_available,
+        **tradability_gate,
         "selected_factor": selected_factor,
+        "validation_selected_factor": validation_selected_factor,
+        "selected_factor_selection_source": selection_source,
         "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
         "selected_reason": selected_reason,
         "signal_date": str(prices.index.max().date()) if not prices.empty else None,
@@ -385,6 +527,13 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_factor_annualized_turnover": float(selected_metrics.get("full_annualized_turnover", 0.0)),
         "selected_factor_total_cost": float(selected_metrics.get("full_total_cost", 0.0)),
         "selected_factor_annualized_cost_drag": float(selected_metrics.get("full_annualized_cost_drag", 0.0)),
+        "recommendation_liquidity_lookback_days": 63,
+        "recommendation_capacity_status": "not_estimated_missing_aum_and_participation_limit",
+        "recommendation_capacity_warning": (
+            "Recommendation rows include 63-day liquidity evidence, but capacity is not estimated "
+            "without target AUM and max participation inputs."
+        ),
+        "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
         "survivorship_bias_caveat": disclaimers.DATA_LIMITATIONS,
         "non_advice_disclaimer": disclaimers.NON_ADVICE,
         "live_data_gate": disclaimers.LIVE_DATA_GATE,
@@ -411,6 +560,7 @@ def run_analysis(config: RunConfig) -> RunResult:
 
 
 def write_run_results_json(result: RunResult, path: Path) -> None:
+    output_key = result.metadata.get("recommendation_output_key", "recommendations")
     payload = {
         "metadata": result.metadata,
         "config": result.config.to_dict(),
@@ -418,7 +568,7 @@ def write_run_results_json(result: RunResult, path: Path) -> None:
         "score_components": result.score_components.reset_index(names="factor").to_dict(orient="records"),
         "benchmark_relative": result.benchmark_relative.to_dict(orient="records"),
         "sensitivity": result.sensitivity.to_dict(orient="records"),
-        "recommendations": result.recommendations.to_dict(orient="records"),
+        output_key: result.recommendations.to_dict(orient="records"),
         "data_sources": result.data_sources.to_dict(orient="records"),
         "price_sources": result.market_data.price_sources.to_dict(orient="records"),
         "factor_validation": result.factor_validation.to_dict(orient="records"),
