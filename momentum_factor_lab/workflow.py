@@ -482,6 +482,7 @@ def run_analysis(config: RunConfig) -> RunResult:
 
 
 def write_run_results_json(result: RunResult, path: Path) -> None:
+    output_key = result.metadata.get("recommendation_output_key", "recommendations")
     payload = {
         "metadata": result.metadata,
         "config": result.config.to_dict(),
@@ -489,7 +490,7 @@ def write_run_results_json(result: RunResult, path: Path) -> None:
         "score_components": result.score_components.reset_index(names="factor").to_dict(orient="records"),
         "benchmark_relative": result.benchmark_relative.to_dict(orient="records"),
         "sensitivity": result.sensitivity.to_dict(orient="records"),
-        "recommendations": result.recommendations.to_dict(orient="records"),
+        output_key: result.recommendations.to_dict(orient="records"),
         "data_sources": result.data_sources.to_dict(orient="records"),
         "price_sources": result.market_data.price_sources.to_dict(orient="records"),
         "factor_validation": result.factor_validation.to_dict(orient="records"),

@@ -68,10 +68,12 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         selected_factor=args.selected_factor,
     )
     result = write_reports(run_analysis(config))
+    output_key = result.metadata["recommendation_output_key"]
     summary = {
         "selected_factor": result.selected_factor,
         "recommendation_status": result.metadata["recommendation_status"],
         "current_recommendations_available": result.metadata["current_recommendations_available"],
+        "recommendation_output": result.metadata["recommendation_output_label"],
         "data_as_of": result.metadata["data_as_of"],
         "provider": result.metadata["provider"],
         "candidate_universe_size": result.metadata["candidate_universe_size"],
@@ -80,13 +82,14 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         "factor_validation_status": result.metadata["factor_validation_status"],
         "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
         "outputs": result.output_paths,
-        "top_recommendations": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
+        f"top_{output_key}": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
     }
     if args.json:
         print(json.dumps(summary, indent=2, default=str))
     else:
         print(f"Selected factor: {summary['selected_factor']}")
         print(f"Recommendation status: {summary['recommendation_status']}")
+        print(f"Recommendation output: {summary['recommendation_output']}")
         print(f"Data as of: {summary['data_as_of']} via {summary['provider']}")
         print(
             "Universe: "
@@ -97,7 +100,7 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         print("Outputs:")
         for key, value in result.output_paths.items():
             print(f"  {key}: {value}")
-        print("Top recommendations:")
+        print(f"Top {output_key.replace('_', ' ')}:")
         print(result.recommendations.head(result.config.top_n).to_string(index=False))
     return summary
 
