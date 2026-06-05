@@ -42,16 +42,25 @@ def _drift_weights(
         [weights.rename("weight"), start_prices.rename("start"), end_prices.rename("end")],
         axis=1,
     ).replace([np.inf, -np.inf], np.nan)
-    valid = aligned["weight"].fillna(0.0).ne(0.0) & aligned["start"].gt(0) & aligned["end"].gt(0)
+    held = aligned["weight"].fillna(0.0).ne(0.0)
+    valid = held & aligned["start"].gt(0) & aligned["end"].gt(0)
+    stale_held = held & ~valid
     drifted = pd.Series(0.0, index=weights.index, dtype=float)
-    if not valid.any():
+    if not (valid.any() or stale_held.any()):
         return drifted
     gross = aligned.loc[valid, "weight"] * aligned.loc[valid, "end"] / aligned.loc[valid, "start"]
+    stale_notional = aligned.loc[stale_held, "weight"].clip(lower=0.0)
     cash_weight = max(0.0, 1.0 - float(aligned["weight"].fillna(0.0).sum()))
-    total = float(gross.sum()) + cash_weight
+    total = float(gross.sum()) + float(stale_notional.sum()) + cash_weight
     if total <= 0 or not np.isfinite(total):
         return drifted
-    drifted.loc[gross.index] = gross / total
+    if not gross.empty:
+        drifted.loc[gross.index] = gross / total
+    if not stale_notional.empty:
+        # Missing/nonpositive trade-date prices should not erase a held position
+        # from turnover diagnostics. Carry the last target notional so an exit
+        # still records sell turnover and cost rather than disappearing.
+        drifted.loc[stale_notional.index] = stale_notional / total
     return drifted
 
 

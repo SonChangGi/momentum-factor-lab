@@ -14,7 +14,7 @@ Runtime separates:
 
 Only eligible stock-candidate symbols can enter factor backtests or model-portfolio output rows. Benchmark ETFs such as SPY may be present in raw price data solely for benchmark-relative metrics and are excluded from factor scores, backtest weights, sensitivity, and recommendations. Current live tradable recommendations are emitted only when all tradability requirements pass; otherwise the output is labeled `research_signals`, weights are zeroed, and reports include candidate/requested/eligible/exclusion counts, tradability blockers, liquidity evidence, and capacity warnings.
 
-The tradability gate separates live-data freshness from actual tradable output. A run must have a predeclared factor, full uncapped requested stock-candidate price coverage with eligible symbols covering the requested stock price symbols, point-in-time universe provenance, row-level liquidity pass, and row-level capacity pass. Broad packaged/refresh stock universes must meet the configured 2,000-symbol minimum; smaller user-supplied stock universes stay research-only unless explicitly marked as approved tradable universes and backed by point-in-time provenance. Row-level liquidity requires the configured minimum number of non-null 63-day price, volume, and dollar-volume observations.
+The tradability gate separates live-data freshness from actual tradable output. A run must have a predeclared factor, full uncapped requested stock-candidate price coverage with eligible symbols covering the requested stock price symbols, point-in-time universe provenance, row-level liquidity pass, and row-level capacity pass. In-run validation and walk-forward factor-selection diagnostics are useful research controls, but they are not treated as frozen live policy and therefore remain research-only unless the factor is predeclared. Broad packaged/refresh stock universes must meet the configured 2,000-symbol minimum; smaller user-supplied stock universes stay research-only unless explicitly marked as approved tradable universes and backed by point-in-time provenance. Row-level liquidity requires the configured minimum number of non-null 63-day price, volume, and dollar-volume observations.
 
 ## Data collection
 
@@ -61,16 +61,18 @@ The runtime audit is exported to PDF, Excel, and JSON as `factor_validation`.
 
 ## Backtest and scoring
 
-Each factor is backtested as a long-only top-20 portfolio by default. Portfolio targets are generated from the previous trading day’s factor signal and applied with a one-trading-day execution delay. Turnover, transaction cost, and slippage are included.
+Each factor is backtested as a long-only top-20 portfolio by default. Portfolio targets are generated from the previous trading day’s factor signal and applied with a one-trading-day execution delay. Turnover, transaction cost, and slippage are included. Drift-aware turnover preserves liquidation turnover even when a held symbol has missing trade-date price evidence, so stale/gappy data does not erase exit costs.
 
 Factor selection uses validation-first composite scoring across Sharpe, Sortino, Calmar, max drawdown, CAGR, turnover, and train/validation stability. Benchmark-relative metrics include excess return, tracking error, information ratio, and beta to the benchmark; benchmark prices are comparator-only and non-investable in this stock-only project.
 
-Backtest portfolios are research diagnostics. Live tradable recommendations require the separate tradability gate, predeclared-factor controls, point-in-time universe evidence, and configured capacity inputs (`target_aum` plus `max_adv_participation`) before rows are exported as `recommendations` rather than zero-weight `research_signals`.
+Backtest portfolios are research diagnostics. Live tradable recommendations require the separate tradability gate, predeclared-factor controls, point-in-time universe evidence, and configured capacity inputs (`target_aum` plus `max_adv_participation`) before rows are exported as `recommendations` rather than zero-weight `research_signals`. Cost-stress exports recompute return/risk metrics from realized turnover at each stress cost rate; they are not just descriptive turnover × bps totals.
 
 ## Reporting scalability
 
 Excel cannot safely store every symbol × month × factor row for a 2,000+ universe. Therefore:
 
-- `factor_scores` stores latest all-symbol/all-factor scores;
-- `factor_score_history_top20` stores monthly top-20-per-factor history;
+- `factor_scores` stores latest all-symbol/all-factor scores with eligibility scope columns so raw ineligible diagnostics are distinguishable from current model-portfolio-eligible scores;
+- `factor_score_history_top20` stores eligibility-aware monthly top-20-per-factor history;
 - full huge matrices are intentionally not written to Excel.
+
+Selected-factor sensitivity reports factor-parameter variants when supported by the factor family and labels unsupported families as base-factor plus portfolio-parameter coverage only.

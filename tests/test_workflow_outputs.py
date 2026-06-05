@@ -466,6 +466,32 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
     assert result.recommendations["target_notional"].gt(0).all()
 
 
+def test_walk_forward_factor_selection_remains_research_only_without_frozen_policy(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        factor_selection_mode="walk_forward",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert result.metadata["selected_factor_selection_source"] == "walk_forward"
+    assert not result.metadata["selection_policy_frozen_for_live"]
+    assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
+    assert not result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].eq(0.0).all()
+
+
 def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
@@ -902,6 +928,28 @@ def test_report_exports_turnover_cost_diagnostic_columns(tmp_path):
     assert {"full_total_turnover", "full_annualized_turnover", "full_total_cost", "full_annualized_cost_drag"}.issubset(headers)
 
 
+def test_report_factor_score_sheets_include_eligibility_scope(tmp_path):
+    result = write_reports(
+        run_analysis(
+            RunConfig(
+                start_date="2019-01-01",
+                output_dir=tmp_path / "outputs",
+                report_dir=tmp_path / "reports",
+                offline_sample=True,
+            )
+        )
+    )
+    workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
+
+    factor_headers = [cell.value for cell in next(workbook["factor_scores"].iter_rows(max_row=1))]
+    history_headers = [cell.value for cell in next(workbook["factor_score_history_top20"].iter_rows(max_row=1))]
+    selected_headers = [cell.value for cell in next(workbook["selected_factor_scores"].iter_rows(max_row=1))]
+
+    assert {"eligible_for_current_model_portfolio", "score_scope"}.issubset(factor_headers)
+    assert {"eligible_for_model_portfolio_at_date", "score_scope"}.issubset(history_headers)
+    assert {"eligible_for_current_model_portfolio", "score_scope"}.issubset(selected_headers)
+
+
 def test_liquidity_capacity_thresholds_and_counts_are_exported(tmp_path):
     result = write_reports(
         run_analysis(
@@ -965,6 +1013,7 @@ def test_walk_forward_mode_records_prior_window_selection_history(tmp_path):
     assert result.metadata["factor_selection_mode"] == "walk_forward"
     assert result.metadata["selected_factor_selection_source"] == "walk_forward"
     assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert not result.metadata["selection_policy_frozen_for_live"]
     assert not result.selection_history.empty
     assert result.selection_history["selection_source"].eq("walk_forward").all()
 
@@ -990,4 +1039,6 @@ def test_cost_stress_export_is_separate_from_base_metrics(tmp_path):
     assert "cost_stress" in payload
     scenarios = {row["scenario"] for row in payload["cost_stress"]}
     assert {"base_configured_cost", "high_cost_stress"}.issubset(scenarios)
+    assert all(row["stress_metric_type"] == "returns_recomputed_from_turnover" for row in payload["cost_stress"])
+    assert {"stressed_sharpe", "stressed_max_drawdown", "stressed_annualized_cost_drag"}.issubset(payload["cost_stress"][0])
     assert result.metrics.loc[result.selected_factor, "full_total_cost"] == result.metadata["selected_factor_total_cost"]

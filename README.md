@@ -34,7 +34,7 @@ python -m momentum_factor_lab.cli run \
   --report-dir reports/live-smoke
 ```
 
-Live tradable recommendations require `--selected-factor`, fresh live data, an uncapped requested price universe, point-in-time universe evidence, and liquidity evidence. When any tradability requirement is missing, the run exports `research_signals` with zero weights and explicit blockers instead of tradable recommendations.
+Live tradable recommendations require `--selected-factor` as a predeclared/frozen factor, fresh live data, an uncapped requested price universe, point-in-time universe evidence, and liquidity evidence. In-run validation or walk-forward diagnostics can compare factors, but they do not by themselves satisfy the live tradability gate. When any tradability requirement is missing, the run exports `research_signals` with zero weights and explicit blockers instead of tradable recommendations.
 
 For a run to emit `recommendations` rather than `research_signals`, it must also pass row-level checks:
 
@@ -50,7 +50,7 @@ Without those inputs, current free/public live runs are intentionally research-o
 Generated artifacts are ignored by git:
 
 - `reports/...pdf` — narrative report with charts, tables, assumptions, factor comparison, selected factor, data coverage, formula validation, gated output type, tradability blockers, row-level liquidity/capacity diagnostics, and limitations.
-- `reports/...xlsx` — workbook with config/assumptions, universe, data sources, factor definitions, factor validation, latest factor scores, top-20 historical factor scores, metrics, benchmark-relative metrics, gated output sheet (`recommendations` or `research_signals`), exclusions, robustness, and sensitivity.
+- `reports/...xlsx` — workbook with config/assumptions, universe, data sources, factor definitions, factor validation, latest factor scores with eligibility scope, eligibility-aware top-20 historical factor scores, metrics, benchmark-relative metrics, recomputed cost-stress metrics, gated output sheet (`recommendations` or `research_signals`), exclusions, robustness, and sensitivity.
 - `outputs/...json` — canonical run-results object used to keep PDF and Excel aligned.
 
 ## Public/free data sources

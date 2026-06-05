@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import pandas as pd
 
+from .data import build_eligibility_mask
 from .metrics import metric_summary
 from .workflow import RunResult, write_run_results_json
 
@@ -24,16 +25,71 @@ def _excel_frequency(frequency: str) -> str:
     return "ME" if frequency == "M" else frequency
 
 
+def _score_columns(result: RunResult) -> list[str]:
+    if not result.factor_scores:
+        return []
+    columns: list[str] = []
+    for scores in result.factor_scores.values():
+        for column in scores.columns:
+            if column not in columns:
+                columns.append(column)
+    return columns
+
+
+def _score_eligibility_mask(result: RunResult) -> pd.DataFrame | None:
+    columns = _score_columns(result)
+    prices = getattr(result.market_data, "prices", pd.DataFrame())
+    volumes = getattr(result.market_data, "volumes", pd.DataFrame())
+    if not columns or prices is None or prices.empty:
+        return None
+    reference_index = next(iter(result.factor_scores.values())).index
+    price_frame = prices.reindex(index=reference_index, columns=columns)
+    if volumes is None or volumes.empty:
+        volume_frame = pd.DataFrame(index=reference_index, columns=columns, dtype=float)
+    else:
+        volume_frame = volumes.reindex(index=reference_index, columns=columns)
+    return build_eligibility_mask(price_frame, volume_frame, result.config)
+
+
+def _eligibility_row(mask: pd.DataFrame | None, date: pd.Timestamp, symbols: pd.Index) -> pd.Series:
+    if mask is None or mask.empty or date not in mask.index:
+        return pd.Series(pd.NA, index=symbols, dtype="object")
+    return mask.loc[date].reindex(symbols).fillna(False).astype(bool)
+
+
+def _score_scope(eligible: pd.Series) -> pd.Series:
+    if eligible.isna().all():
+        return pd.Series("raw_research_diagnostic_eligibility_not_available", index=eligible.index)
+    return eligible.map(
+        {
+            True: "eligible_current_model_portfolio",
+            False: "raw_ineligible_research_diagnostic",
+        }
+    )
+
+
+def _eligible_scores(scores: pd.Series, eligible: pd.Series) -> pd.Series:
+    if eligible.isna().all():
+        return scores
+    return scores.where(eligible.astype(bool))
+
+
 def _latest_factor_scores_frame(result: RunResult) -> pd.DataFrame:
     rows = []
+    eligibility_mask = _score_eligibility_mask(result)
     for factor, scores in result.factor_scores.items():
-        latest = scores.iloc[-1].dropna().rename("score").reset_index()
+        date = pd.Timestamp(scores.index[-1])
+        latest_scores = scores.iloc[-1]
+        eligible = _eligibility_row(eligibility_mask, date, latest_scores.index)
+        latest = latest_scores.dropna().rename("score").reset_index()
         latest.columns = ["symbol", "score"]
+        latest["eligible_for_current_model_portfolio"] = latest["symbol"].map(eligible).astype("object")
+        latest["score_scope"] = latest["symbol"].map(_score_scope(eligible))
         latest.insert(0, "factor", factor)
-        latest.insert(0, "date", scores.index[-1])
+        latest.insert(0, "date", date)
         rows.append(latest)
     if not rows:
-        return pd.DataFrame(columns=["date", "factor", "symbol", "score"])
+        return pd.DataFrame(columns=["date", "factor", "symbol", "score", "eligible_for_current_model_portfolio", "score_scope"])
     frame = pd.concat(rows, ignore_index=True)
     if len(frame) >= EXCEL_ROW_LIMIT:
         frame = frame.sort_values(["factor", "score"], ascending=[True, False]).groupby("factor").head(5_000)
@@ -89,11 +145,18 @@ def _factor_family_leaderboard_frame(result: RunResult) -> pd.DataFrame:
 def _factor_overlap_top20_frame(result: RunResult) -> pd.DataFrame:
     if result.selected_factor not in result.factor_scores:
         return pd.DataFrame(columns=["factor", "overlap_with_selected_top20", "consensus_symbols"])
-    selected_top = set(result.factor_scores[result.selected_factor].iloc[-1].dropna().sort_values(ascending=False).head(20).index)
+    eligibility_mask = _score_eligibility_mask(result)
+    latest_date = pd.Timestamp(result.factor_scores[result.selected_factor].index[-1])
+    selected_latest = result.factor_scores[result.selected_factor].loc[latest_date]
+    selected_eligible = _eligibility_row(eligibility_mask, latest_date, selected_latest.index)
+    selected_top = set(_eligible_scores(selected_latest, selected_eligible).dropna().sort_values(ascending=False).head(20).index)
     rows = []
     symbol_counts: dict[str, int] = {}
     for factor, scores in result.factor_scores.items():
-        top = list(scores.iloc[-1].dropna().sort_values(ascending=False).head(20).index)
+        date = pd.Timestamp(scores.index[-1])
+        latest_scores = scores.loc[date]
+        eligible = _eligibility_row(eligibility_mask, date, latest_scores.index)
+        top = list(_eligible_scores(latest_scores, eligible).dropna().sort_values(ascending=False).head(20).index)
         for symbol in top:
             symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
         rows.append(
@@ -159,14 +222,18 @@ def _liquidity_capacity_frame(result: RunResult) -> pd.DataFrame:
 def _factor_history_top_frame(result: RunResult) -> pd.DataFrame:
     rows = []
     frequency = _excel_frequency(result.config.rebalance_frequency)
+    eligibility_mask = _score_eligibility_mask(result)
     for factor, scores in result.factor_scores.items():
         sampled = scores.resample(frequency).last()
         for date, row in sampled.iterrows():
-            top = row.dropna().sort_values(ascending=False).head(result.config.top_n)
+            eligible = _eligibility_row(eligibility_mask, pd.Timestamp(date), row.index)
+            top = _eligible_scores(row, eligible).dropna().sort_values(ascending=False).head(result.config.top_n)
             if top.empty:
                 continue
             frame = top.rename("score").reset_index()
             frame.columns = ["symbol", "score"]
+            frame["eligible_for_model_portfolio_at_date"] = frame["symbol"].map(eligible).astype("object")
+            frame["score_scope"] = frame["symbol"].map(_score_scope(eligible))
             frame.insert(0, "factor", factor)
             frame.insert(0, "date", date)
             frame["rank"] = range(1, len(frame) + 1)
@@ -181,7 +248,18 @@ def _factor_history_top_frame(result: RunResult) -> pd.DataFrame:
 
 def write_excel(result: RunResult, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    selected_scores = result.factor_scores[result.selected_factor].iloc[-1].sort_values(ascending=False)
+    eligibility_mask = _score_eligibility_mask(result)
+    selected_latest_date = pd.Timestamp(result.factor_scores[result.selected_factor].index[-1])
+    selected_raw_scores = result.factor_scores[result.selected_factor].loc[selected_latest_date].sort_values(ascending=False)
+    selected_eligible = _eligibility_row(eligibility_mask, selected_latest_date, selected_raw_scores.index)
+    selected_scores = pd.DataFrame(
+        {
+            "symbol": selected_raw_scores.index,
+            "selected_factor_score": selected_raw_scores.values,
+            "eligible_for_current_model_portfolio": selected_raw_scores.index.map(selected_eligible).astype("object"),
+            "score_scope": selected_raw_scores.index.map(_score_scope(selected_eligible)),
+        }
+    )
     universe = result.market_data.candidate_universe.copy()
     if "symbol" in universe:
         eligible_universe = getattr(result.market_data, "eligible_universe", pd.DataFrame())
@@ -205,9 +283,7 @@ def write_excel(result: RunResult, path: Path) -> None:
         result.selection_history.to_excel(writer, sheet_name="selection_history", index=False)
         _latest_factor_scores_frame(result).to_excel(writer, sheet_name="factor_scores", index=False)
         _factor_history_top_frame(result).to_excel(writer, sheet_name="factor_score_history_top20", index=False)
-        selected_scores.rename("selected_factor_score").to_frame().rename_axis("symbol").reset_index().to_excel(
-            writer, sheet_name="selected_factor_scores", index=False
-        )
+        selected_scores.to_excel(writer, sheet_name="selected_factor_scores", index=False)
         result.metrics.reset_index(names="factor").to_excel(writer, sheet_name="backtest_metrics", index=False)
         result.score_components.reset_index(names="factor").to_excel(writer, sheet_name="score_components", index=False)
         result.benchmark_relative.to_excel(writer, sheet_name="benchmark_relative", index=False)

@@ -152,23 +152,51 @@ def _metrics_for_backtests(backtests: dict[str, BacktestResult]) -> tuple[pd.Dat
     return pd.DataFrame(rows).set_index("factor"), pd.DataFrame(robustness_rows)
 
 
+def _cost_series_for_turnover(index: pd.Index, turnover: pd.Series, cost_rate: float) -> pd.Series:
+    costs = pd.Series(0.0, index=index)
+    if turnover.empty or cost_rate == 0:
+        return costs
+    for date, value in turnover.dropna().items():
+        if date not in costs.index:
+            continue
+        loc = costs.index.get_loc(date)
+        if isinstance(loc, slice):
+            loc = loc.start
+        cost_loc = int(loc) + 1
+        if cost_loc < len(costs.index):
+            costs.iloc[cost_loc] += float(value) * cost_rate
+    return costs
+
+
 def _cost_stress_grid(backtests: dict[str, BacktestResult], config: RunConfig) -> pd.DataFrame:
     scenarios = [
-        ("base_configured_cost", config.transaction_cost_bps + config.slippage_bps, "configured flat bps baseline"),
-        ("high_cost_stress", config.cost_stress_high_bps, "high flat bps stress scenario"),
+        ("base_configured_cost", config.transaction_cost_bps + config.slippage_bps, "configured flat bps baseline with recomputed returns"),
+        ("high_cost_stress", config.cost_stress_high_bps, "high flat bps stress with recomputed returns"),
     ]
     rows: list[dict[str, object]] = []
     for factor, result in backtests.items():
         turnover = float(result.turnover.sum()) if not result.turnover.empty else 0.0
+        base_costs = _cost_series_for_turnover(result.returns.index, result.turnover, config.total_cost_rate)
+        gross_returns = result.returns.add(base_costs, fill_value=0.0)
         for scenario, bps, note in scenarios:
+            scenario_costs = _cost_series_for_turnover(result.returns.index, result.turnover, float(bps) / 10_000.0)
+            stressed_returns = gross_returns.sub(scenario_costs, fill_value=0.0)
+            stressed = metric_summary(stressed_returns, result.turnover, scenario_costs)
             rows.append(
                 {
                     "factor": factor,
                     "scenario": scenario,
                     "cost_bps": float(bps),
                     "total_turnover": turnover,
-                    "stressed_total_cost": turnover * float(bps) / 10_000.0,
-                    "base_metrics_preserved": True,
+                    "stressed_total_cost": stressed["total_cost"],
+                    "stressed_cagr": stressed["cagr"],
+                    "stressed_sharpe": stressed["sharpe"],
+                    "stressed_sortino": stressed["sortino"],
+                    "stressed_calmar": stressed["calmar"],
+                    "stressed_max_drawdown": stressed["max_drawdown"],
+                    "stressed_annualized_cost_drag": stressed["annualized_cost_drag"],
+                    "stress_metric_type": "returns_recomputed_from_turnover",
+                    "base_metrics_preserved": False,
                     "note": note,
                 }
             )
@@ -485,8 +513,8 @@ def _resolve_selected_factor(
             selected_factor,
             "walk_forward",
             (
-                f"{selected_factor} selected by frozen walk-forward policy using only prior windows; "
-                "validation rankings are reported separately for audit."
+                f"{selected_factor} selected by in-run walk-forward diagnostics using only prior windows; "
+                "validation rankings are reported separately for audit. This is not treated as a frozen live policy."
             ),
             False,
         )
@@ -698,7 +726,7 @@ def _apply_tradability_gate(
     ) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "predeclared_selected_factor": selection_source in {"predeclared", "walk_forward"},
+        "predeclared_selected_factor": selection_source == "predeclared",
         "full_uncapped_price_universe": _has_full_uncapped_price_universe(config, market_data, subset_run),
         "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
         "point_in_time_universe": _has_point_in_time_universe(market_data),
@@ -793,6 +821,17 @@ def run_analysis(config: RunConfig) -> RunResult:
         factor_scores[selected_factor],
         eligibility_mask=eligibility_mask,
     )
+    factor_parameter_variants = 0
+    if not sensitivity.empty and {"variant_type", "variant"}.issubset(sensitivity.columns):
+        factor_parameter_variants = int(
+            sensitivity["variant_type"].eq("factor_parameter").sum()
+            - sensitivity["variant"].eq("base").sum()
+        )
+    sensitivity_coverage = (
+        "factor_parameter_and_portfolio_variants"
+        if factor_parameter_variants > 0
+        else "base_factor_plus_portfolio_variants_only"
+    )
     metadata = {
         "run_timestamp_utc": datetime.now(UTC).isoformat(),
         "provider": market_data.provider,
@@ -808,7 +847,10 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_factor_selection_window": config.selection_window,
         "selection_window": config.selection_window,
         "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
+        "selection_policy_frozen_for_live": selection_source == "predeclared",
         "same_sample_selection_blocked_for_tradable": same_sample_blocked,
+        "sensitivity_coverage": sensitivity_coverage,
+        "sensitivity_factor_parameter_variant_count": factor_parameter_variants,
         "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
         "selected_reason": selected_reason,
         "signal_date": str(analysis_prices.index.max().date()) if not analysis_prices.empty else None,

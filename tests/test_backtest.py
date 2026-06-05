@@ -96,3 +96,22 @@ def test_drifted_turnover_differs_from_naive_target_turnover_when_prices_move():
 
     assert result.turnover.sum() != result.naive_turnover.sum()
     assert not result.pre_trade_weights.empty
+
+
+def test_missing_trade_price_preserves_liquidation_turnover():
+    dates = pd.bdate_range("2021-01-01", periods=90)
+    prices = pd.DataFrame({"A": 100.0, "B": 100.0}, index=dates)
+    scores = pd.DataFrame({"A": 1.0, "B": 0.5}, index=dates)
+    config = RunConfig(start_date="2021-01-01", end_date="2021-05-31", top_n=1, max_weight=1.0)
+    rebalance_dates = pd.Series(index=dates, data=dates).resample("ME").last().dropna()
+    second_rebalance = rebalance_dates.iloc[1]
+    second_signal = dates[dates.get_loc(second_rebalance) - 1]
+    scores.loc[second_signal:, ["A", "B"]] = [-1.0, 1.0]
+    prices.loc[second_signal, "A"] = np.nan
+    eligibility = pd.DataFrame(True, index=dates, columns=prices.columns)
+    eligibility.loc[second_signal, "A"] = False
+
+    result = run_factor_backtest(prices, scores, config, "missing_exit_price", eligibility)
+
+    assert result.turnover.loc[second_rebalance] >= 1.99
+    assert np.isclose(result.costs.sum(), result.turnover.sum() * config.total_cost_rate)
