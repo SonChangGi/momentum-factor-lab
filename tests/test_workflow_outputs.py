@@ -1,6 +1,8 @@
 from pathlib import Path
+from datetime import UTC, datetime
 
 import openpyxl
+import pandas as pd
 
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import generate_offline_sample_data
@@ -70,7 +72,7 @@ def test_live_failure_or_offline_status_never_claims_current(tmp_path, monkeypat
 def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(tmp_path, monkeypatch):
     market_data = generate_offline_sample_data(RunConfig(start_date="2023-01-01"))
     market_data.offline_sample = False
-    market_data.as_of = market_data.prices.index.max()
+    market_data.as_of = pd.Timestamp(datetime.now(UTC).date())
 
     monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda config: market_data)
 
@@ -93,7 +95,7 @@ def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(
 def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):
     market_data = generate_offline_sample_data(RunConfig(start_date="2023-01-01"))
     market_data.offline_sample = False
-    market_data.as_of = market_data.prices.index.max()
+    market_data.as_of = pd.Timestamp(datetime.now(UTC).date())
 
     def rank_other_factor_first(metrics):
         ranked = metrics.assign(composite_score=0.0)[["composite_score"]]
