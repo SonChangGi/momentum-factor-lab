@@ -5,6 +5,7 @@ from pathlib import Path
 
 import openpyxl
 import pandas as pd
+import pytest
 
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import MarketData, generate_offline_sample_data
@@ -53,10 +54,12 @@ def _live_fixture_market_data(
     )
     sample = generate_offline_sample_data(sample_config)
     candidate_symbols = len(sample.candidate_universe)
+    eligible_stock_symbols = len(sample.eligible_universe)
     if requested_symbols is None:
-        requested_symbols = min(len(sample.prices.columns), config.max_price_symbols or len(sample.prices.columns)) if subset_run else len(sample.prices.columns)
+        candidate_cap = max((config.max_price_symbols or (eligible_stock_symbols + 1)) - 1, 0)
+        requested_symbols = min(eligible_stock_symbols, candidate_cap) if subset_run else eligible_stock_symbols
     if eligible_symbols is None:
-        eligible_symbols = len(sample.prices.columns)
+        eligible_symbols = eligible_stock_symbols
     summary = pd.DataFrame(
         [
             {
@@ -66,6 +69,9 @@ def _live_fixture_market_data(
                 "candidate_symbols": candidate_symbols,
                 "requested_price_symbols": requested_symbols,
                 "eligible_price_symbols": eligible_symbols,
+                "requested_download_symbols": requested_symbols + 1,
+                "benchmark_symbol": config.benchmark,
+                "benchmark_price_available": config.benchmark in sample.prices.columns,
                 "excluded_symbols": 0,
                 "subset_run": subset_run,
                 "point_in_time_universe": point_in_time,
@@ -129,14 +135,115 @@ def test_offline_run_generates_required_outputs(tmp_path):
     assert not result.benchmark_relative.empty
     assert len(result.recommendations) == result.config.top_n
     assert result.metadata["candidate_universe_size"] >= 2000
+    assert result.metadata["eligible_price_universe_size"] == len(result.market_data.eligible_universe)
+    assert result.metadata["benchmark_symbol"] == "SPY"
+    assert result.metadata["benchmark_price_available"]
+    assert "SPY" in result.market_data.prices.columns
+    assert "SPY" not in result.market_data.eligible_universe["symbol"].to_list()
+    assert not result.market_data.candidate_universe["is_etf"].any()
+    assert {"SPY", "QQQ"}.isdisjoint(set(result.recommendations["symbol"]))
+    for scores in result.factor_scores.values():
+        assert {"SPY", "QQQ"}.isdisjoint(set(scores.columns))
+    for backtest in result.backtests.values():
+        assert {"SPY", "QQQ"}.isdisjoint(set(backtest.weights.columns))
+    assert not result.benchmark_relative.empty
+    assert set(result.benchmark_relative["benchmark"]) == {"SPY"}
     assert result.metadata["factor_count"] >= 18
     assert result.metadata["factor_validation_status"] == "pass"
     assert {"variant_type", "variant", "parameter_set"}.issubset(result.sensitivity.columns)
     assert result.metadata["selected_factor_selection_source"] == "validation_performance"
     factor_sheet = workbook["factor_scores"]
     history_sheet = workbook["factor_score_history_top20"]
-    assert factor_sheet.max_row > len(result.market_data.prices.columns)
+    assert factor_sheet.max_row > len(result.market_data.eligible_universe)
     assert history_sheet.max_row < 1_048_576
+
+
+def test_raw_benchmark_and_nonbenchmark_etf_prices_do_not_enter_stock_analysis(tmp_path, monkeypatch):
+    config = RunConfig(
+        start_date="2019-01-01",
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=True,
+    )
+    market_data = generate_offline_sample_data(config)
+    market_data.prices["QQQ"] = market_data.prices["SPY"] * 1.01
+    market_data.volumes["QQQ"] = market_data.volumes["SPY"]
+    market_data.price_sources = pd.concat(
+        [market_data.price_sources, pd.DataFrame([{"symbol": "QQQ", "price_source": "fixture-etf-price"}])],
+        ignore_index=True,
+    )
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert {"SPY", "QQQ"}.issubset(set(result.market_data.prices.columns))
+    assert {"SPY", "QQQ"}.isdisjoint(set(result.recommendations["symbol"]))
+    assert {"SPY", "QQQ"}.isdisjoint(set(result.market_data.eligible_universe["symbol"]))
+    for scores in result.factor_scores.values():
+        assert {"SPY", "QQQ"}.isdisjoint(set(scores.columns))
+    for backtest in result.backtests.values():
+        assert {"SPY", "QQQ"}.isdisjoint(set(backtest.weights.columns))
+    assert not result.benchmark_relative.empty
+    assert set(result.benchmark_relative["benchmark"]) == {"SPY"}
+    assert result.metadata["benchmark_price_available"]
+
+
+def test_lowercase_benchmark_still_generates_benchmark_relative_metrics(tmp_path):
+    result = run_analysis(
+        RunConfig(
+            start_date="2019-01-01",
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=True,
+            benchmark="spy",
+        )
+    )
+
+    assert result.metadata["benchmark_symbol"] == "SPY"
+    assert result.metadata["benchmark_price_available"]
+    assert not result.benchmark_relative.empty
+    assert set(result.benchmark_relative["benchmark"]) == {"SPY"}
+
+
+def test_missing_eligible_universe_fails_closed_before_analysis(tmp_path, monkeypatch):
+    config = RunConfig(
+        start_date="2019-01-01",
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    market_data.eligible_universe = pd.DataFrame(columns=["not_symbol"])
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    with pytest.raises(ValueError, match="no stock-only analysis price symbols"):
+        run_analysis(config)
+
+
+def test_live_fixture_counts_candidate_coverage_without_benchmark(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
+    assert int(summary["eligible_price_symbols"]) == len(result.market_data.eligible_universe)
+    assert int(summary["requested_price_symbols"]) == len(result.market_data.eligible_universe)
+    assert int(summary["records"]) == len(result.market_data.prices.columns)
+    assert result.metadata["eligible_price_universe_size"] == len(result.market_data.eligible_universe)
+    assert result.metadata["fetched_price_symbol_count"] == len(result.market_data.prices.columns)
+    assert result.metadata["benchmark_price_available"]
 
 
 def test_live_failure_or_offline_status_never_claims_current(tmp_path, monkeypatch):

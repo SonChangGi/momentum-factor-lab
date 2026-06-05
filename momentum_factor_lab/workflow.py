@@ -16,6 +16,7 @@ from .data import MarketData, load_market_data
 from .factors import FACTOR_DESCRIPTIONS, compute_factor_scores, factor_definitions_frame, simple_momentum, total_return_momentum, validate_factor_library
 from .metrics import TRADING_DAYS, annualized_volatility, metric_summary
 from .portfolio import balanced_weights, recommendation_table
+from .universe import is_known_etf_symbol, normalize_symbol
 
 
 @dataclass(slots=True)
@@ -68,6 +69,32 @@ class TradabilityAssessment:
             "tradable_output_available": self.tradable_output_available,
         }
 
+
+
+def _analysis_prices(market_data: MarketData, config: RunConfig) -> pd.DataFrame:
+    """Return stock-only candidate prices for factor research and portfolios.
+
+    `market_data.prices` may intentionally include a benchmark ETF such as SPY so
+    benchmark-relative metrics can be computed. That fetched benchmark series must
+    never become a candidate holding or factor-ranking column.
+    """
+    prices = market_data.prices.dropna(axis=1, how="all")
+    if prices.empty:
+        return prices
+    benchmark = normalize_symbol(config.benchmark)
+    if market_data.eligible_universe.empty or "symbol" not in market_data.eligible_universe:
+        return pd.DataFrame(index=prices.index)
+    eligible_symbols = set(market_data.eligible_universe["symbol"].map(normalize_symbol))
+    candidate_symbols = set(market_data.candidate_universe.get("symbol", pd.Series(dtype=str)).map(normalize_symbol))
+    allowed = [
+        column
+        for column in prices.columns
+        if normalize_symbol(column) in eligible_symbols
+        and normalize_symbol(column) in candidate_symbols
+        and normalize_symbol(column) != benchmark
+        and not is_known_etf_symbol(column)
+    ]
+    return prices.reindex(columns=allowed).dropna(axis=1, how="all")
 
 def _slice_returns(returns: pd.Series, split_at: int) -> dict[str, pd.Series]:
     if returns.empty:
@@ -161,10 +188,12 @@ def _benchmark_relative_metrics(backtests: dict[str, BacktestResult], prices: pd
         "information_ratio",
         "beta_to_benchmark",
     ]
-    if config.benchmark not in prices:
+    benchmark = normalize_symbol(config.benchmark)
+    benchmark_column = next((column for column in prices.columns if normalize_symbol(column) == benchmark), None)
+    if benchmark_column is None:
         return pd.DataFrame(columns=columns)
 
-    benchmark_returns = prices[config.benchmark].pct_change().fillna(0.0).rename("benchmark")
+    benchmark_returns = prices[benchmark_column].pct_change().fillna(0.0).rename("benchmark")
     rows: list[dict[str, float | str]] = []
     for name, result in backtests.items():
         aligned = pd.concat([result.returns.rename("strategy"), benchmark_returns], axis=1).dropna()
@@ -184,7 +213,7 @@ def _benchmark_relative_metrics(backtests: dict[str, BacktestResult], prices: pd
         rows.append(
             {
                 "factor": name,
-                "benchmark": config.benchmark,
+                "benchmark": benchmark,
                 "strategy_cagr": strategy_metrics["cagr"],
                 "benchmark_cagr": benchmark_metrics["cagr"],
                 "strategy_sharpe": strategy_metrics["sharpe"],
@@ -406,9 +435,12 @@ def _has_point_in_time_universe(market_data: MarketData) -> bool:
 
 
 def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
-    if market_data.volumes.empty or market_data.prices.empty:
+    if market_data.volumes.empty:
         return False
-    return set(market_data.prices.columns).issubset(set(market_data.volumes.columns))
+    analysis_symbols = list(_analysis_prices(market_data, config).columns)
+    if not analysis_symbols:
+        return False
+    return set(analysis_symbols).issubset(set(market_data.volumes.columns))
 
 
 def _has_broad_or_approved_tradable_universe(config: RunConfig, market_data: MarketData) -> bool:
@@ -574,11 +606,14 @@ def run_analysis(config: RunConfig) -> RunResult:
     config.validate()
     market_data = load_market_data(config)
     prices = market_data.prices.dropna(axis=1, how="all")
-    factor_scores = compute_factor_scores(prices)
-    factor_validation = validate_factor_library(prices)
+    analysis_prices = _analysis_prices(market_data, config)
+    if analysis_prices.empty:
+        raise ValueError("no stock-only analysis price symbols available after universe and eligibility filters")
+    factor_scores = compute_factor_scores(analysis_prices)
+    factor_validation = validate_factor_library(analysis_prices)
     factor_definitions = factor_definitions_frame()
     backtests = {
-        name: run_factor_backtest(prices, scores, config, name)
+        name: run_factor_backtest(analysis_prices, scores, config, name)
         for name, scores in factor_scores.items()
     }
     metrics, robustness = _metrics_for_backtests(backtests)
@@ -611,11 +646,11 @@ def run_analysis(config: RunConfig) -> RunResult:
         recommendations["weight"] = 0.0
     recommendations["recommendation_status"] = status
     recommendations["recommendation_output"] = tradability_assessment.output_key
-    recommendations["signal_date"] = str(prices.index.max().date()) if not prices.empty else "unavailable"
+    recommendations["signal_date"] = str(analysis_prices.index.max().date()) if not analysis_prices.empty else "unavailable"
     recommendations["selected_factor"] = selected_factor
     recommendations["selected_factor_selection_source"] = selection_source
 
-    sensitivity = _parameter_sensitivity(prices, selected_factor, config, factor_scores[selected_factor])
+    sensitivity = _parameter_sensitivity(analysis_prices, selected_factor, config, factor_scores[selected_factor])
     metadata = {
         "run_timestamp_utc": datetime.now(UTC).isoformat(),
         "provider": market_data.provider,
@@ -629,18 +664,21 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_factor_selection_source": selection_source,
         "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
         "selected_reason": selected_reason,
-        "signal_date": str(prices.index.max().date()) if not prices.empty else None,
+        "signal_date": str(analysis_prices.index.max().date()) if not analysis_prices.empty else None,
         "execution_delay": "one trading day after signal/rebalance schedule",
         "portfolio_construction": f"long-only top-{config.top_n} factor portfolios at each rebalance, max weight {config.max_weight:.2%}",
         "candidate_universe_size": len(market_data.candidate_universe),
-        "eligible_price_universe_size": len(prices.columns),
+        "eligible_price_universe_size": len(analysis_prices.columns),
+        "fetched_price_symbol_count": len(prices.columns),
+        "benchmark_symbol": normalize_symbol(config.benchmark),
+        "benchmark_price_available": normalize_symbol(config.benchmark) in prices.columns,
         "excluded_symbols": len(market_data.exclusions),
         "subset_run": subset_run,
         "factor_count": len(factor_definitions),
         "factor_validation_status": "pass" if factor_validation["status"].eq("pass").all() else "fail",
         "transaction_cost_bps": config.transaction_cost_bps,
         "slippage_bps": config.slippage_bps,
-        "benchmark": config.benchmark,
+        "benchmark": normalize_symbol(config.benchmark),
         "selected_factor_avg_turnover": float(selected_metrics.get("full_avg_turnover", 0.0)),
         "selected_factor_total_turnover": float(selected_metrics.get("full_total_turnover", 0.0)),
         "selected_factor_annualized_turnover": float(selected_metrics.get("full_annualized_turnover", 0.0)),

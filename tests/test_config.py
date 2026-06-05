@@ -1,12 +1,16 @@
 import pytest
 
 from momentum_factor_lab.config import RunConfig
+from momentum_factor_lab.universe import load_packaged_universe_frame
 
 
-def test_config_defaults_to_top_20_and_large_universe():
+def test_config_defaults_to_top_20_and_large_stock_only_universe():
     config = RunConfig()
+    packaged = load_packaged_universe_frame()
     assert config.top_n == 20
     assert len(config.universe) >= 2000
+    assert len(packaged) >= 2000
+    assert not packaged["is_etf"].any()
 
 
 @pytest.mark.parametrize(

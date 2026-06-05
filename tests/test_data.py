@@ -3,7 +3,19 @@ import pandas as pd
 
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import _apply_stooq_fallback, _eligible_filter
-from momentum_factor_lab.universe import universe_frame_for_symbols
+
+
+def _candidate_frame(symbols):
+    return pd.DataFrame(
+        {
+            "symbol": symbols,
+            "name": symbols,
+            "asset_type": ["stock"] * len(symbols),
+            "exchange": ["fixture"] * len(symbols),
+            "source": ["test-fixture"] * len(symbols),
+            "is_etf": [False] * len(symbols),
+        }
+    )
 
 
 def test_eligible_filter_excludes_uninvestable_symbols():
@@ -26,7 +38,7 @@ def test_eligible_filter_excludes_uninvestable_symbols():
         },
         index=dates,
     )
-    candidate = universe_frame_for_symbols(["GOOD", "LOWP", "SHORT", "ILLIQ", "MISS"])
+    candidate = _candidate_frame(["GOOD", "LOWP", "SHORT", "ILLIQ", "MISS"])
     config = RunConfig(min_history_days=252, min_price=5, min_avg_dollar_volume=1_000_000)
     filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
     assert list(filtered.columns) == ["GOOD"]
@@ -36,6 +48,26 @@ def test_eligible_filter_excludes_uninvestable_symbols():
     assert reasons["SHORT"] == "insufficient price history"
     assert reasons["ILLIQ"] == "below average dollar-volume filter"
     assert reasons["MISS"] == "missing from price providers"
+
+
+def test_eligible_filter_retains_benchmark_price_without_candidate_liquidity():
+    dates = pd.bdate_range("2024-01-01", periods=260)
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(400, 430, len(dates)),
+            "GOOD": np.linspace(20, 30, len(dates)),
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame({"GOOD": 1_000_000}, index=dates)
+    candidate = _candidate_frame(["GOOD"])
+    config = RunConfig(min_history_days=252, min_price=5, min_avg_dollar_volume=1_000_000)
+
+    filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
+
+    assert list(filtered.columns) == ["SPY", "GOOD"]
+    assert list(eligible["symbol"]) == ["GOOD"]
+    assert "SPY" not in set(exclusions["symbol"])
 
 
 def test_stooq_fallback_records_symbol_provider_and_cache(monkeypatch, tmp_path):

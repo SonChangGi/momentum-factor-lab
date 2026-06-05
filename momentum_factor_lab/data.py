@@ -18,6 +18,9 @@ from .config import RunConfig
 from .universe import (
     SAMPLE_UNIVERSE,
     build_public_universe_frame,
+    is_known_etf_symbol,
+    normalize_symbol,
+    stock_only_universe_frame,
     universe_frame_for_symbols,
 )
 
@@ -64,6 +67,9 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         "retries",
         "error",
         "note",
+        "benchmark_symbol",
+        "benchmark_price_available",
+        "requested_download_symbols",
     ]
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -126,10 +132,12 @@ def _point_in_time_provenance_source(config: RunConfig, candidate: pd.DataFrame)
 
 
 def _requested_symbols(config: RunConfig, candidate: pd.DataFrame) -> tuple[list[str], bool]:
-    symbols = list(dict.fromkeys([config.benchmark, *candidate["symbol"].tolist()]))
+    benchmark = normalize_symbol(config.benchmark)
+    candidate_symbols = [symbol for symbol in candidate["symbol"].tolist() if symbol != benchmark and not is_known_etf_symbol(symbol)]
+    symbols = list(dict.fromkeys([benchmark, *candidate_symbols]))
     if config.max_price_symbols is not None and len(symbols) > config.max_price_symbols:
-        keep = [config.benchmark]
-        for symbol in symbols:
+        keep = [benchmark]
+        for symbol in candidate_symbols:
             if symbol not in keep:
                 keep.append(symbol)
             if len(keep) >= config.max_price_symbols:
@@ -144,7 +152,7 @@ def _price_source_frame(symbols: Iterable[str], source: str) -> pd.DataFrame:
 
 def generate_offline_sample_data(config: RunConfig) -> MarketData:
     candidate, universe_sources = _candidate_universe(config)
-    symbols = list(dict.fromkeys([config.benchmark, *SAMPLE_UNIVERSE, *config.universe[:8]]))[:24]
+    symbols = list(dict.fromkeys([normalize_symbol(config.benchmark), *SAMPLE_UNIVERSE, *config.universe[:8]]))[:24]
     dates = _business_dates(config)
     rng = np.random.default_rng(42)
     common = rng.normal(0.00025, 0.008, len(dates))
@@ -156,9 +164,9 @@ def generate_offline_sample_data(config: RunConfig) -> MarketData:
         vol = 0.011 + 0.0015 * (i % 5)
         seasonal = 0.0008 * np.sin(np.linspace(0, 10 + i / 3, len(dates)))
         shock = rng.normal(drift, vol, len(dates)) + 0.35 * common + seasonal
-        if symbol in {"NVDA", "MSFT", "AAPL", "QQQ", "XLK"}:
+        if symbol in {"NVDA", "MSFT", "AAPL", "AVGO", "TSLA"}:
             shock += np.linspace(-0.0001, 0.00045, len(dates))
-        if symbol in {"IWM", "XLF"}:
+        if symbol in {"JPM", "XOM"}:
             shock += 0.00015 * np.sin(np.linspace(0, 22, len(dates)))
         series = 80 * np.exp(np.cumsum(shock))
         prices[symbol] = np.maximum(series, 1.0)
@@ -166,7 +174,9 @@ def generate_offline_sample_data(config: RunConfig) -> MarketData:
     price_df = pd.DataFrame(prices, index=dates).round(4)
     volume_df = pd.DataFrame(volumes, index=dates).round(0)
     exclusions = pd.DataFrame(columns=["symbol", "reason"])
-    eligible = universe_frame_for_symbols(symbols)
+    candidate_symbol_set = set(candidate["symbol"])
+    eligible_symbols = [symbol for symbol in symbols if symbol in candidate_symbol_set]
+    eligible = stock_only_universe_frame(candidate[candidate["symbol"].isin(eligible_symbols)])
     price_sources = _price_source_frame(symbols, "deterministic-offline-sample")
     data_sources = pd.concat(
         [
@@ -178,8 +188,11 @@ def generate_offline_sample_data(config: RunConfig) -> MarketData:
                         "status": "generated",
                         "records": len(symbols),
                         "candidate_symbols": len(candidate),
-                        "requested_price_symbols": len(symbols),
-                        "eligible_price_symbols": len(symbols),
+                        "requested_price_symbols": len(eligible_symbols),
+                        "eligible_price_symbols": len(eligible_symbols),
+                        "requested_download_symbols": len(symbols),
+                        "benchmark_symbol": normalize_symbol(config.benchmark),
+                        "benchmark_price_available": normalize_symbol(config.benchmark) in price_df.columns,
                         "excluded_symbols": 0,
                         "subset_run": True,
                         "point_in_time_universe": False,
@@ -438,12 +451,29 @@ def _eligible_filter(
     volumes: pd.DataFrame,
     candidate: pd.DataFrame,
     config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     exclusions: list[dict[str, object]] = []
     keep: list[str] = []
+    candidate_symbols = set(candidate["symbol"].map(normalize_symbol)) if "symbol" in candidate else set()
+    benchmark = normalize_symbol(config.benchmark)
     as_of = prices.dropna(how="all").index.max() if not prices.empty else None
-    for symbol in prices.columns:
-        series = prices[symbol].dropna()
+    for raw_symbol in prices.columns:
+        symbol = normalize_symbol(raw_symbol)
+        is_benchmark = symbol == benchmark
+        is_candidate = symbol in candidate_symbols
+        if not is_benchmark and not is_candidate:
+            exclusions.append({"symbol": symbol, "reason": "not in stock candidate universe", "observed": np.nan})
+            continue
+        if is_candidate and is_known_etf_symbol(symbol):
+            exclusions.append({"symbol": symbol, "reason": "known ETF excluded from stock-only universe", "observed": np.nan})
+            continue
+        series = prices[raw_symbol].dropna()
+        if is_benchmark:
+            if len(series) < 2:
+                exclusions.append({"symbol": symbol, "reason": "insufficient benchmark price history", "observed": len(series)})
+                continue
+            keep.append(raw_symbol)
+            continue
         if len(series) < config.min_history_days:
             exclusions.append({"symbol": symbol, "reason": "insufficient price history", "observed": len(series)})
             continue
@@ -455,27 +485,33 @@ def _eligible_filter(
         if latest_price < config.min_price:
             exclusions.append({"symbol": symbol, "reason": "below minimum price", "observed": latest_price})
             continue
-        if symbol not in volumes or volumes[symbol].dropna().empty:
+        if raw_symbol not in volumes or volumes[raw_symbol].dropna().empty:
             if config.min_avg_dollar_volume > 0 or config.min_avg_volume > 0:
                 exclusions.append({"symbol": symbol, "reason": "missing volume data", "observed": np.nan})
                 continue
         else:
-            avg_volume = float(volumes[symbol].tail(63).mean())
-            avg_dollar = float((prices[symbol].tail(63) * volumes[symbol].tail(63)).mean())
+            avg_volume = float(volumes[raw_symbol].tail(63).mean())
+            avg_dollar = float((prices[raw_symbol].tail(63) * volumes[raw_symbol].tail(63)).mean())
             if avg_volume < config.min_avg_volume:
                 exclusions.append({"symbol": symbol, "reason": "below average share-volume filter", "observed": avg_volume})
                 continue
             if avg_dollar < config.min_avg_dollar_volume:
                 exclusions.append({"symbol": symbol, "reason": "below average dollar-volume filter", "observed": avg_dollar})
                 continue
-        keep.append(symbol)
+        keep.append(raw_symbol)
     for symbol in candidate["symbol"]:
         if symbol not in prices.columns:
             exclusions.append({"symbol": symbol, "reason": "missing from price providers", "observed": np.nan})
     keep = list(dict.fromkeys(keep))
     price_keep = prices[keep].dropna(how="all") if keep else pd.DataFrame(index=prices.index)
     volume_keep = volumes.reindex(index=price_keep.index, columns=keep)
-    eligible = universe_frame_for_symbols(keep)
+    eligible_symbols = [
+        symbol
+        for symbol in keep
+        if normalize_symbol(symbol) in candidate_symbols and normalize_symbol(symbol) != benchmark
+    ]
+    normalized_eligible = {normalize_symbol(symbol) for symbol in eligible_symbols}
+    eligible = stock_only_universe_frame(candidate[candidate["symbol"].map(normalize_symbol).isin(normalized_eligible)])
     exclusions_df = pd.DataFrame(exclusions, columns=["symbol", "reason", "observed"])
     return price_keep, volume_keep, eligible, exclusions_df
 
@@ -515,7 +551,9 @@ def download_live_data(config: RunConfig) -> MarketData:
         sample.live_error = "live download returned no prices"
         return sample
 
-    prices, volumes, eligible, exclusions = _eligible_filter(prices, volumes, candidate[candidate["symbol"].isin(symbols)], config)
+    benchmark = normalize_symbol(config.benchmark)
+    requested_candidate_symbols = [symbol for symbol in symbols if symbol != benchmark and symbol in set(candidate["symbol"])]
+    prices, volumes, eligible, exclusions = _eligible_filter(prices, volumes, candidate[candidate["symbol"].isin(requested_candidate_symbols)], config)
     stooq_symbols = set()
     if not stooq_sources.empty and "symbol" in stooq_sources:
         stooq_symbols = set(stooq_sources.loc[stooq_sources["records"].fillna(0).astype(int).gt(0), "symbol"].astype(str))
@@ -538,15 +576,18 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "status": "partial_subset" if subset_run else "full_requested_universe",
                 "records": len(prices.columns),
                 "candidate_symbols": len(candidate),
-                "requested_price_symbols": len(symbols),
-                "eligible_price_symbols": len(prices.columns),
+                "requested_price_symbols": len(requested_candidate_symbols),
+                "eligible_price_symbols": len(eligible),
+                "requested_download_symbols": len(symbols),
+                "benchmark_symbol": benchmark,
+                "benchmark_price_available": benchmark in prices.columns,
                 "excluded_symbols": len(exclusions),
                 "subset_run": subset_run,
                 "point_in_time_universe": False,
                 "tradable_universe_approved": False,
                 "note": (
-                    "Model-portfolio outputs are based only on eligible price symbols after history, "
-                    "liquidity, and freshness filters; tradability gates decide whether rows are exported "
+                    "Model-portfolio outputs are based only on eligible stock candidate price symbols after history, "
+                    "liquidity, and freshness filters; benchmark prices are retained only for comparison; tradability gates decide whether rows are exported "
                     "as live recommendations or zero-weight research_signals."
                 ),
             }

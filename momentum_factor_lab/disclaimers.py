@@ -1,6 +1,6 @@
 DATA_LIMITATIONS = (
-    "This first-pass lab uses a current liquid US stock/ETF universe and free/public data. "
-    "Historical backtests can contain survivorship bias, delisting omissions, ETF inception bias, "
+    "This lab uses a current liquid US individual-stock candidate universe and free/public data. ETFs are excluded from candidate holdings; benchmark ETFs may be used only as comparators. "
+    "Historical backtests can contain survivorship bias, delisting omissions, benchmark ETF inception/adjustment caveats, "
     "provider adjusted-price quirks, and historical-universe membership gaps."
 )
 

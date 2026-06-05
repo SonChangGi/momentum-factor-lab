@@ -1,12 +1,13 @@
 # momentum-factor-lab
 
-Practical momentum factor research/backtesting lab for broad US stocks and ETFs.
+Practical momentum factor research/backtesting lab for broad US individual stocks.
 
 ## What it does
 
-- Builds a source-aware candidate universe of **3,500 US-listed symbols** by default: 2,500 stocks and 1,000 ETFs from packaged public-source seeds.
+- Builds a source-aware candidate universe of **2,400+ US-listed individual stocks** by default from packaged public-source seeds; ETFs are excluded from candidate holdings.
 - Supports optional public-source refresh from SEC company tickers and Nasdaq Trader symbol directories.
-- Downloads daily adjusted prices from yfinance in chunks, with bounded Stooq fallback and source/provenance reporting.
+- User-supplied `--universe` symbols are fail-closed: they are intersected with packaged/public stock metadata, so unknown symbol-only inputs are not assumed to be individual stocks.
+- Downloads daily adjusted prices from yfinance in chunks, with bounded Stooq fallback and source/provenance reporting; benchmark ETF prices may be fetched only for benchmark-relative metrics.
 - Compares **22 explainable momentum factors** across traditional, recent, composite, trend, risk-adjusted, drawdown, breakout, reversal, acceleration, consistency, and robust-return families.
 - Backtests each factor as a long-only **top-20 portfolio** at each rebalance with one-day execution delay and transaction/slippage assumptions.
 - Selects a best factor using validation-first risk-adjusted scoring, not in-sample return alone.
@@ -37,7 +38,7 @@ Live tradable recommendations require `--selected-factor`, fresh live data, an u
 
 For a run to emit `recommendations` rather than `research_signals`, it must also pass row-level checks:
 
-- full uncapped price coverage from a broad 2,000+ candidate universe, or an explicitly approved tradable universe;
+- full uncapped price coverage from a broad 2,000+ stock-candidate universe, or an explicitly approved tradable stock universe;
 - explicit point-in-time universe provenance/attestation via `--point-in-time-universe-provenance`;
 - non-missing 63-day price/volume/dollar-volume evidence for every recommended row, with at least `--min-liquidity-observations` observations;
 - configured capacity inputs (`--target-aum` and `--max-adv-participation`) with every target position inside the 63-day ADV participation limit.
@@ -61,4 +62,4 @@ Generated artifacts are ignored by git:
 
 ## Limitations and disclaimer
 
-This lab uses current listed symbols and free/public data unless the user supplies separate point-in-time provenance. Historical backtests can contain survivorship bias, delisting omissions, ETF inception bias, adjusted-price/provider differences, rate-limit gaps, endpoint-liquidity bias, and historical-membership gaps. Outputs are research artifacts and model-portfolio examples unless the explicit tradability gate passes; they are not personalized financial, tax, legal, or investment advice.
+This lab uses current listed individual-stock symbols and free/public data unless the user supplies separate point-in-time provenance. Historical backtests can contain survivorship bias, delisting omissions, benchmark ETF inception/adjustment caveats, adjusted-price/provider differences, rate-limit gaps, endpoint-liquidity bias, and historical-membership gaps. ETFs are not candidate holdings; benchmark ETFs such as SPY may appear only as comparators. Outputs are research artifacts and model-portfolio examples unless the explicit tradability gate passes; they are not personalized financial, tax, legal, or investment advice.

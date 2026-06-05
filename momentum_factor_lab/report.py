@@ -67,8 +67,9 @@ def write_excel(result: RunResult, path: Path) -> None:
     selected_scores = result.factor_scores[result.selected_factor].iloc[-1].sort_values(ascending=False)
     universe = result.market_data.candidate_universe.copy()
     if "symbol" in universe:
-        eligible = set(result.market_data.prices.columns)
-        universe["eligible_price_symbol"] = universe["symbol"].isin(eligible)
+        eligible_universe = getattr(result.market_data, "eligible_universe", pd.DataFrame())
+        eligible = set(eligible_universe["symbol"]) if "symbol" in eligible_universe else set()
+        universe["eligible_stock_price_symbol"] = universe["symbol"].isin(eligible)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         _metadata_frame(result).to_excel(writer, sheet_name="config_assumptions", index=False)
         universe.to_excel(writer, sheet_name="universe", index=False)
@@ -149,7 +150,8 @@ def write_pdf(result: RunResult, path: Path) -> None:
                 f"Tradability blockers: {blocker_text}",
                 f"Liquidity/capacity: {result.metadata.get('recommendation_capacity_warning', 'not reported')}",
                 f"Data source: {result.metadata['provider']} | data as of: {result.metadata['data_as_of']} | run: {result.metadata['run_timestamp_utc']}",
-                f"Universe: {result.metadata['candidate_universe_size']} candidates; {result.metadata['eligible_price_universe_size']} eligible price symbols; {result.metadata['excluded_symbols']} exclusions.",
+                f"Universe: {result.metadata['candidate_universe_size']} stock candidates; {result.metadata['eligible_price_universe_size']} eligible stock price symbols; {result.metadata['excluded_symbols']} exclusions.",
+                f"Benchmark price available: {result.metadata.get('benchmark_price_available')} ({result.metadata.get('benchmark_symbol', result.config.benchmark)}) — benchmark is not an investable candidate.",
                 f"Portfolio construction: {result.metadata['portfolio_construction']}",
                 f"Benchmark: {result.config.benchmark} | Transaction cost/slippage: {result.config.transaction_cost_bps:.1f} bps + {result.config.slippage_bps:.1f} bps.",
                 result.metadata["survivorship_bias_caveat"],

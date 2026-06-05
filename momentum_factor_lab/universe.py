@@ -17,13 +17,7 @@ NASDAQ_LISTED_URL = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt
 NASDAQ_OTHER_LISTED_URL = "http://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 USER_AGENT = "momentum-factor-lab/0.1 free-public-data research"
 
-CORE_SAMPLE_SYMBOLS = [
-    "SPY",
-    "QQQ",
-    "IWM",
-    "XLK",
-    "XLF",
-    "XLV",
+CORE_STOCK_SAMPLE_SYMBOLS = [
     "AAPL",
     "MSFT",
     "NVDA",
@@ -38,7 +32,89 @@ CORE_SAMPLE_SYMBOLS = [
     "NFLX",
     "AMD",
     "ORCL",
+    "AVGO",
+    "TSLA",
+    "LLY",
+    "WMT",
+    "XOM",
+    "V",
 ]
+
+# The packaged default no longer carries ETF rows. Keep an explicit deny-list so
+# common benchmark, sector, international, bond, commodity, and leveraged ETF
+# tickers cannot re-enter as user-supplied custom candidates after the resource
+# rows are deleted. Benchmark prices may still be downloaded separately by the
+# data layer for benchmark-relative metrics.
+KNOWN_ETF_SYMBOLS = frozenset(
+    {
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        "MDY",
+        "RSP",
+        "VTI",
+        "VOO",
+        "IVV",
+        "SCHB",
+        "ITOT",
+        "XLK",
+        "XLF",
+        "XLV",
+        "XLY",
+        "XLP",
+        "XLE",
+        "XLI",
+        "XLB",
+        "XLU",
+        "XLRE",
+        "XLC",
+        "SMH",
+        "SOXX",
+        "XBI",
+        "XRT",
+        "VUG",
+        "VGT",
+        "IWF",
+        "IWD",
+        "IWB",
+        "EFA",
+        "EEM",
+        "VEA",
+        "VWO",
+        "IEFA",
+        "IEMG",
+        "ARKK",
+        "TLT",
+        "IEF",
+        "SHY",
+        "AGG",
+        "BND",
+        "HYG",
+        "LQD",
+        "TIP",
+        "MUB",
+        "GLD",
+        "SLV",
+        "USO",
+        "UNG",
+        "PHYS",
+        "PSLV",
+        "TQQQ",
+        "SQQQ",
+        "UPRO",
+        "SPXU",
+        "SSO",
+        "SDS",
+        "TNA",
+        "TZA",
+        "SOXL",
+        "SOXS",
+    }
+)
+
+# Backward-compatible alias for older callers; contents are now stock-only.
+CORE_SAMPLE_SYMBOLS = CORE_STOCK_SAMPLE_SYMBOLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +146,23 @@ FORBIDDEN_INSTRUMENT_TERMS = (
     " DAILY BEAR",
 )
 
+NON_STOCK_INSTRUMENT_PATTERNS = (
+    r"\bETF\b",
+    r"\bETN\b",
+    r"EXCHANGE[- ]TRADED",
+    r"\bINDEX FUND\b",
+    r"\bMUTUAL FUND\b",
+    r"\bCLOSED[- ]END FUND\b",
+    r"\bFUND\b",
+    r"\bFUNDS\b",
+    r"\bPHYSICAL (GOLD|SILVER|PLATINUM|PALLADIUM)\b",
+    r"\bSPROTT PHYSICAL\b",
+    r"\bTREASURY\b",
+    r"\bBOND\b",
+    r"\bCOMMODIT(Y|IES)\b",
+    r"\bCURRENCY\b",
+)
+
 
 def is_supported_symbol(symbol: str) -> bool:
     if not re.match(r"^[A-Z][A-Z0-9-]{0,9}$", symbol):
@@ -81,6 +174,8 @@ def is_supported_symbol(symbol: str) -> bool:
 def is_excluded_instrument_name(name: object) -> bool:
     upper = str(name).upper().replace("&", " AND ")
     if any(term in upper for term in FORBIDDEN_INSTRUMENT_TERMS):
+        return True
+    if any(re.search(pattern, upper) for pattern in NON_STOCK_INSTRUMENT_PATTERNS):
         return True
     if re.search(r"\b\d+(?:\.\d+)?\s*X\b", upper):
         return True
@@ -107,42 +202,64 @@ def _base_columns() -> list[str]:
     return ["symbol", "name", "asset_type", "exchange", "source", "is_etf"]
 
 
-def _clean_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _normalize_frame(
+    frame: pd.DataFrame,
+    *,
+    drop_duplicates: bool = True,
+    exclude_by_name: bool = True,
+) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(columns=_base_columns())
     out = frame.copy()
-    out["symbol"] = out["symbol"].map(normalize_symbol)
-    out = out[out["symbol"].map(is_supported_symbol)]
-    if "name" in out:
-        out = out[~out["name"].map(is_excluded_instrument_name)]
-    out = out.drop_duplicates("symbol", keep="first")
     for col in _base_columns():
         if col not in out:
             out[col] = ""
+    out["symbol"] = out["symbol"].map(normalize_symbol)
+    out = out[out["symbol"].map(is_supported_symbol)]
+    if exclude_by_name:
+        out = out[~out["name"].map(is_excluded_instrument_name)]
     out["is_etf"] = out["is_etf"].map(lambda v: str(v).lower() in {"true", "1", "yes", "y"})
     out["asset_type"] = out.apply(
         lambda row: "etf" if bool(row["is_etf"]) else (str(row["asset_type"]).lower() or "stock"),
         axis=1,
     )
+    if drop_duplicates:
+        out = out.drop_duplicates("symbol", keep="first")
     return out[_base_columns()].reset_index(drop=True)
+
+
+def _clean_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_frame(frame, drop_duplicates=True, exclude_by_name=True)
+
+
+def is_known_etf_symbol(symbol: object) -> bool:
+    return normalize_symbol(symbol) in KNOWN_ETF_SYMBOLS
+
+
+def stock_only_universe_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    cleaned = _clean_frame(frame)
+    if cleaned.empty:
+        return cleaned
+    stock_mask = ~cleaned["is_etf"] & cleaned["asset_type"].ne("etf") & ~cleaned["symbol"].map(is_known_etf_symbol)
+    return cleaned.loc[stock_mask].reset_index(drop=True)
 
 
 def load_packaged_universe_frame(path: Path = DEFAULT_UNIVERSE_PATH) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"default universe resource missing: {path}")
     frame = pd.read_csv(path)
-    return _clean_frame(frame)
+    return stock_only_universe_frame(frame)
 
 
 def _load_default_symbols() -> list[str]:
     try:
         return load_packaged_universe_frame()["symbol"].tolist()
     except Exception:
-        return list(CORE_SAMPLE_SYMBOLS)
+        return list(CORE_STOCK_SAMPLE_SYMBOLS)
 
 
 DEFAULT_UNIVERSE = _load_default_symbols()
-SAMPLE_UNIVERSE = list(CORE_SAMPLE_SYMBOLS)
+SAMPLE_UNIVERSE = list(CORE_STOCK_SAMPLE_SYMBOLS)
 
 
 def universe_frame_for_symbols(symbols: list[str] | tuple[str, ...] | str | None) -> pd.DataFrame:
@@ -154,16 +271,13 @@ def universe_frame_for_symbols(symbols: list[str] | tuple[str, ...] | str | None
             row = packaged.loc[symbol].to_dict()
             row["symbol"] = symbol
         else:
-            row = {
-                "symbol": symbol,
-                "name": symbol,
-                "asset_type": "custom",
-                "exchange": "unknown",
-                "source": "user-supplied",
-                "is_etf": False,
-            }
+            # Fail closed for symbol-only custom inputs. Without provider
+            # metadata we cannot prove an unknown ticker is an individual stock
+            # rather than an ETF/ETN/fund, so user-supplied universes are
+            # intersected with packaged/public stock metadata.
+            continue
         rows.append(row)
-    return _clean_frame(pd.DataFrame(rows))
+    return stock_only_universe_frame(pd.DataFrame(rows))
 
 
 def parse_sec_company_tickers_exchange(payload: str) -> pd.DataFrame:
@@ -183,10 +297,10 @@ def parse_sec_company_tickers_exchange(payload: str) -> pd.DataFrame:
                 "is_etf": False,
             }
         )
-    return _clean_frame(pd.DataFrame(rows))
+    return stock_only_universe_frame(pd.DataFrame(rows))
 
 
-def parse_nasdaq_symbol_directory(payload: str, *, source_name: str) -> pd.DataFrame:
+def parse_nasdaq_symbol_directory(payload: str, *, source_name: str, include_etfs: bool = False) -> pd.DataFrame:
     lines = [line for line in payload.splitlines() if "|" in line and not line.startswith("File Creation Time")]
     if not lines:
         return pd.DataFrame(columns=_base_columns())
@@ -197,6 +311,8 @@ def parse_nasdaq_symbol_directory(payload: str, *, source_name: str) -> pd.DataF
         if row.get("Test Issue", "N").strip().upper() == "Y":
             continue
         is_etf = row.get("ETF", "N").strip().upper() == "Y"
+        if is_etf and not include_etfs:
+            continue
         rows.append(
             {
                 "symbol": symbol,
@@ -207,7 +323,10 @@ def parse_nasdaq_symbol_directory(payload: str, *, source_name: str) -> pd.DataF
                 "is_etf": is_etf,
             }
         )
-    return _clean_frame(pd.DataFrame(rows))
+    frame = pd.DataFrame(rows)
+    if include_etfs:
+        return _normalize_frame(frame, drop_duplicates=False, exclude_by_name=False)
+    return stock_only_universe_frame(frame)
 
 
 def _fetch_text_with_cache(
@@ -262,8 +381,24 @@ def build_public_universe_frame(
     source_rows: list[dict[str, object]] = []
     fetches = [
         (SEC_COMPANY_TICKERS_EXCHANGE_URL, "sec_company_tickers_exchange.json", parse_sec_company_tickers_exchange),
-        (NASDAQ_LISTED_URL, "nasdaqlisted.txt", lambda text: parse_nasdaq_symbol_directory(text, source_name="nasdaq-trader-listed")),
-        (NASDAQ_OTHER_LISTED_URL, "otherlisted.txt", lambda text: parse_nasdaq_symbol_directory(text, source_name="nasdaq-trader-otherlisted")),
+        (
+            NASDAQ_LISTED_URL,
+            "nasdaqlisted.txt",
+            lambda text: parse_nasdaq_symbol_directory(
+                text,
+                source_name="nasdaq-trader-listed",
+                include_etfs=True,
+            ),
+        ),
+        (
+            NASDAQ_OTHER_LISTED_URL,
+            "otherlisted.txt",
+            lambda text: parse_nasdaq_symbol_directory(
+                text,
+                source_name="nasdaq-trader-otherlisted",
+                include_etfs=True,
+            ),
+        ),
     ]
     for url, cache_name, parser in fetches:
         text, source = _fetch_text_with_cache(url, cache_dir, cache_name, retry_count, retry_backoff_seconds)
@@ -288,7 +423,31 @@ def build_public_universe_frame(
                 ]
             ),
         )
-    combined = pd.concat(frames, ignore_index=True)
-    combined = combined.sort_values(["is_etf", "symbol"], ascending=[False, True])
-    combined = _clean_frame(combined)
+    combined = _merge_universe_sources(pd.concat(frames, ignore_index=True))
+    combined = combined.sort_values(["is_etf", "symbol"], ascending=[True, True])
+    combined = stock_only_universe_frame(combined)
     return UniverseSourceResult(combined, pd.DataFrame(source_rows))
+
+
+def _merge_universe_sources(frame: pd.DataFrame) -> pd.DataFrame:
+    """Merge source rows while preserving ETF evidence from any provider."""
+
+    cleaned = _normalize_frame(frame, drop_duplicates=False, exclude_by_name=False)
+    if cleaned.empty:
+        return cleaned
+    rows: list[dict[str, object]] = []
+    for symbol, group in cleaned.groupby("symbol", sort=False):
+        stock_like = group[~group["is_etf"] & group["asset_type"].ne("etf")]
+        primary = (stock_like if not stock_like.empty else group).iloc[0]
+        is_etf = bool(group["is_etf"].any() or group["asset_type"].eq("etf").any())
+        rows.append(
+            {
+                "symbol": symbol,
+                "name": primary["name"],
+                "asset_type": "etf" if is_etf else "stock",
+                "exchange": primary["exchange"],
+                "source": "+".join(sorted(set(group["source"].astype(str)))),
+                "is_etf": is_etf,
+            }
+        )
+    return pd.DataFrame(rows, columns=_base_columns())
