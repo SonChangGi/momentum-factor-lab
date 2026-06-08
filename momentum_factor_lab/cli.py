@@ -7,7 +7,7 @@ from pathlib import Path
 from .config import RunConfig
 from .report import write_reports
 from .universe import normalize_symbols
-from .workflow import run_analysis
+from .workflow import _json_safe, run_analysis
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,13 +28,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--universe-profile",
         choices=["large_liquid", "extended_current", "aggressive_stock_only"],
         default="large_liquid",
-        help="Candidate-universe profile; refresh/current profiles remain research-only without PIT evidence.",
+        help="Candidate-universe profile; missing PIT evidence is reported as an execution limitation.",
     )
     run.add_argument("--top-n", type=int, default=20)
     run.add_argument("--max-weight", type=float, default=0.10)
+    run.add_argument(
+        "--recommendation-weighting-method",
+        choices=["equal", "score_size_liquidity"],
+        default="score_size_liquidity",
+        help="Current recommendation weighting method; backtests remain comparable capped top-N portfolios",
+    )
+    run.add_argument("--recommendation-score-weight", type=float, default=0.60)
+    run.add_argument("--recommendation-market-cap-weight", type=float, default=0.25)
+    run.add_argument("--recommendation-liquidity-weight", type=float, default=0.15)
+    run.add_argument("--recommendation-rank-floor", type=float, default=0.05)
+    run.add_argument(
+        "--disable-recommendation-market-cap-lookup",
+        action="store_true",
+        help="Disable best-effort yfinance market-cap enrichment for final recommendation candidates",
+    )
     run.add_argument("--max-price-symbols", type=int, default=None, help="Optional live/smoke cap; reports are marked subset when used")
     run.add_argument("--price-chunk-size", type=int, default=150)
-    run.add_argument("--stooq-fallback-limit", type=int, default=0)
+    run.add_argument(
+        "--stooq-fallback-limit",
+        type=int,
+        default=None,
+        help="Maximum missing symbols to retry through Stooq; omitted retries all missing symbols, 0 disables",
+    )
+    run.add_argument(
+        "--finance-datareader-fallback-limit",
+        type=int,
+        default=None,
+        help="Maximum still-missing symbols to retry through optional FinanceDataReader; omitted retries all, 0 disables",
+    )
     run.add_argument("--retry-count", type=int, default=1)
     run.add_argument("--retry-backoff-seconds", type=float, default=0.5)
     run.add_argument("--cost-stress-high-bps", type=float, default=50.0)
@@ -53,17 +79,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=63,
         help="Minimum non-null price/volume/dollar-volume observations required in the 63-day liquidity window",
     )
-    run.add_argument("--target-aum", type=float, default=None, help="Target AUM used only for capacity diagnostics/gating")
+    run.add_argument(
+        "--data-quality-lookback-days",
+        type=int,
+        default=252,
+        help="Recent trading-day lookback used for per-symbol data-quality diagnostics",
+    )
+    run.add_argument(
+        "--max-price-missing-ratio",
+        type=float,
+        default=0.05,
+        help="Maximum recent missing-price ratio before a symbol fails data-quality checks",
+    )
+    run.add_argument(
+        "--max-volume-missing-ratio",
+        type=float,
+        default=0.10,
+        help="Maximum recent missing-volume ratio before a symbol fails data-quality checks",
+    )
+    run.add_argument(
+        "--max-extreme-daily-return",
+        type=float,
+        default=0.80,
+        help="Maximum absolute adjusted daily return before flagging a data-quality anomaly",
+    )
+    run.add_argument("--target-aum", type=float, default=None, help="Target AUM used for capacity diagnostics")
     run.add_argument(
         "--max-adv-participation",
         type=float,
         default=None,
-        help="Maximum share of 63-day ADV a target position may consume before tradable output is blocked",
+        help="Maximum share of 63-day ADV a target position may consume before capacity is flagged",
     )
     run.add_argument(
         "--selected-factor",
         default=None,
-        help="Frozen/predeclared factor required for live tradable recommendations; validation rankings remain audit-only.",
+        help="Frozen/predeclared factor override; omitted values let validation-composite backtests choose the recommendation factor.",
     )
     run.add_argument(
         "--factor-selection-mode",
@@ -76,12 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--point-in-time-universe-provenance",
         default=None,
-        help="Explicit provenance/attestation for point-in-time universe evidence; current public universes remain research-only without it.",
+        help="Explicit provenance/attestation for point-in-time universe evidence; missing evidence is reported as a limitation.",
     )
     run.add_argument(
         "--approved-tradable-universe",
         action="store_true",
-        help="Attest that a user-supplied small universe is an approved tradable universe; still requires PIT provenance and capacity gates.",
+        help="Attest that a user-supplied small universe is an approved tradable universe; missing PIT/capacity evidence remains visible.",
     )
     run.add_argument("--min-tradable-universe-size", type=int, default=2_000)
     run.add_argument("--json", action="store_true", help="Emit machine-readable summary")
@@ -101,9 +151,16 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         universe_profile=args.universe_profile,
         top_n=args.top_n,
         max_weight=args.max_weight,
+        recommendation_weighting_method=args.recommendation_weighting_method,
+        recommendation_score_weight=args.recommendation_score_weight,
+        recommendation_market_cap_weight=args.recommendation_market_cap_weight,
+        recommendation_liquidity_weight=args.recommendation_liquidity_weight,
+        recommendation_rank_floor=args.recommendation_rank_floor,
+        recommendation_market_cap_lookup=not args.disable_recommendation_market_cap_lookup,
         max_price_symbols=args.max_price_symbols,
         price_chunk_size=args.price_chunk_size,
         stooq_fallback_limit=args.stooq_fallback_limit,
+        finance_datareader_fallback_limit=args.finance_datareader_fallback_limit,
         retry_count=args.retry_count,
         retry_backoff_seconds=args.retry_backoff_seconds,
         cost_stress_high_bps=args.cost_stress_high_bps,
@@ -122,6 +179,10 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         point_in_time_universe_provenance=args.point_in_time_universe_provenance,
         approved_tradable_universe=args.approved_tradable_universe,
         min_tradable_universe_size=args.min_tradable_universe_size,
+        data_quality_lookback_days=args.data_quality_lookback_days,
+        max_price_missing_ratio=args.max_price_missing_ratio,
+        max_volume_missing_ratio=args.max_volume_missing_ratio,
+        max_extreme_daily_return=args.max_extreme_daily_return,
     )
     result = write_reports(run_analysis(config))
     output_key = result.metadata["recommendation_output_key"]
@@ -141,21 +202,35 @@ def run_command(args: argparse.Namespace) -> dict[str, object]:
         "factor_selection_mode": result.metadata["factor_selection_mode"],
         "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
         "same_sample_selection_blocked_for_tradable": result.metadata["same_sample_selection_blocked_for_tradable"],
+        "decision_support_tier": result.metadata["decision_support_tier"],
+        "fail_closed": result.metadata["fail_closed"],
+        "fail_closed_reasons": result.metadata.get("fail_closed_reasons", []),
         "tradability_blockers": result.metadata.get("tradability_blockers", []),
+        "execution_limitations": result.metadata.get("execution_limitations", []),
+        "data_quality_gate": result.metadata.get("data_quality_gate", {}),
+        "data_quality_status_counts": result.metadata.get("data_quality_status_counts", {}),
+        "recommendation_data_quality_status_counts": result.metadata.get("recommendation_data_quality_status_counts", {}),
         "recommendation_capacity_warning": result.metadata.get("recommendation_capacity_warning"),
+        "recommendation_weighting_method": result.metadata.get("recommendation_weighting_method"),
+        "recommendation_weight_sum": result.metadata.get("recommendation_weight_sum"),
+        "recommendation_cash_weight": result.metadata.get("recommendation_cash_weight"),
         "outputs": result.output_paths,
         f"top_{output_key}": result.recommendations.head(result.config.top_n).to_dict(orient="records"),
     }
     if args.json:
-        print(json.dumps(summary, indent=2, default=str))
+        summary = _json_safe(summary)
+        print(json.dumps(summary, indent=2, allow_nan=False))
     else:
         print(f"Selected factor: {summary['selected_factor']}")
         print(f"Output status: {summary['recommendation_status']}")
         print(f"Output type: {summary['recommendation_output']}")
         print(f"Fresh live data available: {summary['fresh_live_data_available']}")
-        blockers = summary["tradability_blockers"]
-        print(f"Tradability blockers: {', '.join(blockers) if blockers else 'none'}")
+        limitations = summary["execution_limitations"]
+        print(f"Execution limitations: {', '.join(limitations) if limitations else 'none'}")
         print(f"Liquidity/capacity: {summary['recommendation_capacity_warning']}")
+        cash_weight = summary["recommendation_cash_weight"]
+        cash_text = f"{cash_weight:.2%}" if isinstance(cash_weight, int | float) else "unavailable"
+        print(f"Recommendation weighting: {summary['recommendation_weighting_method']} (cash remainder {cash_text})")
         print(f"Data as of: {summary['data_as_of']} via {summary['provider']}")
         print(
             "Universe: "

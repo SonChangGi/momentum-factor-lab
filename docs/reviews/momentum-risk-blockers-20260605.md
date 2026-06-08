@@ -5,6 +5,13 @@ Mode: read-only review; no product feature implementation.
 Final recommendation: REQUEST CHANGES
 Architectural status: BLOCK for treating current PDF/XLSX/JSON as live tradable recommendations.
 
+> Historical note (superseded 2026-06-08): this review captured the
+> pre-remediation state. The current implementation now defaults to an
+> uncapped live requested universe, emits a single primary `recommendations`
+> output, uses `execution_limitations` for advisory evidence gaps, reserves
+> `tradability_blockers` for fail-closed hard blockers, and retries missing
+> live symbols through Stooq plus optional FinanceDataReader fallback.
+
 ## Independent review lane evidence
 
 - code-reviewer lane `019e94e9-0ac4-7c91-8bdc-3b4e0de3f247`: REQUEST CHANGES.

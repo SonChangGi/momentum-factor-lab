@@ -101,6 +101,7 @@ def _status_panel_frame(result: RunResult) -> pd.DataFrame:
         "recommendation_status",
         "recommendation_output_label",
         "research_only",
+        "recommendation_output_available",
         "tradable_output_available",
         "universe_profile",
         "universe_source_mode",
@@ -109,7 +110,23 @@ def _status_panel_frame(result: RunResult) -> pd.DataFrame:
         "validation_selected_factor",
         "selected_factor_selection_source",
         "same_sample_selection_blocked_for_tradable",
+        "factor_selection_warning",
+        "recommendation_weighting_method",
+        "recommendation_weight_sum",
+        "recommendation_cash_weight",
+        "recommendation_weighting_components",
+        "recommendation_market_cap_source_counts",
+        "recommendation_size_component_source_counts",
         "point_in_time_universe",
+        "decision_support_tier",
+        "fail_closed",
+        "fail_closed_reasons",
+        "execution_limitations",
+        "data_quality_manifest_available",
+        "row_level_data_quality_pass",
+        "data_quality_gate",
+        "recommendation_data_quality_status_counts",
+        "data_quality_status_counts",
         "subset_run",
         "candidate_universe_size",
         "eligible_price_universe_size",
@@ -193,13 +210,13 @@ def _regime_performance_frame(result: RunResult) -> pd.DataFrame:
 
 def _tradability_gate_frame(result: RunResult) -> pd.DataFrame:
     requirements = result.metadata.get("tradability_requirements", {}) or {}
-    blockers = set(result.metadata.get("tradability_blockers", []) or [])
+    limitations = set(result.metadata.get("execution_limitations", result.metadata.get("tradability_blockers", [])) or [])
     return pd.DataFrame(
         [
-            {"requirement": name, "passed": bool(passed), "blocking": name in blockers}
+            {"requirement": name, "passed": bool(passed), "advisory_limitation": name in limitations}
             for name, passed in requirements.items()
         ],
-        columns=["requirement", "passed", "blocking"],
+        columns=["requirement", "passed", "advisory_limitation"],
     )
 
 
@@ -208,8 +225,27 @@ def _liquidity_capacity_frame(result: RunResult) -> pd.DataFrame:
         "rank",
         "symbol",
         "proposed_weight",
+        "weighting_method",
+        "raw_weight_score",
+        "pre_cap_weight",
+        "weight_cap",
+        "weight_cap_excess",
+        "score_component",
+        "market_cap",
+        "market_cap_source",
+        "market_cap_component",
+        "liquidity_component",
+        "size_component_source",
         "avg_share_volume_63d",
         "avg_dollar_volume_63d",
+        "data_quality_status",
+        "data_quality_pass",
+        "data_quality_warning",
+        "data_quality_price_source",
+        "data_quality_missing_ratio",
+        "data_quality_volume_missing_ratio",
+        "data_quality_latest_price",
+        "data_quality_stale_days",
         "liquidity_evidence_status",
         "capacity_status",
         "capacity_warning",
@@ -270,6 +306,7 @@ def write_excel(result: RunResult, path: Path) -> None:
         universe.to_excel(writer, sheet_name="universe", index=False)
         result.data_sources.to_excel(writer, sheet_name="data_sources", index=False)
         result.market_data.price_sources.to_excel(writer, sheet_name="price_sources", index=False)
+        result.data_quality.to_excel(writer, sheet_name="data_quality", index=False)
         result.factor_definitions.to_excel(writer, sheet_name="factor_definitions", index=False)
         result.factor_validation.to_excel(writer, sheet_name="factor_validation", index=False)
         _status_panel_frame(result).to_excel(writer, sheet_name="status_panel", index=False)
@@ -335,35 +372,50 @@ def _table_page(pdf: PdfPages, title: str, frame: pd.DataFrame, max_rows: int = 
     plt.close(fig)
 
 
+def _executive_summary_lines(result: RunResult) -> list[str]:
+    selected = result.selected_factor
+    limitations = result.metadata.get("execution_limitations", result.metadata.get("tradability_blockers", []))
+    limitation_text = ", ".join(limitations) if limitations else "none"
+    cash_weight = result.metadata.get("recommendation_cash_weight")
+    cash_text = f"{cash_weight:.2%}" if isinstance(cash_weight, int | float) else "unavailable"
+    return [
+        f"Selected factor: {selected}",
+        f"Selection rationale: {result.selected_reason}",
+        f"Output status: {result.metadata['recommendation_status']}",
+        f"Output type: {result.metadata.get('recommendation_output_label', 'Model-portfolio output rows')}",
+        f"Execution limitations: {limitation_text}",
+        (
+            "Recommendation weighting: "
+            f"{result.metadata.get('recommendation_weighting_method', 'unavailable')} | "
+            f"cash remainder: {cash_text}"
+        ),
+        f"Liquidity/capacity: {result.metadata.get('recommendation_capacity_warning', 'not reported')}",
+        f"Data quality: {result.metadata.get('data_quality_status_counts', {})}",
+        f"Recommendation data quality: {result.metadata.get('recommendation_data_quality_status_counts', {})}",
+        f"Data source: {result.metadata['provider']} | data as of: {result.metadata['data_as_of']} | run: {result.metadata['run_timestamp_utc']}",
+        f"Universe: {result.metadata['candidate_universe_size']} stock candidates; {result.metadata['eligible_price_universe_size']} eligible stock price symbols; {result.metadata['excluded_symbols']} exclusions.",
+        f"Benchmark price available: {result.metadata.get('benchmark_price_available')} ({result.metadata.get('benchmark_symbol', result.config.benchmark)}) — benchmark is not an investable candidate.",
+        f"Portfolio construction: {result.metadata['portfolio_construction']}",
+        f"Benchmark: {result.config.benchmark} | Transaction cost/slippage: {result.config.transaction_cost_bps:.1f} bps + {result.config.slippage_bps:.1f} bps.",
+        result.metadata["survivorship_bias_caveat"],
+        result.metadata["live_data_gate"],
+        result.metadata["non_advice_disclaimer"],
+    ]
+
+
 def write_pdf(result: RunResult, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     selected = result.selected_factor
-    blockers = result.metadata.get("tradability_blockers", [])
-    blocker_text = ", ".join(blockers) if blockers else "none"
     with PdfPages(path) as pdf:
         _text_page(
             pdf,
             "Momentum Factor Lab — Executive Summary",
-            [
-                f"Selected factor: {selected}",
-                f"Selection rationale: {result.selected_reason}",
-                f"Output status: {result.metadata['recommendation_status']}",
-                f"Output type: {result.metadata.get('recommendation_output_label', 'Model-portfolio output rows')}",
-                f"Tradability blockers: {blocker_text}",
-                f"Liquidity/capacity: {result.metadata.get('recommendation_capacity_warning', 'not reported')}",
-                f"Data source: {result.metadata['provider']} | data as of: {result.metadata['data_as_of']} | run: {result.metadata['run_timestamp_utc']}",
-                f"Universe: {result.metadata['candidate_universe_size']} stock candidates; {result.metadata['eligible_price_universe_size']} eligible stock price symbols; {result.metadata['excluded_symbols']} exclusions.",
-                f"Benchmark price available: {result.metadata.get('benchmark_price_available')} ({result.metadata.get('benchmark_symbol', result.config.benchmark)}) — benchmark is not an investable candidate.",
-                f"Portfolio construction: {result.metadata['portfolio_construction']}",
-                f"Benchmark: {result.config.benchmark} | Transaction cost/slippage: {result.config.transaction_cost_bps:.1f} bps + {result.config.slippage_bps:.1f} bps.",
-                result.metadata["survivorship_bias_caveat"],
-                result.metadata["live_data_gate"],
-                result.metadata["non_advice_disclaimer"],
-            ],
+            _executive_summary_lines(result),
         )
         _table_page(pdf, "Data Sources and Coverage", result.data_sources)
         _table_page(pdf, "Symbol-level Price Sources", result.market_data.price_sources, max_rows=24)
-        _table_page(pdf, "Tradability Gate Checklist", _tradability_gate_frame(result))
+        _table_page(pdf, "Data Quality Diagnostics", result.data_quality, max_rows=32)
+        _table_page(pdf, "Practical Execution Checklist", _tradability_gate_frame(result))
         _table_page(pdf, "Universe Source / Provenance Dashboard", result.data_sources)
         _table_page(pdf, "Factor Family Leaderboard", _factor_family_leaderboard_frame(result))
         _table_page(pdf, "Factor Overlap / Top-20 Consensus", _factor_overlap_top20_frame(result))

@@ -36,7 +36,7 @@ def fixture_prices(columns=2, periods=360):
     return pd.DataFrame(data, index=dates)
 
 
-def test_at_least_thirty_five_factor_definitions_with_metadata():
+def test_at_least_fifty_five_factor_definitions_with_metadata():
     assert len(FACTOR_DEFINITIONS) >= 55
     assert set(FACTOR_DEFINITIONS) == set(FACTOR_SPECS)
     for spec in FACTOR_SPECS.values():

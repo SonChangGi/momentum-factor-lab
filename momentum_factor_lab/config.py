@@ -29,7 +29,8 @@ class RunConfig:
     cache_dir: Path = Path(".cache/momentum_factor_lab")
     max_price_symbols: int | None = None
     price_chunk_size: int = 150
-    stooq_fallback_limit: int = 0
+    stooq_fallback_limit: int | None = None
+    finance_datareader_fallback_limit: int | None = None
     retry_count: int = 1
     retry_backoff_seconds: float = 0.5
     cost_stress_high_bps: float = 50.0
@@ -40,12 +41,22 @@ class RunConfig:
     selection_window: str = "validation_split_70_30"
     frozen_policy_path: Path | None = None
     selected_factor: str | None = None
+    recommendation_weighting_method: str = "score_size_liquidity"
+    recommendation_score_weight: float = 0.60
+    recommendation_market_cap_weight: float = 0.25
+    recommendation_liquidity_weight: float = 0.15
+    recommendation_rank_floor: float = 0.05
+    recommendation_market_cap_lookup: bool = True
     target_aum: float | None = None
     max_adv_participation: float | None = None
     point_in_time_universe_provenance: str | None = None
     approved_tradable_universe: bool = False
     min_tradable_universe_size: int = 2_000
     min_liquidity_observations: int = 63
+    data_quality_lookback_days: int = 252
+    max_price_missing_ratio: float = 0.05
+    max_volume_missing_ratio: float = 0.10
+    max_extreme_daily_return: float = 0.80
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
 
     def validate(self) -> None:
@@ -71,8 +82,10 @@ class RunConfig:
             raise ValueError("max_price_symbols must be at least 1 when provided")
         if self.price_chunk_size < 1:
             raise ValueError("price_chunk_size must be at least 1")
-        if self.stooq_fallback_limit < 0:
+        if self.stooq_fallback_limit is not None and self.stooq_fallback_limit < 0:
             raise ValueError("stooq_fallback_limit must be non-negative")
+        if self.finance_datareader_fallback_limit is not None and self.finance_datareader_fallback_limit < 0:
+            raise ValueError("finance_datareader_fallback_limit must be non-negative")
         if self.retry_count < 0:
             raise ValueError("retry_count must be non-negative")
         if self.retry_backoff_seconds < 0:
@@ -91,6 +104,19 @@ class RunConfig:
             raise ValueError("sec_user_agent must be non-empty when provided")
         if self.selected_factor is not None and not self.selected_factor.strip():
             raise ValueError("selected_factor must be a non-empty factor name when provided")
+        if self.recommendation_weighting_method not in {"equal", "score_size_liquidity"}:
+            raise ValueError("recommendation_weighting_method must be equal or score_size_liquidity")
+        weighting_values = (
+            self.recommendation_score_weight,
+            self.recommendation_market_cap_weight,
+            self.recommendation_liquidity_weight,
+        )
+        if any(value < 0 for value in weighting_values):
+            raise ValueError("recommendation weighting component weights must be non-negative")
+        if sum(weighting_values) <= 0:
+            raise ValueError("at least one recommendation weighting component weight must be positive")
+        if self.recommendation_rank_floor < 0:
+            raise ValueError("recommendation_rank_floor must be non-negative")
         if self.target_aum is not None and self.target_aum <= 0:
             raise ValueError("target_aum must be positive when provided")
         if self.max_adv_participation is not None and not 0 < self.max_adv_participation <= 1:
@@ -101,6 +127,14 @@ class RunConfig:
             raise ValueError("min_tradable_universe_size must be at least 1")
         if self.min_liquidity_observations < 1:
             raise ValueError("min_liquidity_observations must be at least 1")
+        if self.data_quality_lookback_days < 1:
+            raise ValueError("data_quality_lookback_days must be at least 1")
+        if not 0 <= self.max_price_missing_ratio <= 1:
+            raise ValueError("max_price_missing_ratio must be in [0, 1]")
+        if not 0 <= self.max_volume_missing_ratio <= 1:
+            raise ValueError("max_volume_missing_ratio must be in [0, 1]")
+        if self.max_extreme_daily_return <= 0:
+            raise ValueError("max_extreme_daily_return must be positive")
         if not self.benchmark.strip():
             raise ValueError("benchmark must be a non-empty symbol")
         try:

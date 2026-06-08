@@ -9,7 +9,7 @@ import pytest
 
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import MarketData, generate_offline_sample_data
-from momentum_factor_lab.report import write_pdf, write_reports
+from momentum_factor_lab.report import _executive_summary_lines, write_pdf, write_reports
 from momentum_factor_lab.workflow import run_analysis, write_run_results_json
 
 
@@ -24,6 +24,9 @@ LIQUIDITY_CAPACITY_COLUMNS = {
     "min_avg_dollar_volume_required",
     "liquidity_evidence_status",
     "liquidity_filter_pass",
+    "data_quality_status",
+    "data_quality_pass",
+    "data_quality_warning",
     "proposed_weight",
     "target_aum",
     "max_adv_participation",
@@ -36,6 +39,20 @@ LIQUIDITY_CAPACITY_COLUMNS = {
     "capacity_status",
     "capacity_pass",
     "capacity_warning",
+}
+
+WEIGHTING_COLUMNS = {
+    "weighting_method",
+    "raw_weight_score",
+    "pre_cap_weight",
+    "weight_cap",
+    "weight_cap_excess",
+    "score_component",
+    "market_cap",
+    "market_cap_source",
+    "market_cap_component",
+    "liquidity_component",
+    "size_component_source",
 }
 
 
@@ -91,7 +108,7 @@ def _live_fixture_market_data(
                             "candidate_symbols": candidate_symbols,
                             "point_in_time_universe": True,
                             "tradable_universe_approved": bool(config.approved_tradable_universe),
-                            "universe_provenance": "test PIT membership provenance as-of fixture date",
+                            "universe_provenance": "source=test-fixture as_of=2026-06-05 symbol_count=2456 hash=fixture",
                         }
                     ]
                 ),
@@ -135,6 +152,7 @@ def test_offline_run_generates_required_outputs(tmp_path):
         "factor_score_history_top20",
         "data_sources",
         "price_sources",
+        "data_quality",
         "factor_definitions",
         "factor_validation",
         "backtest_metrics",
@@ -142,7 +160,7 @@ def test_offline_run_generates_required_outputs(tmp_path):
         "benchmark_relative",
         "selected_factor_scores",
         "selected_factor",
-        "research_signals",
+        "recommendations",
         "exclusions",
         "robustness",
         "sensitivity",
@@ -179,8 +197,13 @@ def test_offline_run_generates_required_outputs(tmp_path):
     assert set(result.benchmark_relative["benchmark"]) == {"SPY"}
     assert result.metadata["factor_count"] >= 55
     assert result.metadata["factor_validation_status"] == "pass"
+    assert result.metadata["data_quality_manifest_available"]
+    assert result.metadata["data_quality_status_counts"]
+    assert "data_quality" in json.loads(json_path.read_text(encoding="utf-8"))
     assert {"variant_type", "variant", "parameter_set"}.issubset(result.sensitivity.columns)
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
+    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert WEIGHTING_COLUMNS.issubset(result.recommendations.columns)
     factor_sheet = workbook["factor_scores"]
     history_sheet = workbook["factor_score_history_top20"]
     assert factor_sheet.max_row > len(result.market_data.eligible_universe)
@@ -282,7 +305,7 @@ def test_live_failure_or_offline_status_never_claims_current(tmp_path, monkeypat
     assert not result.metadata["current_recommendations_available"]
 
 
-def test_subset_live_run_is_research_only_with_zero_tradable_weights(tmp_path, monkeypatch):
+def test_subset_live_run_exports_recommendations_with_subset_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -300,19 +323,19 @@ def test_subset_live_run_is_research_only_with_zero_tradable_weights(tmp_path, m
     result = write_reports(run_analysis(config))
 
     assert "subset_run" in result.metadata["recommendation_status"]
-    assert not result.metadata["current_recommendations_available"]
-    assert not result.metadata["tradable_recommendations_available"]
-    assert result.metadata["recommendation_output_key"] == "research_signals"
-    assert result.metadata["research_only"]
-    assert "full_uncapped_price_universe" in result.metadata["tradability_blockers"]
-    assert result.recommendations["weight"].sum() == 0.0
-    assert set(result.recommendations["recommendation_output"]) == {"research_signals"}
+    assert result.metadata["current_recommendations_available"]
+    assert result.metadata["tradable_recommendations_available"]
+    assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert not result.metadata["research_only"]
+    assert "no_explicit_price_symbol_cap" in result.metadata["execution_limitations"]
+    assert result.recommendations["weight"].sum() > 0.0
+    assert set(result.recommendations["recommendation_output"]) == {"recommendations"}
     workbook = openpyxl.load_workbook(result.output_paths["xlsx"], read_only=True)
-    assert "research_signals" in workbook.sheetnames
-    assert "recommendations" not in workbook.sheetnames
+    assert "recommendations" in workbook.sheetnames
+    assert "research_signals" not in workbook.sheetnames
 
 
-def test_full_live_run_without_point_in_time_evidence_is_research_only(tmp_path, monkeypatch):
+def test_full_live_run_without_point_in_time_evidence_exports_recommendations_with_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -328,11 +351,11 @@ def test_full_live_run_without_point_in_time_evidence_is_research_only(tmp_path,
 
     result = run_analysis(config)
 
-    assert "research_only_missing" in result.metadata["recommendation_status"]
-    assert not result.metadata["current_recommendations_available"]
-    assert "point_in_time_universe" in result.metadata["tradability_blockers"]
-    assert result.metadata["recommendation_output_key"] == "research_signals"
-    assert result.recommendations["weight"].sum() == 0.0
+    assert "with_limitations" in result.metadata["recommendation_status"]
+    assert result.metadata["current_recommendations_available"]
+    assert "point_in_time_universe" in result.metadata["execution_limitations"]
+    assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert result.recommendations["weight"].sum() > 0.0
 
 
 def test_current_live_source_flag_never_satisfies_point_in_time_gate(tmp_path, monkeypatch):
@@ -357,12 +380,39 @@ def test_current_live_source_flag_never_satisfies_point_in_time_gate(tmp_path, m
     result = run_analysis(config)
 
     assert result.metadata["tradability_requirements"]["point_in_time_universe"] is False
-    assert "point_in_time_universe" in result.metadata["tradability_blockers"]
-    assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert "point_in_time_universe" in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
-def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(tmp_path, monkeypatch):
+def test_unstructured_pit_attestation_does_not_satisfy_practical_gate(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    market_data.data_sources.loc[
+        market_data.data_sources["source"].eq("user-point-in-time-universe-provenance"),
+        "universe_provenance",
+    ] = "test PIT membership provenance as-of 2026-06-05"
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert result.metadata["tradability_requirements"]["point_in_time_universe"] is False
+    assert "point_in_time_universe" in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
+
+
+def test_fresh_live_run_uses_validation_selected_factor_without_false_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -379,14 +429,19 @@ def test_fresh_live_run_requires_predeclared_factor_for_current_recommendations(
     result = run_analysis(config)
 
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
-    assert "research_only_missing" in result.metadata["recommendation_status"]
-    assert not result.metadata["current_recommendations_available"]
-    assert not result.metadata["tradable_recommendations_available"]
-    assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert result.selected_factor == result.metadata["validation_selected_factor"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.metadata["tradable_recommendations_available"]
+    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert "predeclared_selected_factor" not in result.metadata["execution_limitations"]
+    assert all("same_sample" not in item for item in result.metadata["execution_limitations"])
+    assert "same_sample" not in result.metadata["recommendation_status"]
+    assert result.recommendations["weight"].gt(0.0).any()
+    assert WEIGHTING_COLUMNS.issubset(result.recommendations.columns)
+    assert result.recommendations["weighting_method"].eq("score_size_liquidity").all()
 
 
-def test_validation_ranked_factor_exports_research_signals_not_recommendations(tmp_path, monkeypatch):
+def test_validation_ranked_factor_exports_recommendations_without_same_sample_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -405,20 +460,57 @@ def test_validation_ranked_factor_exports_research_signals_not_recommendations(t
     result = write_reports(run_analysis(config))
 
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
-    assert result.metadata["recommendation_output_key"] == "research_signals"
-    assert not result.metadata["tradable_recommendations_available"]
-    assert result.metadata["tradability_blockers"] == ["predeclared_selected_factor"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert result.metadata["tradable_recommendations_available"]
+    assert result.metadata["execution_limitations"] == []
+    assert result.metadata["tradability_blockers"] == []
+    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert result.recommendations["weight"].gt(0.0).any()
+    assert result.recommendations["weight"].nunique() > 1
+    assert WEIGHTING_COLUMNS.issubset(result.recommendations.columns)
 
     payload = json.loads(Path(result.output_paths["json"]).read_text(encoding="utf-8"))
-    assert "research_signals" in payload
-    assert "recommendations" not in payload
-    assert {row["selected_factor_selection_source"] for row in payload["research_signals"]} == {"research_validation"}
-    assert {row["weight"] for row in payload["research_signals"]} == {0.0}
+    assert "recommendations" in payload
+    assert "research_signals" not in payload
+    assert {row["selected_factor_selection_source"] for row in payload["recommendations"]} == {"research_validation"}
+    assert any(row["weight"] > 0 for row in payload["recommendations"])
+    assert "predeclared_selected_factor" not in payload["metadata"]["execution_limitations"]
+    assert WEIGHTING_COLUMNS.issubset(payload["recommendations"][0])
 
     workbook = openpyxl.load_workbook(Path(result.output_paths["xlsx"]), read_only=True)
-    assert "research_signals" in workbook.sheetnames
-    assert "recommendations" not in workbook.sheetnames
+    assert "recommendations" in workbook.sheetnames
+    assert "research_signals" not in workbook.sheetnames
+    headers = [cell.value for cell in next(workbook["recommendations"].iter_rows(max_row=1))]
+    assert WEIGHTING_COLUMNS.issubset(headers)
+
+
+def test_market_cap_enrichment_does_not_change_price_universe_or_coverage(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    candidate_count = len(market_data.candidate_universe)
+    eligible_count = len(market_data.eligible_universe)
+    price_columns = set(market_data.prices.columns)
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert len(result.market_data.candidate_universe) == candidate_count
+    assert len(result.market_data.eligible_universe) == eligible_count
+    assert set(result.market_data.prices.columns) == price_columns
+    summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
+    assert int(summary["requested_price_symbols"]) == eligible_count
+    assert int(summary["eligible_price_symbols"]) == eligible_count
+    assert "yfinance-fast-info-market-cap" in set(result.data_sources["source"])
+    assert result.metadata["current_recommendations_available"]
 
 
 def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):
@@ -462,11 +554,13 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
     assert result.recommendations["avg_share_volume_63d"].notna().all()
     assert result.recommendations["avg_dollar_volume_63d"].notna().all()
     assert result.recommendations["liquidity_evidence_status"].eq("pass").all()
+    assert result.recommendations["data_quality_status"].eq("pass").all()
+    assert result.recommendations["data_quality_pass"].all()
     assert result.recommendations["capacity_status"].eq("pass").all()
     assert result.recommendations["target_notional"].gt(0).all()
 
 
-def test_walk_forward_factor_selection_remains_research_only_without_frozen_policy(tmp_path, monkeypatch):
+def test_walk_forward_factor_selection_records_limitation_without_frozen_policy(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -487,9 +581,9 @@ def test_walk_forward_factor_selection_remains_research_only_without_frozen_poli
 
     assert result.metadata["selected_factor_selection_source"] == "walk_forward"
     assert not result.metadata["selection_policy_frozen_for_live"]
-    assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
-    assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert "predeclared_selected_factor" not in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
 def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
@@ -531,8 +625,10 @@ def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path
     assert payload["metadata"]["recommendation_output_key"] == "recommendations"
     assert "recommendations" in payload
     assert "research_signals" not in payload
+    assert "data_quality" in payload
     assert "recommendations" in workbook.sheetnames
     assert "research_signals" not in workbook.sheetnames
+    assert "data_quality" in workbook.sheetnames
 
 
 def test_stale_live_data_zeroes_recommendation_weights(tmp_path, monkeypatch):
@@ -582,13 +678,43 @@ def test_missing_volume_data_has_explicit_liquidity_capacity_warning(tmp_path, m
     assert result.recommendations["liquidity_evidence_status"].eq("missing_liquidity_evidence").all()
     assert not result.recommendations["liquidity_filter_pass"].any()
     assert result.recommendations["capacity_status"].eq("missing_or_failed_liquidity_evidence").all()
-    assert "row_level_liquidity_pass" in result.metadata["tradability_blockers"]
-    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
+    assert result.metadata["tradability_blockers"] == []
+    assert "row_level_liquidity_pass" in result.metadata["execution_limitations"]
+    assert "capacity_estimated_and_pass" in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
+
+
+def test_data_quality_anomaly_blocks_live_tradable_output(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
+    stock_columns = [symbol for symbol in market_data.prices.columns if symbol in set(market_data.eligible_universe["symbol"])]
+    anomaly_date = market_data.prices.index[-2]
+    prior_date = market_data.prices.index[-3]
+    market_data.prices.loc[anomaly_date, stock_columns] = market_data.prices.loc[prior_date, stock_columns] * 2.5
+    market_data.data_quality = pd.DataFrame()
+    monkeypatch.setattr("momentum_factor_lab.workflow.load_market_data", lambda _: market_data)
+
+    result = run_analysis(config)
+
+    assert "row_level_data_quality_pass" in result.metadata["tradability_blockers"]
     assert not result.metadata["current_recommendations_available"]
+    assert not result.recommendations["data_quality_pass"].all()
+    assert result.recommendations["data_quality_status"].eq("extreme_return_anomaly").any()
     assert result.recommendations["weight"].eq(0.0).all()
 
 
-def test_sparse_liquidity_observations_block_tradable_output(tmp_path, monkeypatch):
+def test_sparse_liquidity_observations_record_advisory_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -609,13 +735,14 @@ def test_sparse_liquidity_observations_block_tradable_output(tmp_path, monkeypat
 
     assert result.recommendations["volume_observations_63d"].eq(1).all()
     assert result.recommendations["liquidity_evidence_status"].eq("insufficient_liquidity_observations").all()
-    assert "row_level_liquidity_pass" in result.metadata["tradability_blockers"]
-    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
-    assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert result.metadata["tradability_blockers"] == []
+    assert "row_level_liquidity_pass" in result.metadata["execution_limitations"]
+    assert "capacity_estimated_and_pass" in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
-def test_live_tradable_output_requires_capacity_inputs(tmp_path, monkeypatch):
+def test_live_recommendations_record_missing_capacity_inputs_as_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -632,13 +759,13 @@ def test_live_tradable_output_requires_capacity_inputs(tmp_path, monkeypatch):
 
     result = run_analysis(config)
 
-    assert not result.metadata["current_recommendations_available"]
-    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
+    assert result.metadata["current_recommendations_available"]
+    assert "capacity_estimated_and_pass" in result.metadata["execution_limitations"]
     assert result.recommendations["capacity_status"].eq("not_estimated_missing_aum_and_participation_limit").all()
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
-def test_capacity_adv_participation_limit_blocks_tradable_output(tmp_path, monkeypatch):
+def test_capacity_adv_participation_limit_records_advisory_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -659,12 +786,12 @@ def test_capacity_adv_participation_limit_blocks_tradable_output(tmp_path, monke
 
     assert result.recommendations["liquidity_evidence_status"].eq("pass").all()
     assert result.recommendations["capacity_status"].eq("exceeds_adv_participation_limit").all()
-    assert "capacity_estimated_and_pass" in result.metadata["tradability_blockers"]
-    assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert "capacity_estimated_and_pass" in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
-def test_small_user_universe_is_research_only_unless_approved_with_provenance(tmp_path, monkeypatch):
+def test_small_user_universe_records_limitations_unless_approved_with_provenance(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -685,8 +812,8 @@ def test_small_user_universe_is_research_only_unless_approved_with_provenance(tm
     result = run_analysis(config)
 
     assert len(result.market_data.candidate_universe) < result.config.min_tradable_universe_size
-    assert not result.metadata["current_recommendations_available"]
-    assert "broad_or_approved_tradable_universe" in result.metadata["tradability_blockers"]
+    assert result.metadata["current_recommendations_available"]
+    assert "broad_or_approved_tradable_universe" in result.metadata["execution_limitations"]
 
 
 def test_current_source_approval_cannot_label_small_universe_tradable(tmp_path, monkeypatch):
@@ -718,11 +845,11 @@ def test_current_source_approval_cannot_label_small_universe_tradable(tmp_path, 
 
     assert result.metadata["tradability_requirements"]["point_in_time_universe"] is True
     assert result.metadata["tradability_requirements"]["broad_or_approved_tradable_universe"] is False
-    assert "broad_or_approved_tradable_universe" in result.metadata["tradability_blockers"]
-    assert result.metadata["recommendation_output_label"] == "Research signals (not tradable)"
-    assert result.metadata["recommendation_output_key"] == "research_signals"
-    assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert "broad_or_approved_tradable_universe" in result.metadata["execution_limitations"]
+    assert result.metadata["recommendation_output_label"] == "Practical recommendations"
+    assert result.metadata["recommendation_output_key"] == "recommendations"
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
 def test_small_user_universe_with_approved_provenance_can_use_tradable_labels(tmp_path, monkeypatch):
@@ -748,14 +875,14 @@ def test_small_user_universe_with_approved_provenance_can_use_tradable_labels(tm
 
     assert len(result.market_data.candidate_universe) < result.config.min_tradable_universe_size
     assert result.metadata["tradability_blockers"] == []
-    assert result.metadata["recommendation_output_label"] == "Live tradable recommendations"
+    assert result.metadata["recommendation_output_label"] == "Practical recommendations"
     assert result.metadata["recommendation_output_key"] == "recommendations"
     assert result.metadata["current_recommendations_available"]
     assert result.metadata["tradable_recommendations_available"]
     assert result.recommendations["weight"].gt(0.0).any()
 
 
-def test_incomplete_requested_price_coverage_blocks_tradable_output(tmp_path, monkeypatch):
+def test_incomplete_requested_price_coverage_records_subset_limitation(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -780,9 +907,10 @@ def test_incomplete_requested_price_coverage_blocks_tradable_output(tmp_path, mo
 
     result = run_analysis(config)
 
-    assert "full_uncapped_price_universe" in result.metadata["tradability_blockers"]
-    assert not result.metadata["current_recommendations_available"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert "complete_requested_price_coverage" in result.metadata["execution_limitations"]
+    assert "no_explicit_price_symbol_cap" not in result.metadata["execution_limitations"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
 def test_json_export_preserves_recommendation_status_and_source_contract(tmp_path):
@@ -802,14 +930,40 @@ def test_json_export_preserves_recommendation_status_and_source_contract(tmp_pat
     recommendation_status = payload["metadata"]["recommendation_status"]
 
     assert payload["metadata"]["current_recommendations_available"] is False
-    assert output_key == "research_signals"
+    assert output_key == "recommendations"
     assert rows
     assert LIQUIDITY_CAPACITY_COLUMNS.issubset(rows[0])
+    assert payload["data_quality"]
+    assert payload["metadata"]["data_quality_gate"]["manifest_available"] is True
+    assert WEIGHTING_COLUMNS.issubset(rows[0])
     assert {row["recommendation_status"] for row in rows} == {recommendation_status}
     assert {row["signal_date"] for row in rows} == {payload["metadata"]["signal_date"]}
     assert {row["capacity_status"] for row in rows} == {"not_estimated_missing_aum_and_participation_limit"}
     assert payload["data_sources"]
     assert payload["price_sources"]
+
+
+def test_json_export_is_strict_and_replaces_non_finite_values(tmp_path):
+    result = run_analysis(
+        RunConfig(
+            start_date="2019-01-01",
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=True,
+        )
+    )
+    result.metadata["nan_probe"] = float("nan")
+    result.data_quality.loc[result.data_quality.index[0], "latest_price"] = float("inf")
+    json_path = tmp_path / "run_results.json"
+
+    write_run_results_json(result, json_path)
+
+    text = json_path.read_text(encoding="utf-8")
+    assert "NaN" not in text
+    assert "Infinity" not in text
+    payload = json.loads(text)
+    assert payload["metadata"]["nan_probe"] is None
+    assert payload["data_quality"][0]["latest_price"] is None
 
 
 def test_json_export_preserves_selected_turnover_cost_metadata(tmp_path):
@@ -834,7 +988,7 @@ def test_json_export_preserves_selected_turnover_cost_metadata(tmp_path):
     assert metadata["selected_factor_annualized_cost_drag"] == selected_metrics["full_annualized_cost_drag"]
 
 
-def test_research_only_pdf_labels_output_as_research_signals_not_recommendations(tmp_path, monkeypatch):
+def test_non_current_pdf_labels_output_as_reference_recommendations(tmp_path, monkeypatch):
     result = run_analysis(
         RunConfig(
             start_date="2019-01-01",
@@ -858,11 +1012,28 @@ def test_research_only_pdf_labels_output_as_research_signals_not_recommendations
     write_pdf(result, tmp_path / "report.pdf")
 
     executive_lines = "\n".join(text_pages[0][1])
-    assert "Output type: Research signals (not tradable)" in executive_lines
-    assert "Tradability blockers:" in executive_lines
+    assert "Output type: Reference recommendations (not current)" in executive_lines
+    assert "Execution limitations:" in executive_lines
+    assert "Recommendation weighting: score_size_liquidity" in executive_lines
+    assert "cash remainder:" in executive_lines
     assert "Liquidity/capacity:" in executive_lines
-    assert "Research signals (not tradable)" in table_titles
-    assert "Current Top-20 Recommendations" not in table_titles
+    assert "Reference recommendations (not current)" in table_titles
+
+
+def test_pdf_summary_lines_include_weighting_method_and_cash_remainder(tmp_path):
+    result = run_analysis(
+        RunConfig(
+            start_date="2019-01-01",
+            output_dir=tmp_path / "outputs",
+            report_dir=tmp_path / "reports",
+            offline_sample=True,
+        )
+    )
+
+    lines = "\n".join(_executive_summary_lines(result))
+
+    assert "Recommendation weighting: score_size_liquidity" in lines
+    assert "cash remainder:" in lines
 
 
 def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monkeypatch):
@@ -897,11 +1068,13 @@ def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monke
     write_pdf(result, tmp_path / "report.pdf")
 
     executive_lines = "\n".join(text_pages[0][1])
-    output_title = "Live tradable recommendations"
+    output_title = "Practical recommendations"
     assert f"Output type: {output_title}" in executive_lines
-    assert "Tradability blockers: none" in executive_lines
+    assert "Execution limitations: none" in executive_lines
+    assert "Recommendation weighting: score_size_liquidity" in executive_lines
+    assert "cash remainder:" in executive_lines
     assert output_title in table_pages
-    assert "Research signals (not tradable)" not in table_pages
+    assert "Reference recommendations (not current)" not in table_pages
     assert {
         "recommendation_status",
         "signal_date",
@@ -969,13 +1142,14 @@ def test_liquidity_capacity_thresholds_and_counts_are_exported(tmp_path):
 
     assert result.metadata["recommendation_liquidity_status_counts"]
     assert LIQUIDITY_CAPACITY_COLUMNS.issubset(headers)
+    assert WEIGHTING_COLUMNS.issubset(headers)
     assert result.recommendations["min_avg_volume_required"].eq(123.0).all()
     assert result.recommendations["min_avg_dollar_volume_required"].eq(456.0).all()
     assert result.recommendations["capacity_warning"].str.contains("Capacity is not estimated").all()
 
 
 
-def test_research_validation_mode_records_same_sample_blocker(tmp_path, monkeypatch):
+def test_research_validation_mode_records_audit_warning_not_blocker(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -994,9 +1168,12 @@ def test_research_validation_mode_records_same_sample_blocker(tmp_path, monkeypa
 
     assert result.metadata["factor_selection_mode"] == "research_validation"
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
-    assert result.metadata["same_sample_selection_blocked_for_tradable"]
-    assert "predeclared_selected_factor" in result.metadata["tradability_blockers"]
-    assert result.recommendations["weight"].eq(0.0).all()
+    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert result.metadata["factor_selection_warning"]
+    assert "predeclared_selected_factor" not in result.metadata["execution_limitations"]
+    assert result.metadata["tradability_requirements"]["factor_selection_policy_available"]
+    assert result.metadata["current_recommendations_available"]
+    assert result.recommendations["weight"].gt(0.0).any()
 
 
 def test_walk_forward_mode_records_prior_window_selection_history(tmp_path):

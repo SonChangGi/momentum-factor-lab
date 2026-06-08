@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, date as date_cls, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +14,15 @@ import pandas as pd
 from . import disclaimers
 from .backtest import BacktestResult, run_factor_backtest
 from .config import RunConfig
-from .data import MarketData, build_eligibility_mask, load_market_data
+from .data import MarketData, build_data_quality_frame, build_eligibility_mask, load_market_data
 from .factors import FACTOR_DESCRIPTIONS, compute_factor_scores, factor_definitions_frame, simple_momentum, total_return_momentum, validate_factor_library
 from .metrics import TRADING_DAYS, annualized_volatility, metric_summary
-from .portfolio import balanced_weights, recommendation_table
+from .portfolio import (
+    WEIGHTING_DIAGNOSTIC_COLUMNS,
+    balanced_weights,
+    evidence_weighted_recommendation_table,
+    recommendation_table,
+)
 from .universe import is_known_etf_symbol, normalize_symbol
 
 
@@ -38,6 +45,7 @@ class RunResult:
     data_sources: pd.DataFrame
     metadata: dict[str, Any]
     output_paths: dict[str, str]
+    data_quality: pd.DataFrame = field(default_factory=pd.DataFrame)
     cost_stress: pd.DataFrame = field(default_factory=pd.DataFrame)
     selection_history: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -46,29 +54,50 @@ class RunResult:
 class TradabilityAssessment:
     status: str
     fresh_live_data_available: bool
-    tradable_output_available: bool
+    recommendation_output_available: bool
     requirements: dict[str, bool]
-    blockers: list[str]
+    limitations: list[str]
     output_key: str
     output_label: str
     output_sheet: str
 
     @property
     def research_only(self) -> bool:
-        return not self.tradable_output_available
+        return not self.recommendation_output_available
+
+    @property
+    def fail_closed_reasons(self) -> list[str]:
+        if self.recommendation_output_available:
+            return []
+        reasons: list[str] = []
+        if not self.fresh_live_data_available:
+            reasons.append("fresh_live_data")
+        if not self.requirements.get("row_level_data_quality_pass", True):
+            reasons.append("row_level_data_quality_pass")
+        return reasons or self.limitations
 
     def to_metadata(self) -> dict[str, Any]:
+        fail_closed_reasons = self.fail_closed_reasons
         return {
             "fresh_live_data_available": self.fresh_live_data_available,
-            "current_recommendations_available": self.tradable_output_available,
+            "current_recommendations_available": self.recommendation_output_available,
             "tradability_requirements": self.requirements,
-            "tradability_blockers": self.blockers,
+            "tradability_blockers": fail_closed_reasons,
+            "execution_limitations": self.limitations,
             "research_only": self.research_only,
             "recommendation_output_key": self.output_key,
             "recommendation_output_label": self.output_label,
             "recommendation_output_sheet": self.output_sheet,
-            "tradable_recommendations_available": self.tradable_output_available,
-            "tradable_output_available": self.tradable_output_available,
+            "tradable_recommendations_available": self.recommendation_output_available,
+            "tradable_output_available": self.recommendation_output_available,
+            "recommendation_output_available": self.recommendation_output_available,
+            "decision_support_tier": (
+                "practical_recommendations"
+                if self.recommendation_output_available
+                else "non_current_reference"
+            ),
+            "fail_closed": not self.recommendation_output_available,
+            "fail_closed_reasons": fail_closed_reasons,
         }
 
 
@@ -97,6 +126,50 @@ def _analysis_prices(market_data: MarketData, config: RunConfig) -> pd.DataFrame
         and not is_known_etf_symbol(column)
     ]
     return prices.reindex(columns=allowed).dropna(axis=1, how="all")
+
+
+def _split_symbol_list(value: object) -> list[str]:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [normalize_symbol(str(symbol)) for symbol in value if str(symbol).strip()]
+    return [normalize_symbol(part) for part in str(value).split(",") if part.strip()]
+
+
+def _ensure_data_quality_frame(config: RunConfig, market_data: MarketData) -> pd.DataFrame:
+    if not market_data.data_quality.empty:
+        return market_data.data_quality
+    requested: list[str] = []
+    if "source" in market_data.data_sources:
+        summary = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
+        if not summary.empty:
+            latest = summary.iloc[-1]
+            summary_requested = _split_symbol_list(latest.get("requested_symbols"))
+            summary_requested.extend(_split_symbol_list(latest.get("missing_symbols")))
+            if summary_requested:
+                requested.append(normalize_symbol(config.benchmark))
+                requested.extend(summary_requested)
+    if not requested and "symbol" in market_data.eligible_universe:
+        requested = [normalize_symbol(config.benchmark)]
+        requested.extend(market_data.eligible_universe["symbol"].dropna().map(normalize_symbol))
+    if not market_data.exclusions.empty and "symbol" in market_data.exclusions:
+        requested.extend(market_data.exclusions["symbol"].dropna().map(normalize_symbol))
+    if not requested:
+        requested = list(map(normalize_symbol, market_data.prices.columns.astype(str)))
+    requested = list(dict.fromkeys(requested))
+    data_quality = build_data_quality_frame(
+        market_data.prices,
+        market_data.volumes,
+        requested,
+        market_data.candidate_universe,
+        config,
+        provider=market_data.provider,
+        price_sources=market_data.price_sources,
+        exclusions=market_data.exclusions,
+        as_of=market_data.as_of,
+    )
+    market_data.data_quality = data_quality
+    return data_quality
 
 def _slice_returns(returns: pd.Series, split_at: int) -> dict[str, pd.Series]:
     if returns.empty:
@@ -156,10 +229,10 @@ def _cost_series_for_turnover(index: pd.Index, turnover: pd.Series, cost_rate: f
     costs = pd.Series(0.0, index=index)
     if turnover.empty or cost_rate == 0:
         return costs
-    for date, value in turnover.dropna().items():
-        if date not in costs.index:
+    for turnover_date, value in turnover.dropna().items():
+        if turnover_date not in costs.index:
             continue
-        loc = costs.index.get_loc(date)
+        loc = costs.index.get_loc(turnover_date)
         if isinstance(loc, slice):
             loc = loc.start
         cost_loc = int(loc) + 1
@@ -504,7 +577,7 @@ def _resolve_selected_factor(
                 "walk_forward_insufficient_history",
                 (
                     "Walk-forward mode was requested but insufficient prior-window history was available; "
-                    "the validation-selected factor is reported as research-only."
+                    "the validation-selected factor is reported with an execution limitation."
                 ),
                 True,
             )
@@ -523,10 +596,10 @@ def _resolve_selected_factor(
         "research_validation",
         (
             f"{validation_selected_factor} selected by validation-first composite score for "
-            "research comparison only; fresh live recommendations require a predeclared or walk-forward "
-            "selected factor so current holdings are not chosen with same-sample validation performance."
+            "current recommendations after comparing validation Sharpe, Sortino, Calmar, max drawdown, "
+            "CAGR, turnover, and train/validation stability across the full momentum factor library."
         ),
-        True,
+        False,
     )
 
 
@@ -571,12 +644,118 @@ def _user_universe_provenance_rows(market_data: MarketData) -> pd.DataFrame:
     return provenance_rows[provenance.ne("")]
 
 
+_ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+
+
+def _has_structured_point_in_time_provenance(value: str) -> bool:
+    text = value.strip().lower()
+    if not text or not _ISO_DATE_RE.search(text):
+        return False
+    return (
+        any(token in text for token in ("source=", "source:", "dataset=", "dataset:", "file=", "file:", "path=", "path:"))
+        and any(token in text for token in ("as_of=", "as_of:", "as-of=", "as-of:"))
+        and any(token in text for token in ("symbol_count=", "symbol_count:", "symbols=", "symbols:", "count=", "count:"))
+        and any(token in text for token in ("hash=", "hash:", "sha256=", "sha256:", "snapshot=", "snapshot:"))
+    )
+
+
 def _has_point_in_time_universe(market_data: MarketData) -> bool:
     provenance_rows = _user_universe_provenance_rows(market_data)
     if provenance_rows.empty:
         return False
     attested = provenance_rows["point_in_time_universe"].fillna(False).astype(bool)
-    return bool(attested.any())
+    provenance = provenance_rows["universe_provenance"].fillna("").astype(str)
+    structured = provenance.map(_has_structured_point_in_time_provenance)
+    return bool((attested & structured).any())
+
+
+def _data_quality_manifest_available(market_data: MarketData) -> bool:
+    required = {"symbol", "role", "data_quality_status"}
+    return bool(not market_data.data_quality.empty and required.issubset(market_data.data_quality.columns))
+
+
+def _data_quality_for_recommendations(market_data: MarketData) -> pd.DataFrame:
+    if not _data_quality_manifest_available(market_data):
+        return pd.DataFrame()
+    columns = [
+        "symbol",
+        "role",
+        "price_source",
+        "provider",
+        "first_price_date",
+        "last_price_date",
+        "observation_count",
+        "missing_ratio",
+        "volume_missing_ratio",
+        "latest_price",
+        "volume_obs_count",
+        "non_positive_price_observations",
+        "max_abs_daily_return",
+        "extreme_return_observations",
+        "full_history_max_abs_daily_return",
+        "full_history_extreme_return_observations",
+        "stale_days",
+        "exclusion_reason",
+        "data_quality_status",
+        "data_quality_pass",
+        "data_quality_warning",
+    ]
+    available = [column for column in columns if column in market_data.data_quality.columns]
+    quality = market_data.data_quality[available].copy()
+    quality["symbol"] = quality["symbol"].map(normalize_symbol)
+    quality = quality.drop_duplicates(subset=["symbol"], keep="last")
+    return quality.rename(
+        columns={
+            "role": "data_quality_role",
+            "price_source": "data_quality_price_source",
+            "provider": "data_quality_provider",
+            "observation_count": "data_quality_observation_count",
+            "missing_ratio": "data_quality_missing_ratio",
+            "volume_missing_ratio": "data_quality_volume_missing_ratio",
+            "latest_price": "data_quality_latest_price",
+            "volume_obs_count": "data_quality_volume_observation_count",
+            "stale_days": "data_quality_stale_days",
+            "exclusion_reason": "data_quality_exclusion_reason",
+        }
+    )
+
+
+def _attach_recommendation_data_quality(recommendations: pd.DataFrame, market_data: MarketData) -> pd.DataFrame:
+    frame = recommendations.copy()
+    quality = _data_quality_for_recommendations(market_data)
+    if quality.empty:
+        frame["data_quality_status"] = "missing_manifest"
+        frame["data_quality_pass"] = False
+        frame["data_quality_warning"] = "missing data-quality manifest; row cannot be treated as tradable"
+        return frame
+    frame["symbol"] = frame["symbol"].map(normalize_symbol)
+    frame = frame.merge(quality, on="symbol", how="left")
+    frame["data_quality_status"] = frame["data_quality_status"].fillna("missing_manifest_row")
+    frame["data_quality_pass"] = frame["data_quality_pass"].fillna(False).astype(bool)
+    frame["data_quality_warning"] = frame["data_quality_warning"].fillna(
+        "missing symbol-level data-quality row; row cannot be treated as tradable"
+    )
+    return frame
+
+
+HARD_DATA_QUALITY_FAILURES = {
+    "missing_manifest",
+    "missing_manifest_row",
+    "missing_price",
+    "excessive_missing_price",
+    "non_positive_price",
+    "extreme_return_anomaly",
+    "stale_price",
+    "below_minimum_price",
+    "insufficient_history",
+}
+
+
+def _row_level_data_quality_pass(recommendations: pd.DataFrame) -> bool:
+    if recommendations.empty or "data_quality_status" not in recommendations:
+        return False
+    statuses = recommendations["data_quality_status"].fillna("missing_manifest_row").astype(str)
+    return bool(not statuses.isin(HARD_DATA_QUALITY_FAILURES).any())
 
 
 def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
@@ -600,9 +779,11 @@ def _has_broad_or_approved_tradable_universe(config: RunConfig, market_data: Mar
     return bool(approved.any())
 
 
-def _has_full_uncapped_price_universe(config: RunConfig, market_data: MarketData, subset_run: bool) -> bool:
-    if subset_run or config.max_price_symbols is not None:
-        return False
+def _has_no_explicit_price_symbol_cap(config: RunConfig, subset_run: bool) -> bool:
+    return not subset_run and config.max_price_symbols is None
+
+
+def _has_complete_requested_price_coverage(market_data: MarketData) -> bool:
     if "source" not in market_data.data_sources:
         return False
     summary = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
@@ -668,6 +849,156 @@ def _recommendation_capacity_warning(row: pd.Series) -> str:
     return "Capacity evidence is incomplete; row is not tradable."
 
 
+def _market_cap_cache_path(config: RunConfig, symbol: str) -> Path:
+    safe = normalize_symbol(symbol).replace("/", "_").replace("-", "_")
+    as_of = config.effective_end_date
+    return config.cache_dir / "fundamentals" / "yfinance_fast_info_market_cap" / f"{safe}_{as_of}.json"
+
+
+def _cached_market_cap(config: RunConfig, symbol: str) -> tuple[float | None, str | None]:
+    path = _market_cap_cache_path(config, symbol)
+    if not path.exists():
+        return None, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    value = payload.get("market_cap")
+    try:
+        market_cap = float(value)
+    except (TypeError, ValueError):
+        return None, None
+    if math.isfinite(market_cap) and market_cap > 0:
+        return market_cap, str(path)
+    return None, None
+
+
+def _write_market_cap_cache(config: RunConfig, symbol: str, market_cap: float) -> str:
+    path = _market_cap_cache_path(config, symbol)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "symbol": normalize_symbol(symbol),
+                "market_cap": float(market_cap),
+                "source": "yfinance_fast_info",
+                "as_of": config.effective_end_date,
+                "fetched_at_utc": datetime.now(UTC).isoformat(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _lookup_yfinance_market_cap(symbol: str) -> float | None:
+    try:
+        import yfinance as yf  # type: ignore
+
+        ticker = yf.Ticker(symbol)
+        fast_info = getattr(ticker, "fast_info", None)
+        value = None
+        if fast_info is not None:
+            if hasattr(fast_info, "get"):
+                value = fast_info.get("marketCap") or fast_info.get("market_cap")
+            if value is None and hasattr(fast_info, "market_cap"):
+                value = fast_info.market_cap
+        if value is None:
+            info = getattr(ticker, "info", {}) or {}
+            value = info.get("marketCap")
+        market_cap = float(value)
+    except Exception:
+        return None
+    return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
+
+
+def _attach_recommendation_market_caps(
+    recommendations: pd.DataFrame,
+    config: RunConfig,
+    market_data: MarketData,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Best-effort market-cap enrichment for final recommendation candidates only."""
+
+    frame = recommendations.copy()
+    frame["market_cap"] = np.nan
+    frame["market_cap_source"] = "unavailable"
+    rows: list[dict[str, object]] = []
+    if frame.empty:
+        return frame, pd.DataFrame(rows)
+    if not config.recommendation_market_cap_lookup:
+        frame["market_cap_source"] = "disabled"
+        return frame, pd.DataFrame(
+            [
+                {
+                    "source": "yfinance-fast-info-market-cap",
+                    "status": "disabled",
+                    "records": 0,
+                    "requested_symbols": ",".join(frame["symbol"].astype(str)),
+                    "note": "Recommendation market-cap lookup disabled by configuration; ADV proxy is used.",
+                }
+            ]
+        )
+    if market_data.offline_sample:
+        frame["market_cap_source"] = "unavailable_offline_sample"
+        return frame, pd.DataFrame(
+            [
+                {
+                    "source": "yfinance-fast-info-market-cap",
+                    "status": "skipped_offline_sample",
+                    "records": 0,
+                    "requested_symbols": ",".join(frame["symbol"].astype(str)),
+                    "note": "Offline/sample mode does not fetch live market cap; ADV proxy is used.",
+                }
+            ]
+        )
+    if str(market_data.provider).startswith("test-"):
+        frame["market_cap_source"] = "unavailable_test_provider"
+        return frame, pd.DataFrame(
+            [
+                {
+                    "source": "yfinance-fast-info-market-cap",
+                    "status": "skipped_test_provider",
+                    "records": 0,
+                    "requested_symbols": ",".join(frame["symbol"].astype(str)),
+                    "note": "Test provider fixture skips live market-cap lookup; ADV proxy is used.",
+                }
+            ]
+        )
+
+    for symbol in frame["symbol"].map(normalize_symbol):
+        market_cap, cache_path = _cached_market_cap(config, symbol)
+        status = "cache_hit" if market_cap is not None else "unavailable"
+        error = None
+        if market_cap is None:
+            market_cap = _lookup_yfinance_market_cap(symbol)
+            if market_cap is not None:
+                cache_path = _write_market_cap_cache(config, symbol, market_cap)
+                status = "fetched"
+            else:
+                error = "market cap unavailable from yfinance fast_info/info"
+        mask = frame["symbol"].map(normalize_symbol).eq(symbol)
+        if market_cap is not None:
+            frame.loc[mask, "market_cap"] = market_cap
+            frame.loc[mask, "market_cap_source"] = "yfinance_fast_info"
+        rows.append(
+            {
+                "source": "yfinance-fast-info-market-cap",
+                "symbol": symbol,
+                "status": status,
+                "records": int(market_cap is not None),
+                "requested_symbols": symbol,
+                "returned_symbols": symbol if market_cap is not None else "",
+                "missing_symbols": "" if market_cap is not None else symbol,
+                "cache_hit": status == "cache_hit",
+                "cache_path": cache_path,
+                "error": error,
+                "note": "Best-effort current market cap for recommendation weighting; non-blocking.",
+            }
+        )
+    return frame, pd.DataFrame(rows)
+
+
 def _attach_recommendation_liquidity_diagnostics(
     recommendations: pd.DataFrame,
     market_data: MarketData,
@@ -707,6 +1038,31 @@ def _attach_recommendation_liquidity_diagnostics(
     return frame
 
 
+def _apply_current_recommendation_weighting(recommendations: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
+    frame = recommendations.copy()
+    if config.recommendation_weighting_method == "score_size_liquidity":
+        return evidence_weighted_recommendation_table(
+            frame,
+            max_weight=config.max_weight,
+            score_weight=config.recommendation_score_weight,
+            market_cap_weight=config.recommendation_market_cap_weight,
+            liquidity_weight=config.recommendation_liquidity_weight,
+            rank_floor=config.recommendation_rank_floor,
+            method=config.recommendation_weighting_method,
+        )
+
+    frame["weighting_method"] = "equal"
+    total = float(frame["weight"].sum()) if "weight" in frame else 0.0
+    frame["raw_weight_score"] = 1.0
+    frame["pre_cap_weight"] = frame["weight"] / total if total > 0 else 0.0
+    frame["weight_cap"] = float(config.max_weight)
+    frame["weight_cap_excess"] = 0.0
+    for column in WEIGHTING_DIAGNOSTIC_COLUMNS:
+        if column not in frame:
+            frame[column] = np.nan if not column.endswith("source") else "not_used_equal_weight"
+    return frame
+
+
 def _row_level_liquidity_pass(recommendations: pd.DataFrame) -> bool:
     return bool(not recommendations.empty and recommendations["liquidity_filter_pass"].astype(bool).all())
 
@@ -723,36 +1079,41 @@ def _apply_tradability_gate(
     current_available: bool,
     subset_run: bool,
     selection_source: str,
-    ) -> TradabilityAssessment:
+) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "predeclared_selected_factor": selection_source == "predeclared",
-        "full_uncapped_price_universe": _has_full_uncapped_price_universe(config, market_data, subset_run),
+        "factor_selection_policy_available": selection_source
+        in {"research_validation", "predeclared", "walk_forward"},
+        "no_explicit_price_symbol_cap": _has_no_explicit_price_symbol_cap(config, subset_run),
+        "complete_requested_price_coverage": _has_complete_requested_price_coverage(market_data),
         "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
         "point_in_time_universe": _has_point_in_time_universe(market_data),
+        "data_quality_manifest_available": _data_quality_manifest_available(market_data),
+        "row_level_data_quality_pass": _row_level_data_quality_pass(recommendations),
         "liquidity_filter_evidence": _has_liquidity_evidence(config, market_data),
         "row_level_liquidity_pass": _row_level_liquidity_pass(recommendations),
         "capacity_estimated_and_pass": _row_level_capacity_pass(recommendations),
     }
-    blocking = [name for name, satisfied in requirements.items() if not satisfied]
-    gated_available = current_available and not blocking
-    if current_available and blocking:
-        status = f"{status}_research_only_missing_{'_and_'.join(blocking)}"
+    limitations = [name for name, satisfied in requirements.items() if not satisfied]
+    recommendation_available = current_available and bool(not recommendations.empty) and _row_level_data_quality_pass(recommendations)
+    if current_available and limitations:
+        status = f"{status}_with_limitations_{'_and_'.join(limitations)}"
     return TradabilityAssessment(
         status=status,
         fresh_live_data_available=current_available,
-        tradable_output_available=gated_available,
+        recommendation_output_available=recommendation_available,
         requirements=requirements,
-        blockers=blocking,
-        output_key="recommendations" if gated_available else "research_signals",
-        output_label="Live tradable recommendations" if gated_available else "Research signals (not tradable)",
-        output_sheet="recommendations" if gated_available else "research_signals",
+        limitations=limitations,
+        output_key="recommendations",
+        output_label="Practical recommendations" if recommendation_available else "Reference recommendations (not current)",
+        output_sheet="recommendations",
     )
 
 
 def run_analysis(config: RunConfig) -> RunResult:
     config.validate()
     market_data = load_market_data(config)
+    data_quality = _ensure_data_quality_frame(config, market_data)
     prices = market_data.prices.dropna(axis=1, how="all")
     analysis_prices = _analysis_prices(market_data, config)
     if analysis_prices.empty:
@@ -790,6 +1151,12 @@ def run_analysis(config: RunConfig) -> RunResult:
     weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
     recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
     recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
+    recommendations, market_cap_sources = _attach_recommendation_market_caps(recommendations, config, market_data)
+    if not market_cap_sources.empty:
+        market_data.data_sources = pd.concat([market_data.data_sources, market_cap_sources], ignore_index=True)
+    recommendations = _apply_current_recommendation_weighting(recommendations, config)
+    recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
+    recommendations = _attach_recommendation_data_quality(recommendations, market_data)
     status, fresh_live_data_available = _recommendation_status(config, market_data)
     subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
     if subset_run and not market_data.offline_sample:
@@ -806,8 +1173,9 @@ def run_analysis(config: RunConfig) -> RunResult:
         selection_source,
     )
     status = tradability_assessment.status
-    if not tradability_assessment.tradable_output_available:
+    if not tradability_assessment.recommendation_output_available:
         recommendations["weight"] = 0.0
+        recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
     recommendations["recommendation_status"] = status
     recommendations["recommendation_output"] = tradability_assessment.output_key
     recommendations["signal_date"] = str(analysis_prices.index.max().date()) if not analysis_prices.empty else "unavailable"
@@ -849,13 +1217,42 @@ def run_analysis(config: RunConfig) -> RunResult:
         "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
         "selection_policy_frozen_for_live": selection_source == "predeclared",
         "same_sample_selection_blocked_for_tradable": same_sample_blocked,
+        "factor_selection_warning": (
+            "Validation-selected factor is user-approved for this practical decision-support run; "
+            "review score_components and robustness before trading."
+            if selection_source == "research_validation"
+            else None
+        ),
         "sensitivity_coverage": sensitivity_coverage,
         "sensitivity_factor_parameter_variant_count": factor_parameter_variants,
         "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
         "selected_reason": selected_reason,
         "signal_date": str(analysis_prices.index.max().date()) if not analysis_prices.empty else None,
         "execution_delay": "one trading day after signal/rebalance schedule",
-        "portfolio_construction": f"long-only top-{config.top_n} factor portfolios at each rebalance, max weight {config.max_weight:.2%}",
+        "portfolio_construction": (
+            f"Backtests: long-only top-{config.top_n} factor portfolios at each rebalance, max weight "
+            f"{config.max_weight:.2%}. Current recommendations: {config.recommendation_weighting_method} "
+            "weights using selected-factor score plus market-cap/ADV liquidity evidence."
+        ),
+        "recommendation_weighting_method": config.recommendation_weighting_method,
+        "recommendation_weight_sum": float(recommendations["weight"].sum()) if "weight" in recommendations else 0.0,
+        "recommendation_cash_weight": max(
+            0.0,
+            1.0 - float(recommendations["weight"].sum()) if "weight" in recommendations else 1.0,
+        ),
+        "recommendation_weighting_components": {
+            "score_weight": config.recommendation_score_weight,
+            "market_cap_weight": config.recommendation_market_cap_weight,
+            "liquidity_weight": config.recommendation_liquidity_weight,
+            "rank_floor": config.recommendation_rank_floor,
+            "market_cap_lookup": config.recommendation_market_cap_lookup,
+        },
+        "recommendation_market_cap_source_counts": recommendations["market_cap_source"].value_counts().to_dict()
+        if "market_cap_source" in recommendations
+        else {},
+        "recommendation_size_component_source_counts": recommendations["size_component_source"].value_counts().to_dict()
+        if "size_component_source" in recommendations
+        else {},
         "universe_profile": config.universe_profile,
         "universe_source_mode": config.universe_source_mode,
         "point_in_time_universe": _has_point_in_time_universe(market_data),
@@ -878,6 +1275,26 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_factor_total_cost": float(selected_metrics.get("full_total_cost", 0.0)),
         "selected_factor_annualized_cost_drag": float(selected_metrics.get("full_annualized_cost_drag", 0.0)),
         "recommendation_liquidity_lookback_days": 63,
+        "data_quality_manifest_available": _data_quality_manifest_available(market_data),
+        "row_level_data_quality_pass": _row_level_data_quality_pass(recommendations),
+        "data_quality_lookback_days": config.data_quality_lookback_days,
+        "max_price_missing_ratio": config.max_price_missing_ratio,
+        "max_volume_missing_ratio": config.max_volume_missing_ratio,
+        "max_extreme_daily_return": config.max_extreme_daily_return,
+        "data_quality_gate": {
+            "manifest_available": _data_quality_manifest_available(market_data),
+            "recommendation_rows_pass": _row_level_data_quality_pass(recommendations),
+            "lookback_days": config.data_quality_lookback_days,
+            "max_price_missing_ratio": config.max_price_missing_ratio,
+            "max_volume_missing_ratio": config.max_volume_missing_ratio,
+            "max_extreme_daily_return": config.max_extreme_daily_return,
+        },
+        "data_quality_status_counts": data_quality["data_quality_status"].value_counts().to_dict()
+        if "data_quality_status" in data_quality
+        else {},
+        "recommendation_data_quality_status_counts": recommendations["data_quality_status"].value_counts().to_dict()
+        if "data_quality_status" in recommendations
+        else {},
         "recommendation_capacity_status_counts": recommendations["capacity_status"].value_counts().to_dict(),
         "recommendation_capacity_warning": "; ".join(sorted(set(recommendations["capacity_warning"].dropna()))),
         "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
@@ -907,6 +1324,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         data_sources=market_data.data_sources,
         metadata=metadata,
         output_paths={},
+        data_quality=data_quality,
         cost_stress=cost_stress,
         selection_history=selection_history,
     )
@@ -924,10 +1342,45 @@ def write_run_results_json(result: RunResult, path: Path) -> None:
         "cost_stress": result.cost_stress.to_dict(orient="records"),
         "selection_history": result.selection_history.to_dict(orient="records"),
         output_key: result.recommendations.to_dict(orient="records"),
+        "data_quality": result.data_quality.to_dict(orient="records"),
         "data_sources": result.data_sources.to_dict(orient="records"),
         "price_sources": result.market_data.price_sources.to_dict(orient="records"),
         "factor_validation": result.factor_validation.to_dict(orient="records"),
         "factor_definitions": result.factor_definitions.to_dict(orient="records"),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    path.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False), encoding="utf-8")
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date_cls):
+        return value.isoformat()
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value

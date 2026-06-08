@@ -14,12 +14,12 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
             config=config,
             selected_factor=config.selected_factor,
             metadata={
-                "recommendation_output_key": "research_signals",
+                "recommendation_output_key": "recommendations",
                 "selected_factor": config.selected_factor,
-                "recommendation_status": "current_live_research_only_missing_test",
-                "current_recommendations_available": False,
+                "recommendation_status": "current_live_with_limitations_test",
+                "current_recommendations_available": True,
                 "fresh_live_data_available": True,
-                "recommendation_output_label": "Research signals (not tradable)",
+                "recommendation_output_label": "Practical recommendations",
                 "data_as_of": "2026-06-05",
                 "provider": "test",
                 "candidate_universe_size": 6,
@@ -30,11 +30,21 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
                 "factor_selection_mode": config.effective_factor_selection_mode,
                 "selected_factor_selection_source": "predeclared",
                 "same_sample_selection_blocked_for_tradable": False,
-                "tradability_blockers": ["test"],
+                "decision_support_tier": "practical_recommendations",
+                "fail_closed": False,
+                "fail_closed_reasons": [],
+                "tradability_blockers": [],
+                "execution_limitations": ["test"],
+                "data_quality_gate": {"manifest_available": True, "recommendation_rows_pass": False},
+                "data_quality_status_counts": {"pass": 5},
+                "recommendation_data_quality_status_counts": {"pass": 1},
                 "recommendation_capacity_warning": "test warning",
+                "recommendation_weighting_method": config.recommendation_weighting_method,
+                "recommendation_weight_sum": 1.0,
+                "recommendation_cash_weight": 0.0,
             },
             output_paths={"json": str(tmp_path / "run.json")},
-            recommendations=pd.DataFrame([{"rank": 1, "symbol": "SPY", "weight": 0.0}]),
+            recommendations=pd.DataFrame([{"rank": 1, "symbol": "SPY", "weight": 1.0}]),
         )
 
     monkeypatch.setattr(cli, "run_analysis", fake_run_analysis)
@@ -66,13 +76,36 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
             "100000",
             "--max-adv-participation",
             "0.05",
+            "--recommendation-weighting-method",
+            "score_size_liquidity",
+            "--recommendation-score-weight",
+            "0.5",
+            "--recommendation-market-cap-weight",
+            "0.3",
+            "--recommendation-liquidity-weight",
+            "0.2",
+            "--recommendation-rank-floor",
+            "0.04",
+            "--disable-recommendation-market-cap-lookup",
+            "--stooq-fallback-limit",
+            "11",
+            "--finance-datareader-fallback-limit",
+            "12",
             "--point-in-time-universe-provenance",
-            "test PIT source as-of 2026-06-05",
+            "source=test-cli as_of=2026-06-05 symbol_count=6 hash=fixture",
             "--approved-tradable-universe",
             "--min-tradable-universe-size",
             "6",
             "--min-liquidity-observations",
             "42",
+            "--data-quality-lookback-days",
+            "126",
+            "--max-price-missing-ratio",
+            "0.02",
+            "--max-volume-missing-ratio",
+            "0.03",
+            "--max-extreme-daily-return",
+            "0.45",
             "--output-dir",
             str(tmp_path / "outputs"),
             "--report-dir",
@@ -88,6 +121,10 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
     assert summary["universe_profile"] == "aggressive_stock_only"
     assert summary["factor_selection_mode"] == "predeclared"
     assert not summary["same_sample_selection_blocked_for_tradable"]
+    assert summary["decision_support_tier"] == "practical_recommendations"
+    assert not summary["fail_closed"]
+    assert summary["execution_limitations"] == ["test"]
+    assert summary["data_quality_gate"]["manifest_available"]
     assert config.universe_profile == "aggressive_stock_only"
     assert config.universe_source_mode == "refresh"
     assert config.factor_selection_mode == "predeclared"
@@ -97,7 +134,19 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
     assert config.sec_user_agent == "momentum-factor-lab-test contact@example.com"
     assert config.target_aum == 100_000
     assert config.max_adv_participation == 0.05
-    assert config.point_in_time_universe_provenance == "test PIT source as-of 2026-06-05"
+    assert config.recommendation_weighting_method == "score_size_liquidity"
+    assert config.recommendation_score_weight == 0.5
+    assert config.recommendation_market_cap_weight == 0.3
+    assert config.recommendation_liquidity_weight == 0.2
+    assert config.recommendation_rank_floor == 0.04
+    assert not config.recommendation_market_cap_lookup
+    assert config.stooq_fallback_limit == 11
+    assert config.finance_datareader_fallback_limit == 12
+    assert config.point_in_time_universe_provenance == "source=test-cli as_of=2026-06-05 symbol_count=6 hash=fixture"
     assert config.approved_tradable_universe
     assert config.min_tradable_universe_size == 6
     assert config.min_liquidity_observations == 42
+    assert config.data_quality_lookback_days == 126
+    assert config.max_price_missing_ratio == 0.02
+    assert config.max_volume_missing_ratio == 0.03
+    assert config.max_extreme_daily_return == 0.45
