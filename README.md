@@ -21,6 +21,19 @@ python -m pytest
 python -m momentum_factor_lab.cli run --offline-sample --output-dir outputs/sample --report-dir reports/sample
 ```
 
+If you want the terminal to explain and collect common inputs such as start/end
+date, top-N holdings, max position weight, universe, liquidity filters, and
+output folders, use the interactive wizard:
+
+```bash
+python -m momentum_factor_lab.cli wizard
+```
+
+Press Enter to keep a default. The wizard validates inputs, shows a final
+configuration review, and then runs the same factor calculation, backtest, and
+report pipeline as the scriptable `run` command. For repeatable automation,
+continue using `run` with explicit flags.
+
 Optional broad live-data run:
 
 ```bash

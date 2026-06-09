@@ -422,6 +422,66 @@ def test_yfinance_chunk_uses_price_cache_without_network(tmp_path):
     assert status["cache_path"] == str(cache_path)
 
 
+def test_yfinance_chunk_passes_inclusive_config_end_date(monkeypatch, tmp_path):
+    from momentum_factor_lab.data import _download_yfinance_chunk
+
+    captured = {}
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("Close", "AAA"),
+            ("Close", "BBB"),
+            ("Volume", "AAA"),
+            ("Volume", "BBB"),
+        ]
+    )
+    raw = pd.DataFrame(
+        [
+            [1.0, 4.0, 100.0, 400.0],
+            [2.0, 5.0, 100.0, 400.0],
+            [3.0, 6.0, 100.0, 400.0],
+        ],
+        index=dates,
+        columns=columns,
+    )
+
+    def fake_download(**kwargs):
+        captured.update(kwargs)
+        return raw
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
+
+    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
+    prices, volumes, status = _download_yfinance_chunk(["AAA", "BBB"], config)
+
+    assert captured["end"] == "2024-01-11"
+    assert captured["start"] == "2024-01-01"
+    assert status["status"] == "fetched"
+    assert list(prices.columns) == ["AAA", "BBB"]
+    assert list(volumes.columns) == ["AAA", "BBB"]
+
+
+def test_yfinance_chunk_leaves_open_ended_download_without_end(monkeypatch, tmp_path):
+    from momentum_factor_lab.data import _download_yfinance_chunk
+
+    captured = {}
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    raw = pd.DataFrame({"Close": [10.0, 11.0], "Volume": [100.0, 120.0]}, index=dates)
+
+    def fake_download(**kwargs):
+        captured.update(kwargs)
+        return raw
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
+
+    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date=None)
+    prices, _, status = _download_yfinance_chunk(["AAA"], config)
+
+    assert captured["end"] is None
+    assert status["status"] == "fetched"
+    assert list(prices.columns) == ["AAA"]
+
+
 def test_provider_summary_marks_cached_stooq_as_mixed():
     from momentum_factor_lab.data import _provider_label_from_sources
 

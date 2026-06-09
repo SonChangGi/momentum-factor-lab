@@ -4,7 +4,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Iterable
@@ -578,12 +578,32 @@ def _price_cache_path(config: RunConfig, provider: str, symbols: list[str]) -> P
             "symbols": symbols,
             "start_date": config.start_date,
             "end_date": config.effective_end_date,
+            "download_end_date": (
+                _yfinance_download_end_date(config)
+                if provider == "yfinance"
+                else config.effective_end_date
+            ),
             "auto_adjust": True,
         },
         sort_keys=True,
     )
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
     return config.cache_dir / "prices" / f"{provider}_{digest}.pkl"
+
+
+def _yfinance_download_end_date(config: RunConfig) -> str | None:
+    """Return the yfinance `end` argument for an inclusive user end date.
+
+    yfinance treats `end` as an exclusive bound. The lab's CLI/config dates are
+    user-facing analysis dates, and the offline/Stooq/FinanceDataReader paths
+    already treat an explicit `end_date` as inclusive. Add one calendar day only
+    for explicit yfinance downloads so `--end-date 2026-06-08` can include the
+    2026-06-08 trading session when the provider has it available.
+    """
+
+    if config.end_date is None:
+        return None
+    return (pd.Timestamp(config.end_date).date() + timedelta(days=1)).isoformat()
 
 
 def _stooq_cache_path(config: RunConfig, symbol: str) -> Path:
@@ -615,7 +635,7 @@ def _download_yfinance_chunk(symbols: list[str], config: RunConfig) -> tuple[pd.
             raw = yf.download(
                 tickers=symbols,
                 start=config.start_date,
-                end=config.end_date,
+                end=_yfinance_download_end_date(config),
                 auto_adjust=True,
                 group_by="column",
                 progress=False,
