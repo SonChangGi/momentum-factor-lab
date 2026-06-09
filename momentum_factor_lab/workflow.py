@@ -1346,11 +1346,14 @@ def run_analysis(config: RunConfig) -> RunResult:
 
 
 def write_run_results_json(result: RunResult, path: Path) -> None:
+    from .dashboard import build_dashboard_payload
+
     output_key = result.metadata.get("recommendation_output_key", "recommendations")
     payload = {
         "metadata": result.metadata,
         "config": result.config.to_dict(),
         "selected_factor": result.selected_factor,
+        "dashboard": build_dashboard_payload(result),
         "score_components": result.score_components.reset_index(names="factor").to_dict(orient="records"),
         "benchmark_relative": result.benchmark_relative.to_dict(orient="records"),
         "sensitivity": result.sensitivity.to_dict(orient="records"),

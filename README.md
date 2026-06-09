@@ -46,6 +46,34 @@ python -m momentum_factor_lab.cli run \
   --report-dir reports/live-broad
 ```
 
+## Korean GitHub Pages dashboard
+
+The project can also publish a Korean static dashboard for daily monitoring.
+The dashboard is designed for GitHub Pages: it uses generated HTML/CSS/JS plus a
+compact JSON payload, so no web server is required.
+
+Build a dashboard from an existing run-results JSON file:
+
+```bash
+python -m momentum_factor_lab.cli dashboard \
+  --run-results 'outputs/sample/run_results_*.json' \
+  --site-dir docs
+```
+
+Run the saved daily configuration and rebuild the site:
+
+```bash
+python -m momentum_factor_lab.cli scheduled-dashboard \
+  --config .github/momentum-dashboard-config.json \
+  --site-dir docs
+```
+
+The committed workflow `.github/workflows/daily-dashboard.yml` runs at
+`0 23 * * *` UTC, which is 08:00 Korea time. It rebuilds `docs/` so GitHub
+Pages can serve the latest dashboard. Website controls such as recent period,
+Top-N, and max position weight are client-side viewing controls; the next
+scheduled run inputs are stored in `.github/momentum-dashboard-config.json`.
+
 By default, live runs do **not** impose an absolute `--max-price-symbols` cap: the requested price universe is the full candidate universe for the selected profile, plus the benchmark comparator. `--max-price-symbols` is still available for explicit smoke/debug runs; when used, reports mark the subset coverage as an execution limitation rather than silently treating it as full-universe evidence.
 
 Live runs emit the primary `recommendations` output only when every tradability requirement passes: fresh live data, a predeclared (`--selected-factor`) or walk-forward factor-selection policy, no explicit price-symbol cap, complete requested coverage, structured point-in-time universe evidence such as `source=... as_of=YYYY-MM-DD symbol_count=... hash=...`, broad or explicitly approved tradable-universe provenance, row-level data-quality pass, row-level liquidity pass, and configured capacity pass. Otherwise the run fails closed into a zero-weight `research_signals` output and lists the unmet requirements in `execution_limitations` / `tradability_blockers`.

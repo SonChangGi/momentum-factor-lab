@@ -1,0 +1,16 @@
+{
+  "title": "모멘텀 팩터 데일리 대시보드",
+  "site_dir": "docs",
+  "run_args": [
+    "--live",
+    "--start-date", "2016-01-01",
+    "--output-dir", "outputs/daily-dashboard",
+    "--report-dir", "reports/daily-dashboard",
+    "--cache-dir", ".cache/momentum_factor_lab",
+    "--universe-profile", "large_liquid",
+    "--universe-source-mode", "packaged",
+    "--top-n", "20",
+    "--max-weight", "0.10",
+    "--factor-selection-mode", "research_validation"
+  ]
+}

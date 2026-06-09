@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .dashboard import DEFAULT_SITE_TITLE, write_dashboard_site
 from .config import RunConfig
 from .report import write_reports
 from .universe import normalize_symbols
@@ -204,6 +207,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the final confirmation prompt after interactive inputs are collected",
     )
+    dashboard = sub.add_parser("dashboard", help="Build the Korean static dashboard site from run-results JSON")
+    dashboard.add_argument(
+        "--run-results",
+        nargs="+",
+        required=True,
+        help="One or more run_results_*.json paths or globs. Quote globs for cross-shell portability.",
+    )
+    dashboard.add_argument("--site-dir", default="docs", help="Directory where the static site will be written")
+    dashboard.add_argument("--title", default=DEFAULT_SITE_TITLE, help="Korean dashboard page title")
+    dashboard.add_argument("--json", action="store_true", help="Emit generated site paths as JSON")
+
+    scheduled = sub.add_parser(
+        "scheduled-dashboard",
+        help="Run analysis from a saved config and rebuild the GitHub Pages dashboard",
+    )
+    scheduled.add_argument(
+        "--config",
+        default=".github/momentum-dashboard-config.json",
+        help="JSON config containing run_args and optional site_dir/title",
+    )
+    scheduled.add_argument("--site-dir", default=None, help="Override dashboard output directory")
+    scheduled.add_argument("--title", default=None, help="Override dashboard title")
+    scheduled.add_argument("--json", action="store_true", help="Emit generated site paths as JSON")
     return parser
 
 
@@ -658,6 +684,50 @@ def run_wizard_command(args: argparse.Namespace) -> dict[str, object]:
     return execute_config(config, emit_json=False)
 
 
+def dashboard_command(args: argparse.Namespace) -> dict[str, str]:
+    paths = write_dashboard_site(args.run_results, args.site_dir, title=args.title)
+    if args.json:
+        print(json.dumps(paths, indent=2, ensure_ascii=False))
+    else:
+        print("Dashboard site generated:")
+        for key, value in paths.items():
+            print(f"  {key}: {value}")
+    return paths
+
+
+def scheduled_dashboard_command(args: argparse.Namespace) -> dict[str, str]:
+    config_path = Path(args.config)
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"dashboard config not found: {config_path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("dashboard config must be a JSON object")
+    run_args = payload.get("run_args", [])
+    if not isinstance(run_args, list) or not all(isinstance(item, str) for item in run_args):
+        raise ValueError("dashboard config field 'run_args' must be a list of strings")
+    tokens = run_args if run_args[:1] == ["run"] else ["run", *run_args]
+    run_namespace = build_parser().parse_args(tokens)
+    if args.json:
+        with contextlib.redirect_stdout(io.StringIO()):
+            summary = run_command(run_namespace)
+    else:
+        summary = run_command(run_namespace)
+    outputs = summary.get("outputs", {})
+    if not isinstance(outputs, dict) or not outputs.get("json"):
+        raise ValueError("scheduled analysis did not produce a JSON output path")
+    site_dir = args.site_dir or payload.get("site_dir") or "docs"
+    title = args.title or payload.get("title") or DEFAULT_SITE_TITLE
+    paths = write_dashboard_site([str(outputs["json"])], site_dir, title=str(title))
+    if args.json:
+        print(json.dumps(paths, indent=2, ensure_ascii=False))
+    else:
+        print("Scheduled dashboard updated:")
+        for key, value in paths.items():
+            print(f"  {key}: {value}")
+    return paths
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -672,6 +742,18 @@ def main(argv: list[str] | None = None) -> int:
             run_wizard_command(args)
         except WizardAbort as exc:
             parser.exit(1, f"error: {exc}\n")
+        except ValueError as exc:
+            parser.exit(2, f"error: {exc}\n")
+        return 0
+    if args.command == "dashboard":
+        try:
+            dashboard_command(args)
+        except ValueError as exc:
+            parser.exit(2, f"error: {exc}\n")
+        return 0
+    if args.command == "scheduled-dashboard":
+        try:
+            scheduled_dashboard_command(args)
         except ValueError as exc:
             parser.exit(2, f"error: {exc}\n")
         return 0
