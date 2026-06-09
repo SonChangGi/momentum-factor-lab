@@ -47,6 +47,9 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "US stocks and ETFs" not in combined
     assert "stock/ETF universe" not in combined
     assert "1,000 ETFs" not in combined
+    assert "http://www.nasdaqtrader.com" not in combined
+    assert "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt" in readme
+    assert "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt" in readme
 
 
 def test_factor_catalog_documents_every_factor_spec():

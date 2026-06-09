@@ -588,7 +588,48 @@ def _price_cache_path(config: RunConfig, provider: str, symbols: list[str]) -> P
         sort_keys=True,
     )
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
-    return config.cache_dir / "prices" / f"{provider}_{digest}.pkl"
+    return config.cache_dir / "prices" / f"{provider}_{digest}.json"
+
+
+def _price_cache_component_paths(metadata_path: Path) -> dict[str, Path]:
+    return {
+        "metadata": metadata_path,
+        "prices": metadata_path.with_suffix(".prices.csv"),
+        "volumes": metadata_path.with_suffix(".volumes.csv"),
+    }
+
+
+def _read_price_cache(metadata_path: Path) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    paths = _price_cache_component_paths(metadata_path)
+    if not all(path.exists() for path in paths.values()):
+        return None
+    try:
+        metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
+        prices = pd.read_csv(paths["prices"], index_col=0, parse_dates=True)
+        volumes = pd.read_csv(paths["volumes"], index_col=0, parse_dates=True)
+        symbols = [str(symbol) for symbol in metadata.get("symbols", prices.columns.tolist())]
+        prices = prices.reindex(columns=symbols)
+        volumes = volumes.reindex(index=prices.index, columns=symbols)
+    except Exception:
+        return None
+    return prices, volumes
+
+
+def _write_price_cache(metadata_path: Path, prices: pd.DataFrame, volumes: pd.DataFrame, *, provider: str, symbols: list[str]) -> None:
+    paths = _price_cache_component_paths(metadata_path)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "version": 1,
+        "provider": provider,
+        "symbols": symbols,
+        "price_file": paths["prices"].name,
+        "volume_file": paths["volumes"].name,
+        "format": "csv+json",
+        "created_at_utc": datetime.now(UTC).isoformat(),
+    }
+    paths["metadata"].write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    prices.to_csv(paths["prices"])
+    volumes.reindex(index=prices.index, columns=prices.columns).to_csv(paths["volumes"])
 
 
 def _yfinance_download_end_date(config: RunConfig) -> str | None:
@@ -618,13 +659,15 @@ def _finance_datareader_cache_path(config: RunConfig, symbol: str) -> Path:
 
 def _download_yfinance_chunk(symbols: list[str], config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     cache_path = _price_cache_path(config, "yfinance", symbols)
-    if cache_path.exists():
-        cached = pd.read_pickle(cache_path)
-        return cached["prices"], cached["volumes"], {
+    cached = _read_price_cache(cache_path)
+    if cached is not None:
+        prices, volumes = cached
+        return prices, volumes, {
             "status": "cache_hit",
             "retries": 0,
             "error": None,
             "cache_path": str(cache_path),
+            "cache_format": "csv+json",
         }
 
     import yfinance as yf  # type: ignore
@@ -642,13 +685,13 @@ def _download_yfinance_chunk(symbols: list[str], config: RunConfig) -> tuple[pd.
                 threads=True,
             )
             prices, volumes = _extract_yfinance(raw, symbols)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            pd.to_pickle({"prices": prices, "volumes": volumes}, cache_path)
+            _write_price_cache(cache_path, prices, volumes, provider="yfinance", symbols=symbols)
             return prices, volumes, {
                 "status": "fetched",
                 "retries": attempt,
                 "error": None,
                 "cache_path": str(cache_path),
+                "cache_format": "csv+json",
             }
         except Exception as exc:  # pragma: no cover - network dependent
             last_error = exc
@@ -659,6 +702,7 @@ def _download_yfinance_chunk(symbols: list[str], config: RunConfig) -> tuple[pd.
         "retries": config.retry_count,
         "error": str(last_error),
         "cache_path": str(cache_path),
+        "cache_format": "csv+json",
     }
 
 
@@ -935,7 +979,24 @@ def build_eligibility_mask(
     history_ok = price_observations >= config.min_history_days
     price_ok = prices >= config.min_price
     fresh_ok = prices.notna()
-    mask = history_ok & price_ok & fresh_ok
+    dollar_volume = prices.mul(volumes)
+    price_liquidity_obs = prices.notna().rolling(liquidity_window, min_periods=1).sum()
+    share_liquidity_obs = volumes.notna().rolling(liquidity_window, min_periods=1).sum()
+    dollar_liquidity_obs = dollar_volume.notna().rolling(liquidity_window, min_periods=1).sum()
+    liquidity_observations_ok = (
+        (price_liquidity_obs >= config.min_liquidity_observations)
+        & (share_liquidity_obs >= config.min_liquidity_observations)
+        & (dollar_liquidity_obs >= config.min_liquidity_observations)
+    )
+    avg_share_volume = volumes.rolling(liquidity_window, min_periods=1).mean()
+    avg_dollar_volume = dollar_volume.rolling(liquidity_window, min_periods=1).mean()
+    share_volume_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    if config.min_avg_volume > 0:
+        share_volume_ok = avg_share_volume >= config.min_avg_volume
+    dollar_volume_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    if config.min_avg_dollar_volume > 0:
+        dollar_volume_ok = avg_dollar_volume >= config.min_avg_dollar_volume
+    mask = history_ok & price_ok & fresh_ok & liquidity_observations_ok & share_volume_ok & dollar_volume_ok
     return mask.fillna(False).astype(bool)
 
 

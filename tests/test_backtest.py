@@ -98,6 +98,34 @@ def test_drifted_turnover_differs_from_naive_target_turnover_when_prices_move():
     assert not result.pre_trade_weights.empty
 
 
+def test_backtest_weights_and_turnover_use_same_drifted_holdings_state():
+    dates = pd.bdate_range("2021-01-01", periods=100)
+    prices = pd.DataFrame({"A": 100.0, "B": 100.0}, index=dates)
+    rebalance_dates = pd.Series(index=dates, data=dates).resample("ME").last().dropna()
+    first_rebalance = rebalance_dates.iloc[0]
+    second_rebalance = rebalance_dates.iloc[1]
+    start = dates.get_loc(first_rebalance)
+    end = dates.get_loc(second_rebalance)
+    prices.iloc[start : end + 1, prices.columns.get_loc("A")] = np.linspace(100.0, 200.0, end - start + 1)
+    scores = pd.DataFrame({"A": 1.0, "B": 0.9}, index=dates)
+    config = RunConfig(start_date="2021-01-01", end_date="2021-05-31", top_n=2, max_weight=0.5)
+
+    result = run_factor_backtest(prices, scores, config, "drift_state")
+    second_rebalance = result.signal_dates.index[1]
+    pre_trade = result.pre_trade_weights.loc[second_rebalance]
+    weights_before_second_rebalance_return = result.weights.loc[second_rebalance]
+
+    assert pre_trade["A"] > 0.5
+    assert pre_trade["B"] < 0.5
+    assert np.isclose(pre_trade.sum(), 1.0)
+    assert weights_before_second_rebalance_return["A"] > 0.5
+    assert weights_before_second_rebalance_return["B"] < 0.5
+    expected_turnover = abs(0.5 - pre_trade["A"]) + abs(0.5 - pre_trade["B"])
+    assert np.isclose(result.turnover.loc[second_rebalance], expected_turnover)
+    naive_second = result.naive_turnover.reindex([second_rebalance]).fillna(0.0).iloc[0]
+    assert np.isclose(naive_second, 0.0)
+
+
 def test_missing_trade_price_preserves_liquidation_turnover():
     dates = pd.bdate_range("2021-01-01", periods=90)
     prices = pd.DataFrame({"A": 100.0, "B": 100.0}, index=dates)

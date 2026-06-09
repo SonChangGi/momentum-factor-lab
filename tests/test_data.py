@@ -1,8 +1,10 @@
 import sys
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import (
@@ -154,7 +156,14 @@ def test_build_data_quality_frame_records_practical_symbol_diagnostics():
     assert not bool(rows.loc["MISSVOL", "data_quality_pass"])
 
 
-def test_stooq_close_fallback_is_not_tradable_data_quality():
+@pytest.mark.parametrize(
+    ("provider", "price_source"),
+    [
+        ("yfinance-free-public-data+stooq-fallback", "stooq-daily-close-fallback"),
+        ("yfinance-free-public-data+finance-datareader-fallback", "finance-datareader-close-fallback"),
+    ],
+)
+def test_close_fallback_is_not_tradable_data_quality(provider, price_source):
     dates = pd.bdate_range("2024-01-01", periods=260)
     prices = pd.DataFrame({"STQ": np.linspace(20, 30, len(dates))}, index=dates)
     volumes = pd.DataFrame({"STQ": 1_000_000}, index=dates)
@@ -166,8 +175,8 @@ def test_stooq_close_fallback_is_not_tradable_data_quality():
         ["STQ"],
         candidate,
         RunConfig(min_history_days=200, min_avg_dollar_volume=1_000_000),
-        provider="yfinance-free-public-data+stooq-fallback",
-        price_sources=pd.DataFrame([{"symbol": "STQ", "price_source": "stooq-daily-close-fallback"}]),
+        provider=provider,
+        price_sources=pd.DataFrame([{"symbol": "STQ", "price_source": price_source}]),
         as_of=dates[-1],
     )
 
@@ -404,8 +413,8 @@ def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeyp
     assert int(summary["eligible_price_symbols"]) == 3
 
 
-def test_yfinance_chunk_uses_price_cache_without_network(tmp_path):
-    from momentum_factor_lab.data import _download_yfinance_chunk, _price_cache_path
+def test_yfinance_chunk_uses_csv_json_price_cache_without_network(tmp_path):
+    from momentum_factor_lab.data import _download_yfinance_chunk, _price_cache_path, _write_price_cache
 
     config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
     symbols = ["AAA", "BBB"]
@@ -413,13 +422,41 @@ def test_yfinance_chunk_uses_price_cache_without_network(tmp_path):
     cached_prices = pd.DataFrame({"AAA": [1, 2, 3], "BBB": [4, 5, 6]}, index=dates)
     cached_volumes = pd.DataFrame({"AAA": [10, 10, 10], "BBB": [20, 20, 20]}, index=dates)
     cache_path = _price_cache_path(config, "yfinance", symbols)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.to_pickle({"prices": cached_prices, "volumes": cached_volumes}, cache_path)
+    _write_price_cache(cache_path, cached_prices, cached_volumes, provider="yfinance", symbols=symbols)
     prices, volumes, status = _download_yfinance_chunk(symbols, config)
-    pd.testing.assert_frame_equal(prices, cached_prices)
-    pd.testing.assert_frame_equal(volumes, cached_volumes)
+    pd.testing.assert_frame_equal(prices, cached_prices, check_freq=False)
+    pd.testing.assert_frame_equal(volumes, cached_volumes, check_freq=False)
     assert status["status"] == "cache_hit"
     assert status["cache_path"] == str(cache_path)
+    assert status["cache_format"] == "csv+json"
+    assert cache_path.suffix == ".json"
+    assert not list(tmp_path.rglob("*.pkl"))
+
+
+def test_yfinance_chunk_does_not_use_pickle_cache(monkeypatch, tmp_path):
+    import momentum_factor_lab.data as data
+    from momentum_factor_lab.data import _download_yfinance_chunk
+
+    monkeypatch.setattr(pd, "read_pickle", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read_pickle used")))
+    monkeypatch.setattr(pd, "to_pickle", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("to_pickle used")))
+
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    raw = pd.DataFrame({"Close": [10.0, 11.0], "Volume": [100.0, 120.0]}, index=dates)
+
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda **kwargs: raw))
+
+    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
+    prices, volumes, status = _download_yfinance_chunk(["AAA"], config)
+
+    assert status["status"] == "fetched"
+    assert list(prices.columns) == ["AAA"]
+    assert list(volumes.columns) == ["AAA"]
+    assert not list(tmp_path.rglob("*.pkl"))
+    assert not str(status.get("cache_path", "")).endswith(".pkl")
+    source = inspect.getsource(data)
+    assert "read_pickle" not in source
+    assert "to_pickle" not in source
+    assert ".pkl" not in source
 
 
 def test_yfinance_chunk_passes_inclusive_config_end_date(monkeypatch, tmp_path):
@@ -534,7 +571,7 @@ def test_build_eligibility_mask_uses_rebalance_date_liquidity_and_history():
     assert not mask.loc[dates[45], "LATE"]
     assert mask.loc[dates[-1], "LATE"]
     assert not mask["LOWP"].any()
-    assert mask.loc[dates[-1], "ILLIQ"]
+    assert not mask.loc[dates[-1], "ILLIQ"]
 
 
 def test_aggressive_profile_lowers_endpoint_discovery_not_configured_gate():

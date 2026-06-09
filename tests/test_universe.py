@@ -1,15 +1,21 @@
 from momentum_factor_lab.universe import (
     DEFAULT_UNIVERSE,
     DEFAULT_UNIVERSE_PATH,
+    NASDAQ_LISTED_URL,
+    NASDAQ_OTHER_LISTED_URL,
+    SEC_COMPANY_TICKERS_EXCHANGE_URL,
+    _fetch_text_with_cache,
     build_public_universe_frame,
     is_excluded_instrument_name,
     is_known_etf_symbol,
+    is_supported_symbol,
     load_packaged_universe_frame,
     parse_nasdaq_symbol_directory,
     parse_sec_company_tickers_exchange,
     universe_frame_for_symbols,
 )
 import pandas as pd
+from datetime import UTC, datetime, timedelta
 
 
 def test_default_universe_has_at_least_2000_stock_symbols_and_no_etfs():
@@ -31,6 +37,7 @@ def test_raw_packaged_universe_resource_is_stock_only_not_runtime_only():
     assert set(raw["asset_type"]) == {"stock"}
     assert not raw["name"].map(is_excluded_instrument_name).any()
     assert {"SPY", "QQQ", "IWM", "XLK", "XLF", "XLV", "PHYS", "PDI", "QQQX"}.isdisjoint(set(raw["symbol"]))
+    assert {"PLTR", "UBER", "SNOW", "BKU", "YOU", "ABR", "AUR"}.issubset(set(raw["symbol"]))
 
 
 def test_sec_company_tickers_exchange_parser():
@@ -64,6 +71,27 @@ def test_nasdaq_parser_can_retain_etf_evidence_for_refresh_merge():
     assert frame.set_index("symbol").loc["ZZZ", "is_etf"]
 
 
+def test_suffix_endings_do_not_drop_common_equities_and_metadata_excludes_derivatives():
+    for symbol in ["UBER", "PLTR", "SNOW", "DOW", "BKU", "YOU", "ABR", "AUR", "WS", "WSC", "NWSA", "BRK-B"]:
+        assert is_supported_symbol(symbol)
+    assert is_excluded_instrument_name("Acme Corp Warrants")
+    assert is_excluded_instrument_name("Acme Corp Rights")
+    assert is_excluded_instrument_name("Acme Corp Units")
+    assert not is_excluded_instrument_name("Preferred Bank")
+    payload = (
+        "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\n"
+        "UBER|Uber Technologies Inc. Common Stock|Q|N|N|100|N|N\n"
+        "PLTR|Palantir Technologies Inc. Class A Common Stock|Q|N|N|100|N|N\n"
+        "DOW|Dow Inc. Common Stock|Q|N|N|100|N|N\n"
+        "ACMEW|Acme Corp Warrants|Q|N|N|100|N|N\n"
+        "ACMEU|Acme Corp Units|Q|N|N|100|N|N\n"
+        "ACMER|Acme Corp Rights|Q|N|N|100|N|N\n"
+        "File Creation Time: today"
+    )
+    frame = parse_nasdaq_symbol_directory(payload, source_name="fixture")
+    assert set(frame["symbol"]) == {"UBER", "PLTR", "DOW"}
+
+
 def test_public_universe_refresh_combined_output_is_stock_only(monkeypatch, tmp_path):
     sec_payload = (
         '{"fields":["cik","name","ticker","exchange"],'
@@ -89,6 +117,103 @@ def test_public_universe_refresh_combined_output_is_stock_only(monkeypatch, tmp_
     assert list(result.frame["symbol"]) == ["AAA", "BBB"]
     assert not result.frame["is_etf"].any()
     assert set(result.frame["asset_type"]) == {"stock"}
+
+
+def test_public_universe_refresh_urls_are_https(monkeypatch, tmp_path):
+    assert SEC_COMPANY_TICKERS_EXCHANGE_URL.startswith("https://")
+    assert NASDAQ_LISTED_URL.startswith("https://")
+    assert NASDAQ_OTHER_LISTED_URL.startswith("https://")
+    captured_urls = []
+
+    def fake_fetch(url, cache_dir, cache_name, retry_count, retry_backoff_seconds, user_agent=None):
+        captured_urls.append(url)
+        payloads = {
+            "sec_company_tickers_exchange.json": (
+                '{"fields":["cik","name","ticker","exchange"],"data":[[1,"AAA Corp","AAA","Nasdaq"]]}'
+            ),
+            "nasdaqlisted.txt": (
+                "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\n"
+                "BBB|BBB Corp|Q|N|N|100|N|N\n"
+                "File Creation Time: today"
+            ),
+            "otherlisted.txt": (
+                "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol\n"
+                "CCC|CCC Corp|N|CCC|N|100|N|CCC\n"
+                "File Creation Time: today"
+            ),
+        }
+        return payloads[cache_name], {"source": url, "status": "fixture", "cache_path": str(tmp_path / cache_name), "retries": 0}
+
+    monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
+
+    build_public_universe_frame(cache_dir=tmp_path)
+
+    assert captured_urls
+    assert all(url.startswith("https://") for url in captured_urls)
+
+
+class _FakeResponse:
+    def __init__(self, payload: str):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self.payload.encode("utf-8")
+
+
+def test_fetch_text_with_cache_refetches_stale_universe_cache(monkeypatch, tmp_path):
+    cache_path = tmp_path / "stale.txt"
+    cache_path.write_text("stale payload", encoding="utf-8")
+    old = (datetime.now(UTC) - timedelta(days=3)).timestamp()
+    cache_path.touch()
+    import os
+
+    os.utime(cache_path, (old, old))
+    fresh_payload = "fresh payload"
+
+    monkeypatch.setattr("momentum_factor_lab.universe.urlopen", lambda request, timeout=30: _FakeResponse(fresh_payload))
+
+    text, source = _fetch_text_with_cache(
+        "https://example.test/stale.txt",
+        tmp_path,
+        "stale.txt",
+        retry_count=0,
+        retry_backoff_seconds=0.0,
+        cache_ttl_days=1,
+    )
+
+    assert text == fresh_payload
+    assert source["status"] == "fetched"
+    assert source["cache_stale"] is True
+
+
+def test_fetch_text_with_cache_uses_fresh_cache_without_network(monkeypatch, tmp_path):
+    cache_path = tmp_path / "fresh.txt"
+    cached_payload = "cached payload"
+    cache_path.write_text(cached_payload, encoding="utf-8")
+
+    def fail_network(*args, **kwargs):
+        raise AssertionError("network should not be called for fresh cache")
+
+    monkeypatch.setattr("momentum_factor_lab.universe.urlopen", fail_network)
+
+    text, source = _fetch_text_with_cache(
+        "https://example.test/fresh.txt",
+        tmp_path,
+        "fresh.txt",
+        retry_count=0,
+        retry_backoff_seconds=0.0,
+        cache_ttl_days=1,
+    )
+
+    assert text == cached_payload
+    assert source["status"] == "cache_hit"
+    assert source["cache_fresh"] is True
 
 
 def test_known_etf_tickers_are_denied_as_custom_candidates():

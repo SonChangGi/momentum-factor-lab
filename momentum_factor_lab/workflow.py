@@ -72,9 +72,13 @@ class TradabilityAssessment:
         reasons: list[str] = []
         if not self.fresh_live_data_available:
             reasons.append("fresh_live_data")
-        if not self.requirements.get("row_level_data_quality_pass", True):
-            reasons.append("row_level_data_quality_pass")
-        return reasons or self.limitations
+        for name, satisfied in self.requirements.items():
+            if not satisfied and name not in reasons:
+                reasons.append(name)
+        for limitation in self.limitations:
+            if limitation not in reasons:
+                reasons.append(limitation)
+        return reasons
 
     def to_metadata(self) -> dict[str, Any]:
         fail_closed_reasons = self.fail_closed_reasons
@@ -94,7 +98,7 @@ class TradabilityAssessment:
             "decision_support_tier": (
                 "practical_recommendations"
                 if self.recommendation_output_available
-                else "non_current_reference"
+                else "research_signals"
             ),
             "fail_closed": not self.recommendation_output_available,
             "fail_closed_reasons": fail_closed_reasons,
@@ -596,10 +600,12 @@ def _resolve_selected_factor(
         "research_validation",
         (
             f"{validation_selected_factor} selected by validation-first composite score for "
-            "current recommendations after comparing validation Sharpe, Sortino, Calmar, max drawdown, "
-            "CAGR, turnover, and train/validation stability across the full momentum factor library."
+            "research ranking after comparing validation Sharpe, Sortino, Calmar, max drawdown, "
+            "CAGR, turnover, and train/validation stability across the full momentum factor library. "
+            "Same-run validation selection is blocked from tradable recommendation output; use a "
+            "predeclared selected factor or walk-forward selection for practical labels."
         ),
-        False,
+        True,
     )
 
 
@@ -748,6 +754,7 @@ HARD_DATA_QUALITY_FAILURES = {
     "stale_price",
     "below_minimum_price",
     "insufficient_history",
+    "provider_adjustment_incompatible",
 }
 
 
@@ -1082,8 +1089,7 @@ def _apply_tradability_gate(
 ) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "factor_selection_policy_available": selection_source
-        in {"research_validation", "predeclared", "walk_forward"},
+        "factor_selection_policy_available": selection_source in {"predeclared", "walk_forward"},
         "no_explicit_price_symbol_cap": _has_no_explicit_price_symbol_cap(config, subset_run),
         "complete_requested_price_coverage": _has_complete_requested_price_coverage(market_data),
         "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
@@ -1095,18 +1101,28 @@ def _apply_tradability_gate(
         "capacity_estimated_and_pass": _row_level_capacity_pass(recommendations),
     }
     limitations = [name for name, satisfied in requirements.items() if not satisfied]
-    recommendation_available = current_available and bool(not recommendations.empty) and _row_level_data_quality_pass(recommendations)
+    recommendation_available = bool(not recommendations.empty) and all(requirements.values())
     if current_available and limitations:
         status = f"{status}_with_limitations_{'_and_'.join(limitations)}"
+    output_key = "recommendations" if recommendation_available else "research_signals"
+    output_label = (
+        "Practical recommendations"
+        if recommendation_available
+        else (
+            "Research signals (not tradable)"
+            if current_available
+            else "Reference research signals (not current)"
+        )
+    )
     return TradabilityAssessment(
         status=status,
         fresh_live_data_available=current_available,
         recommendation_output_available=recommendation_available,
         requirements=requirements,
         limitations=limitations,
-        output_key="recommendations",
-        output_label="Practical recommendations" if recommendation_available else "Reference recommendations (not current)",
-        output_sheet="recommendations",
+        output_key=output_key,
+        output_label=output_label,
+        output_sheet=output_key,
     )
 
 
@@ -1175,7 +1191,6 @@ def run_analysis(config: RunConfig) -> RunResult:
     status = tradability_assessment.status
     if not tradability_assessment.recommendation_output_available:
         recommendations["weight"] = 0.0
-        recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
     recommendations["recommendation_status"] = status
     recommendations["recommendation_output"] = tradability_assessment.output_key
     recommendations["signal_date"] = str(analysis_prices.index.max().date()) if not analysis_prices.empty else "unavailable"
@@ -1218,8 +1233,8 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selection_policy_frozen_for_live": selection_source == "predeclared",
         "same_sample_selection_blocked_for_tradable": same_sample_blocked,
         "factor_selection_warning": (
-            "Validation-selected factor is user-approved for this practical decision-support run; "
-            "review score_components and robustness before trading."
+            "Validation-selected factor is a same-run research ranking and is blocked from tradable "
+            "recommendation output; predeclare a selected factor or use walk-forward selection for practical labels."
             if selection_source == "research_validation"
             else None
         ),

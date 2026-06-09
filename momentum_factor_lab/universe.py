@@ -7,6 +7,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -15,10 +16,11 @@ import pandas as pd
 RESOURCE_DIR = Path(__file__).with_name("resources")
 DEFAULT_UNIVERSE_PATH = RESOURCE_DIR / "default_universe.csv"
 SEC_COMPANY_TICKERS_EXCHANGE_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
-NASDAQ_LISTED_URL = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-NASDAQ_OTHER_LISTED_URL = "http://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+NASDAQ_OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 USER_AGENT = "momentum-factor-lab/0.1 free-public-data research"
 SEC_USER_AGENT_ENV = "MOMENTUM_FACTOR_LAB_SEC_USER_AGENT"
+PUBLIC_UNIVERSE_CACHE_TTL_DAYS = 1
 
 
 def effective_user_agent(user_agent: str | None = None) -> str:
@@ -172,14 +174,21 @@ NON_STOCK_INSTRUMENT_PATTERNS = (
     r"\bBOND\b",
     r"\bCOMMODIT(Y|IES)\b",
     r"\bCURRENCY\b",
+    r"\bWARRANTS?\b",
+    r"\bRIGHTS?\b",
+    r"\bUNITS?\b",
+    r"\bPREFERRED\s+(STOCK|SHARES?|SECURIT(Y|IES)|SERIES|UNITS?|RIGHTS?|WARRANTS?|DEPOSITARY)\b",
+    r"\bPREFERENCE\s+(STOCK|SHARES?|SECURIT(Y|IES))\b",
+    r"\bDEPOSITARY SHARES\b",
 )
 
 
 def is_supported_symbol(symbol: str) -> bool:
-    if not re.match(r"^[A-Z][A-Z0-9-]{0,9}$", symbol):
-        return False
-    derivative_suffixes = ("WS", "WT", "W", "U", "R")
-    return not (len(symbol) > 2 and symbol.endswith(derivative_suffixes))
+    # Some ordinary common stocks end in letters commonly used by derivatives
+    # (for example PLTR/UBER/SNOW/BKU/YOU/ABR/AUR). Reject only structurally
+    # invalid symbols here; derivative/unit/preferred filtering belongs in
+    # provider metadata and instrument-name rules.
+    return bool(re.match(r"^[A-Z][A-Z0-9-]{0,9}$", symbol))
 
 
 def is_excluded_instrument_name(name: object) -> bool:
@@ -347,15 +356,25 @@ def _fetch_text_with_cache(
     retry_count: int,
     retry_backoff_seconds: float,
     user_agent: str | None = None,
+    cache_ttl_days: int = PUBLIC_UNIVERSE_CACHE_TTL_DAYS,
 ) -> tuple[str | None, dict[str, object]]:
     cache_path = cache_dir / cache_name if cache_dir is not None else None
+    had_stale_cache = False
     if cache_path is not None and cache_path.exists():
-        return cache_path.read_text(encoding="utf-8"), {
-            "source": url,
-            "status": "cache_hit",
-            "cache_path": str(cache_path),
-            "retries": 0,
-        }
+        mtime = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=UTC)
+        cache_age = datetime.now(UTC) - mtime
+        if cache_age <= timedelta(days=cache_ttl_days):
+            return cache_path.read_text(encoding="utf-8"), {
+                "source": url,
+                "status": "cache_hit",
+                "cache_path": str(cache_path),
+                "retries": 0,
+                "cache_age_days": round(cache_age.total_seconds() / 86_400, 4),
+                "cache_ttl_days": cache_ttl_days,
+                "cache_fresh": True,
+                "cache_stale": False,
+            }
+        had_stale_cache = True
     last_error = None
     for attempt in range(retry_count + 1):
         try:
@@ -369,11 +388,28 @@ def _fetch_text_with_cache(
                 "status": "fetched",
                 "cache_path": str(cache_path) if cache_path is not None else "disabled",
                 "retries": attempt,
+                "cache_ttl_days": cache_ttl_days,
+                "cache_fresh": True,
+                "cache_stale": had_stale_cache,
             }
         except Exception as exc:  # pragma: no cover - network dependent
             last_error = exc
             if attempt < retry_count:
                 time.sleep(retry_backoff_seconds)
+    if cache_path is not None and cache_path.exists():
+        mtime = datetime.fromtimestamp(cache_path.stat().st_mtime, tz=UTC)
+        cache_age_days = (datetime.now(UTC) - mtime).total_seconds() / 86_400
+        return cache_path.read_text(encoding="utf-8"), {
+            "source": url,
+            "status": "stale_cache_fallback",
+            "cache_path": str(cache_path),
+            "retries": retry_count,
+            "error": str(last_error),
+            "cache_age_days": round(cache_age_days, 4),
+            "cache_ttl_days": cache_ttl_days,
+            "cache_fresh": False,
+            "cache_stale": True,
+        }
     return None, {
         "source": url,
         "status": "failed",
