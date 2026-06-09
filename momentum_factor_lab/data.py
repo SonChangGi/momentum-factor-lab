@@ -59,6 +59,7 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         "candidate_symbols",
         "requested_price_symbols",
         "eligible_price_symbols",
+        "liquidity_eligible_symbols",
         "excluded_symbols",
         "subset_run",
         "point_in_time_universe",
@@ -749,25 +750,44 @@ def _stooq_symbol(symbol: str) -> str:
     return quote(symbol.lower().replace("-", ".") + ".us")
 
 
+def _validated_provider_close_volume(
+    frame: pd.DataFrame,
+    symbol: str,
+    provider_name: str,
+) -> tuple[pd.Series | None, pd.Series | None, str | None]:
+    if frame.empty or "Date" not in frame or "Close" not in frame:
+        return None, None, f"empty {provider_name} payload"
+    parsed = frame.copy()
+    parsed["Date"] = pd.to_datetime(parsed["Date"], errors="coerce")
+    parsed["Close"] = pd.to_numeric(parsed["Close"], errors="coerce")
+    if "Volume" in parsed:
+        parsed["Volume"] = pd.to_numeric(parsed["Volume"], errors="coerce")
+    else:
+        parsed["Volume"] = np.nan
+    parsed = parsed.dropna(subset=["Date", "Close"]).set_index("Date").sort_index()
+    if parsed.empty:
+        return None, None, f"invalid {provider_name} payload: no numeric close prices"
+    return (
+        parsed["Close"].rename(symbol),
+        parsed["Volume"].rename(symbol),
+        None,
+    )
+
+
 def _download_stooq_symbol(
     symbol: str,
     config: RunConfig,
 ) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
     cache_path = _stooq_cache_path(config, symbol)
     if cache_path.exists():
-        frame = pd.read_csv(cache_path)
-        if frame.empty or "Date" not in frame or "Close" not in frame:
-            return None, None, "empty stooq cache", "cache_hit_invalid", str(cache_path), 0
-        frame["Date"] = pd.to_datetime(frame["Date"])
-        frame = frame.set_index("Date").sort_index()
-        return (
-            frame["Close"].rename(symbol),
-            frame.get("Volume", pd.Series(index=frame.index, dtype=float)).rename(symbol),
-            None,
-            "cache_hit",
-            str(cache_path),
-            0,
-        )
+        try:
+            frame = pd.read_csv(cache_path)
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "stooq cache")
+            if price is None:
+                return None, None, error, "cache_hit_invalid", str(cache_path), 0
+            return price, volume, None, "cache_hit", str(cache_path), 0
+        except Exception as exc:
+            return None, None, f"invalid stooq cache: {exc}", "cache_hit_invalid", str(cache_path), 0
 
     start = config.start_date.replace("-", "")
     end = config.effective_end_date.replace("-", "")
@@ -778,20 +798,12 @@ def _download_stooq_symbol(
             with urlopen(Request(url, headers={"User-Agent": "momentum-factor-lab/0.1"}), timeout=20) as response:
                 text = response.read().decode("utf-8", errors="replace")
             frame = pd.read_csv(StringIO(text))
-            if frame.empty or "Date" not in frame or "Close" not in frame:
-                return None, None, "empty stooq response", "failed", str(cache_path), attempt
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "stooq response")
+            if price is None:
+                return None, None, error, "failed", str(cache_path), attempt
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             frame.to_csv(cache_path, index=False)
-            frame["Date"] = pd.to_datetime(frame["Date"])
-            frame = frame.set_index("Date").sort_index()
-            return (
-                frame["Close"].rename(symbol),
-                frame.get("Volume", pd.Series(index=frame.index, dtype=float)).rename(symbol),
-                None,
-                "fetched",
-                str(cache_path),
-                attempt,
-            )
+            return price, volume, None, "fetched", str(cache_path), attempt
         except Exception as exc:  # pragma: no cover - network dependent
             last_error = exc
             if attempt < config.retry_count:
@@ -805,7 +817,7 @@ def _apply_stooq_fallback(
     symbols: list[str],
     config: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    missing_all = [symbol for symbol in symbols if symbol not in prices.columns]
+    missing_all = _fallback_candidate_symbols(prices, volumes, symbols, config)
     limit = len(missing_all) if config.stooq_fallback_limit is None else config.stooq_fallback_limit
     missing = missing_all[:limit]
     rows = []
@@ -831,8 +843,8 @@ def _apply_stooq_fallback(
                 }
             )
             continue
-        prices = prices.join(price, how="outer")
-        volumes = volumes.join(volume, how="outer")
+        prices = prices.drop(columns=[symbol], errors="ignore").join(price, how="outer")
+        volumes = volumes.drop(columns=[symbol], errors="ignore").join(volume, how="outer")
         rows.append(
             {
                 "source": "stooq-daily-close-fallback",
@@ -862,19 +874,14 @@ def _download_finance_datareader_symbol(
 ) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
     cache_path = _finance_datareader_cache_path(config, symbol)
     if cache_path.exists():
-        frame = pd.read_csv(cache_path)
-        if frame.empty or "Date" not in frame or "Close" not in frame:
-            return None, None, "empty FinanceDataReader cache", "cache_hit_invalid", str(cache_path), 0
-        frame["Date"] = pd.to_datetime(frame["Date"])
-        frame = frame.set_index("Date").sort_index()
-        return (
-            frame["Close"].rename(symbol),
-            frame.get("Volume", pd.Series(index=frame.index, dtype=float)).rename(symbol),
-            None,
-            "cache_hit",
-            str(cache_path),
-            0,
-        )
+        try:
+            frame = pd.read_csv(cache_path)
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "FinanceDataReader cache")
+            if price is None:
+                return None, None, error, "cache_hit_invalid", str(cache_path), 0
+            return price, volume, None, "cache_hit", str(cache_path), 0
+        except Exception as exc:
+            return None, None, f"invalid FinanceDataReader cache: {exc}", "cache_hit_invalid", str(cache_path), 0
 
     try:
         import FinanceDataReader as fdr  # type: ignore
@@ -892,16 +899,12 @@ def _download_finance_datareader_symbol(
             export = frame.reset_index().rename(columns={frame.index.name or "index": "Date"})
             if "Date" not in export.columns:
                 export = export.rename(columns={export.columns[0]: "Date"})
+            price, volume, error = _validated_provider_close_volume(export, symbol, "FinanceDataReader response")
+            if price is None:
+                return None, None, error, "failed", str(cache_path), attempt
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             export.to_csv(cache_path, index=False)
-            return (
-                pd.to_numeric(frame["Close"], errors="coerce").rename(symbol),
-                pd.to_numeric(frame.get("Volume", pd.Series(index=frame.index, dtype=float)), errors="coerce").rename(symbol),
-                None,
-                "fetched",
-                str(cache_path),
-                attempt,
-            )
+            return price, volume, None, "fetched", str(cache_path), attempt
         except Exception as exc:  # pragma: no cover - network/provider dependent
             last_error = exc
             if attempt < config.retry_count:
@@ -915,7 +918,7 @@ def _apply_finance_datareader_fallback(
     symbols: list[str],
     config: RunConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    missing_all = [symbol for symbol in symbols if symbol not in prices.columns]
+    missing_all = _fallback_candidate_symbols(prices, volumes, symbols, config)
     limit = len(missing_all) if config.finance_datareader_fallback_limit is None else config.finance_datareader_fallback_limit
     missing = missing_all[:limit]
     rows = []
@@ -941,8 +944,8 @@ def _apply_finance_datareader_fallback(
                 }
             )
             continue
-        prices = prices.join(price, how="outer")
-        volumes = volumes.join(volume, how="outer")
+        prices = prices.drop(columns=[symbol], errors="ignore").join(price, how="outer")
+        volumes = volumes.drop(columns=[symbol], errors="ignore").join(volume, how="outer")
         rows.append(
             {
                 "source": "finance-datareader-close-fallback",
@@ -964,6 +967,58 @@ def _apply_finance_datareader_fallback(
             }
         )
     return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
+
+
+def _fallback_candidate_symbols(
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    symbols: list[str],
+    config: RunConfig,
+) -> list[str]:
+    """Return symbols that deserve a free-provider fallback attempt.
+
+    A yfinance column can exist while still being unusable for the current run
+    because it is stale, too short, too sparse, non-positive, anomalous, or lacks
+    enough liquidity evidence. Treat those cases like missing symbols so a free
+    Stooq/FDR fallback may improve coverage before the run falls closed.
+    """
+
+    fallback: list[str] = []
+    as_of = prices.dropna(how="all").index.max() if not prices.empty else None
+    for symbol in symbols:
+        if symbol not in prices.columns:
+            fallback.append(symbol)
+            continue
+        series = pd.to_numeric(prices[symbol], errors="coerce").dropna()
+        if series.empty:
+            fallback.append(symbol)
+            continue
+        if len(series) < config.min_history_days:
+            fallback.append(symbol)
+            continue
+        latest_date = series.index.max()
+        if as_of is not None and (pd.Timestamp(as_of).normalize() - pd.Timestamp(latest_date).normalize()).days > config.stale_after_days:
+            fallback.append(symbol)
+            continue
+        recent_prices = pd.to_numeric(prices[symbol].tail(config.data_quality_lookback_days), errors="coerce")
+        if recent_prices.le(0).fillna(False).any():
+            fallback.append(symbol)
+            continue
+        if float(recent_prices.isna().mean()) > config.max_price_missing_ratio:
+            fallback.append(symbol)
+            continue
+        recent_returns = recent_prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).abs()
+        if recent_returns.gt(config.max_extreme_daily_return).fillna(False).any():
+            fallback.append(symbol)
+            continue
+        if symbol in volumes.columns and config.min_liquidity_observations > 0:
+            recent_volume = pd.to_numeric(volumes[symbol].tail(63), errors="coerce")
+            if int(recent_volume.notna().sum()) < config.min_liquidity_observations:
+                fallback.append(symbol)
+                continue
+        elif config.min_liquidity_observations > 0:
+            fallback.append(symbol)
+    return list(dict.fromkeys(fallback))
 
 
 def build_eligibility_mask(
@@ -1094,31 +1149,76 @@ def _eligible_filter(
     return price_keep, volume_keep, eligible, exclusions_df
 
 
-def _provider_label_from_sources(stooq_sources: pd.DataFrame, finance_datareader_sources: pd.DataFrame | None = None) -> str:
-    provider = "yfinance-free-public-data"
+def _has_positive_records(frame: pd.DataFrame | None) -> bool:
+    if frame is None or frame.empty or "records" not in frame:
+        return False
+    return pd.to_numeric(frame["records"], errors="coerce").fillna(0).astype(int).gt(0).any()
+
+
+def _provider_label_from_sources(
+    stooq_sources: pd.DataFrame,
+    finance_datareader_sources: pd.DataFrame | None = None,
+    yfinance_sources: pd.DataFrame | None = None,
+) -> str:
+    providers: list[str] = []
+    if yfinance_sources is None or _has_positive_records(yfinance_sources):
+        providers.append("yfinance-free-public-data")
     records = stooq_sources.get("records", pd.Series(dtype=float)) if not stooq_sources.empty else pd.Series(dtype=float)
     if not stooq_sources.empty and records.fillna(0).astype(int).gt(0).any():
-        provider += "+stooq-fallback"
+        providers.append("stooq-fallback")
     fdr = finance_datareader_sources if finance_datareader_sources is not None else pd.DataFrame()
     fdr_records = fdr.get("records", pd.Series(dtype=float)) if not fdr.empty else pd.Series(dtype=float)
     if not fdr.empty and fdr_records.fillna(0).astype(int).gt(0).any():
-        provider += "+finance-datareader-fallback"
-    return provider
+        providers.append("finance-datareader-fallback")
+    return "+".join(providers) if providers else "no-live-price-provider"
 
 
 def download_live_data(config: RunConfig) -> MarketData:
     fetched_at = datetime.now(UTC)
     candidate, universe_sources = _candidate_universe(config)
     symbols, subset_run = _requested_symbols(config, candidate)
+    prices = pd.DataFrame()
+    volumes = pd.DataFrame()
+    yf_sources = pd.DataFrame()
     try:
         import yfinance  # noqa: F401  # type: ignore
     except Exception as exc:  # pragma: no cover - depends on optional extra
-        sample = generate_offline_sample_data(config)
-        sample.live_error = f"yfinance unavailable: {exc}"
-        return sample
+        yf_sources = _source_frame(
+            [
+                {
+                    "source": "yfinance-adjusted-daily",
+                    "status": "unavailable",
+                    "records": 0,
+                    "requested_price_symbols": len(symbols),
+                    "requested_symbols": ",".join(symbols),
+                    "returned_symbols": "",
+                    "missing_symbols": ",".join(symbols),
+                    "error": f"yfinance unavailable: {exc}",
+                    "provider_adjustment_note": "yfinance import failed; configured free fallback providers were attempted.",
+                }
+            ]
+        )
+    else:
+        try:
+            prices, volumes, yf_sources = _download_yfinance(symbols, config)
+        except Exception as exc:  # pragma: no cover - network dependent
+            yf_sources = _source_frame(
+                [
+                    {
+                        "source": "yfinance-adjusted-daily",
+                        "status": "failed",
+                        "records": 0,
+                        "requested_price_symbols": len(symbols),
+                        "requested_symbols": ",".join(symbols),
+                        "returned_symbols": "",
+                        "missing_symbols": ",".join(symbols),
+                        "error": f"yfinance download failed: {exc}",
+                        "provider_adjustment_note": "yfinance failed; configured free fallback providers were attempted.",
+                    }
+                ]
+            )
 
     try:
-        prices, volumes, yf_sources = _download_yfinance(symbols, config)
         if config.stooq_fallback_limit != 0:
             prices, volumes, stooq_sources = _apply_stooq_fallback(prices, volumes, symbols, config)
         else:
@@ -1142,6 +1242,21 @@ def download_live_data(config: RunConfig) -> MarketData:
     downloaded_prices = prices.copy()
     downloaded_volumes = volumes.copy()
     prices, volumes, eligible, exclusions = _eligible_filter(prices, volumes, candidate[candidate["symbol"].isin(requested_candidate_symbols)], config)
+    liquidity_eligible_symbols = 0
+    if not prices.empty and not volumes.empty and not eligible.empty and "symbol" in eligible:
+        eligible_columns = [
+            symbol
+            for symbol in prices.columns
+            if normalize_symbol(symbol) in set(eligible["symbol"].map(normalize_symbol))
+        ]
+        if eligible_columns:
+            liquidity_mask = build_eligibility_mask(
+                prices[eligible_columns],
+                volumes.reindex(index=prices.index, columns=eligible_columns),
+                config,
+            )
+            if not liquidity_mask.empty:
+                liquidity_eligible_symbols = int(liquidity_mask.iloc[-1].fillna(False).sum())
     stooq_symbols = set()
     if not stooq_sources.empty and "symbol" in stooq_sources:
         stooq_symbols = set(stooq_sources.loc[stooq_sources["records"].fillna(0).astype(int).gt(0), "symbol"].astype(str))
@@ -1180,12 +1295,12 @@ def download_live_data(config: RunConfig) -> MarketData:
         symbols,
         candidate,
         config,
-        provider=_provider_label_from_sources(stooq_sources, finance_datareader_sources),
+        provider=_provider_label_from_sources(stooq_sources, finance_datareader_sources, yf_sources),
         price_sources=price_sources,
         exclusions=exclusions,
         as_of=downloaded_prices.dropna(how="all").index.max() if not downloaded_prices.empty else None,
     )
-    provider = _provider_label_from_sources(stooq_sources, finance_datareader_sources)
+    provider = _provider_label_from_sources(stooq_sources, finance_datareader_sources, yf_sources)
     returned_symbols = [symbol for symbol in symbols if symbol in downloaded_prices.columns]
     missing_symbols = [symbol for symbol in symbols if symbol not in downloaded_prices.columns]
     summary = _source_frame(
@@ -1197,6 +1312,7 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "candidate_symbols": len(candidate),
                 "requested_price_symbols": len(requested_candidate_symbols),
                 "eligible_price_symbols": len(eligible),
+                "liquidity_eligible_symbols": liquidity_eligible_symbols,
                 "requested_download_symbols": len(symbols),
                 "requested_symbols": ",".join(requested_candidate_symbols),
                 "returned_symbols": ",".join(symbol for symbol in returned_symbols if symbol != benchmark),

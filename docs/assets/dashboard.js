@@ -13,16 +13,46 @@ const formatNumber = (value) => {
   return Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 4 });
 };
 
+const formatInteger = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 0 });
+};
+
+const formatCount = (value) => {
+  const formatted = formatInteger(value);
+  return formatted === '-' ? '-' : `${formatted}개`;
+};
+
 const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
 const textValue = (value) => value === null || value === undefined ? '-' : String(value);
+
+function formatKoreanDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return textValue(value);
+  return `${date.toLocaleString('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })} KST`;
+}
 
 function humanProvider(value) {
   const text = textValue(value);
   const labels = {
     'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'stooq-fallback': 'Stooq 무료 일별 종가 대체 데이터',
+    'finance-datareader-fallback': 'FinanceDataReader 무료 종가 대체 데이터',
+    'no-live-price-provider': '사용 가능한 실시간 가격 제공자 없음',
     'offline-sample': '오프라인 샘플 데이터',
     'offline_sample': '오프라인 샘플 데이터',
   };
+  if (text.includes('+')) {
+    return text.split('+').map((part) => labels[part] || `기타 제공자(${part})`).join(' + ');
+  }
   return labels[text] || text;
 }
 
@@ -39,6 +69,18 @@ function humanOutputLabel(value) {
 function humanStatus(status, outputLabel) {
   const text = textValue(status);
   if (text === '-') return humanOutputLabel(outputLabel);
+  if (text === 'sample_offline_not_current') {
+    return '오프라인 샘플 · 현재 추천 아님';
+  }
+  if (text === 'current_live') {
+    return '최신 데이터 · 실행 가능성 점검 통과';
+  }
+  if (text.includes('subset')) {
+    return '일부 종목 실행 · 연구용 신호';
+  }
+  if (text.includes('with_limitations')) {
+    return '최신 데이터 · 제한 조건 때문에 연구용 신호';
+  }
   if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
     return '현재 데이터 사용 · 연구용 신호 · 매매 권고 아님';
   }
@@ -52,6 +94,32 @@ function humanStatus(status, outputLabel) {
     return '제한 조건 때문에 추천 보류';
   }
   return text;
+}
+
+function isPracticalRun(run = currentRun()) {
+  const summary = run.summary || {};
+  return String(summary.recommendation_output_label || '').includes('Practical')
+    || String(summary.recommendation_status || '') === 'current_live';
+}
+
+function humanFactorCategory(value) {
+  const text = textValue(value);
+  const labels = {
+    traditional: '전통 모멘텀',
+    recent: '최근 수익률',
+    composite: '복합 모멘텀',
+    risk_adjusted: '위험조정 모멘텀',
+    trend: '추세/이동평균',
+    drawdown: '낙폭/고점 근접',
+    breakout: '돌파',
+    reversal: '반전 보정',
+    acceleration: '가속도',
+    quality: '추세 품질',
+    cross_sectional: '횡단면 상대강도',
+    robust: '이상치 완화',
+    range: '가격 범위 위치',
+  };
+  return labels[text] || `기타(${text})`;
 }
 
 function humanWeightingMethod(value) {
@@ -83,6 +151,24 @@ function selectedWindow() {
 
 function setText(selector, value) {
   document.querySelector(selector).textContent = textValue(value);
+}
+
+function appendDefinition(target, label, value) {
+  const dt = document.createElement('dt');
+  dt.textContent = label;
+  const dd = document.createElement('dd');
+  dd.textContent = textValue(value);
+  target.append(dt, dd);
+}
+
+function formatCounts(counts, labels = {}) {
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return '-';
+  const entries = Object.entries(counts).filter(([, value]) => Number(value) > 0);
+  if (!entries.length) return '-';
+  return entries
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([key, value]) => `${labels[key] || key} ${formatInteger(value)}`)
+    .join(' · ');
 }
 
 function setStatusMessage(message) {
@@ -145,7 +231,18 @@ function currentWeightedHoldings() {
   const portfolioTotal = allRows.reduce((sum, row) => sum + row.actual_weight, 0);
   const unshownTotal = Math.max(0, portfolioTotal - displayedTotal);
   const cashTotal = Math.max(0, 1 - portfolioTotal);
-  return { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, maxWeight };
+  return {
+    weighted,
+    displayedTotal,
+    portfolioTotal,
+    unshownTotal,
+    cashTotal,
+    topN,
+    maxWeight,
+    availableCount: allRows.length,
+    selectedFactor: allRows[0]?.factor || '-',
+    windowLabel: allRows[0]?.window_label || windowKey || '-',
+  };
 }
 
 function appendBarRow(target, label, valueLabel, value, maxAbs) {
@@ -174,13 +271,16 @@ function appendBarRow(target, label, valueLabel, value, maxAbs) {
 function fillControls() {
   const runSelect = document.querySelector('#run-select');
   runSelect.replaceChildren();
-  (state.data.runs || []).forEach((run, index) => {
+  const runs = state.data.runs || [];
+  runs.forEach((run, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = `${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
+    const prefix = runs.length <= 1 ? '최신 실행만 표시' : `실행 ${index + 1}`;
+    option.textContent = `${prefix} · ${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
     runSelect.appendChild(option);
   });
   runSelect.value = String(state.activeRunIndex);
+  runSelect.disabled = runs.length <= 1;
 
   const run = currentRun();
   const windows = run.periods || [];
@@ -236,7 +336,113 @@ function renderSummary() {
     textValue(humanOutputLabel(summary.recommendation_output_label)),
   );
 
-  setText('#generated-at', `대시보드 생성 시각: ${state.data.generated_at_utc || '-'}`);
+  setText('#generated-at', `대시보드 생성 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
+}
+
+function renderDiagnostics() {
+  const run = currentRun();
+  const summary = run.summary || {};
+  const quality = run.data_quality_summary || {};
+  const dataSummary = document.querySelector('#data-quality-summary');
+  dataSummary.replaceChildren();
+  appendDefinition(dataSummary, '후보 종목', formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size));
+  appendDefinition(dataSummary, '가격 적격 종목', formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size));
+  appendDefinition(dataSummary, '유동성 적격 종목', formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size));
+  appendDefinition(dataSummary, '가격 수집 종목', formatCount(quality.fetched_price_symbol_count));
+  appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
+  appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
+  appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
+  appendDefinition(
+    dataSummary,
+    '품질 상태',
+    formatCounts(quality.data_quality_status_counts, {
+      pass: '통과',
+      missing_price: '가격 누락',
+      missing_volume: '거래량 누락',
+      provider_adjustment_incompatible: '조정가격 불일치',
+      stale_price: '오래된 가격',
+      insufficient_history: '이력 부족',
+      below_liquidity_floor: '유동성 부족',
+      benchmark_comparator_only: '벤치마크 전용',
+    }),
+  );
+  appendDefinition(dataSummary, '유동성 상태', formatCounts(quality.liquidity_status_counts, { pass: '통과', fail: '미통과' }));
+  appendDefinition(dataSummary, '용량 상태', formatCounts(quality.capacity_status_counts, { pass: '통과', fail: '미통과' }));
+
+  const gateTarget = document.querySelector('#tradability-gate-list');
+  gateTarget.replaceChildren();
+  const gates = run.tradability_gate || [];
+  if (!gates.length) {
+    appendEmpty('#tradability-gate-list', '추천/신호 게이트 정보가 없습니다.');
+  } else {
+    gates.forEach((gate) => {
+      const item = document.createElement('div');
+      item.className = `gate-item ${gate.passed ? 'pass' : 'block'}`;
+      const title = document.createElement('strong');
+      title.textContent = `${gate.passed ? '통과' : '점검 필요'} · ${gate.label_ko || gate.key}`;
+      const detail = document.createElement('small');
+      detail.textContent = gate.description_ko || '추가 실행 가능성 점검 항목입니다.';
+      item.append(title, detail);
+      gateTarget.appendChild(item);
+    });
+  }
+
+  const diagnostics = run.factor_diagnostics || {};
+  setText('#factor-scope-note', diagnostics.scope_note_ko || '팩터 진단 정보가 없습니다.');
+
+  const categoryTarget = document.querySelector('#factor-category-summary');
+  categoryTarget.replaceChildren();
+  const categories = diagnostics.category_summary || [];
+  if (!categories.length) {
+    appendEmpty('#factor-category-summary', '팩터 카테고리 요약이 없습니다.');
+  } else {
+    categories.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = `${humanFactorCategory(row.category)} · ${formatInteger(row.factor_count)}개`;
+      const detail = document.createElement('small');
+      detail.textContent = `평균 Rank-IC ${formatNumber(row.avg_mean_rank_ic)} · 양수 비율 ${formatPercent(row.avg_positive_ic_rate)} · 예: ${row.example_factors || '-'}`;
+      item.append(title, detail);
+      categoryTarget.appendChild(item);
+    });
+  }
+
+  const icTarget = document.querySelector('#factor-rank-ic-summary');
+  icTarget.replaceChildren();
+  const rankIcRows = diagnostics.rank_ic_top || [];
+  if (!rankIcRows.length) {
+    appendEmpty('#factor-rank-ic-summary', 'Forward Rank-IC 진단이 없습니다.');
+  } else {
+    rankIcRows.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = row.factor || '-';
+      const detail = document.createElement('small');
+      detail.textContent = `${formatInteger(row.horizon_days ?? diagnostics.rank_ic_horizon_days)}거래일 후 Rank-IC ${formatNumber(row.mean_rank_ic)} · 관측 ${formatInteger(row.observations)}회 · 양수 비율 ${formatPercent(row.positive_ic_rate)} · 중첩 일별 관측`;
+      item.append(title, detail);
+      icTarget.appendChild(item);
+    });
+  }
+
+  const redundancyTarget = document.querySelector('#factor-redundancy-summary');
+  redundancyTarget.replaceChildren();
+  const redundancyRows = diagnostics.redundancy_top || [];
+  if (!redundancyRows.length) {
+    appendEmpty('#factor-redundancy-summary', '팩터 중복도 진단이 없습니다.');
+  } else {
+    redundancyRows.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = `${row.factor || '-'} ↔ ${row.nearest_factor || '-'}`;
+      const detail = document.createElement('small');
+      detail.textContent = `순위상관 ${formatNumber(row.signed_rank_corr)} · 높은 상관 피어 ${formatInteger(row.high_corr_peer_count)}개 · 진단일 ${row.diagnostic_date || '-'}`;
+      item.append(title, detail);
+      redundancyTarget.appendChild(item);
+    });
+  }
 }
 
 function renderFactorTable() {
@@ -258,10 +464,18 @@ function renderFactorTable() {
 }
 
 function renderHoldingsTable() {
-  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal } = currentWeightedHoldings();
+  const run = currentRun();
+  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, availableCount, selectedFactor, windowLabel } = currentWeightedHoldings();
+  const weightLabel = isPracticalRun(run) ? '투자 비중' : '모형/연구 비중';
   setText(
     '#weight-summary',
     `전체 ${formatPercent(portfolioTotal)} · 표시 ${formatPercent(displayedTotal)} · 미표시 ${formatPercent(unshownTotal)} · 현금 ${formatPercent(cashTotal)}`,
+  );
+  setText(
+    '#holdings-availability',
+    run.history_payload_type === 'summary'
+      ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
+      : `${windowLabel} 최고 팩터 ${selectedFactor} 기준 백테스트 보유입니다. 전체 ${formatInteger(availableCount)}개 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 기존 분석 코드가 저장한 일별 보유 비중을 그대로 사용합니다.`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
@@ -383,10 +597,11 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
+  const run = currentRun();
   const { weighted, unshownTotal, cashTotal, topN, maxWeight } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 비중' : '모형/연구 비중'} · 상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
     appendEmpty('#weight-chart', '선택한 기준일과 기간에 표시할 상위 종목 데이터가 없습니다.');
     return;
@@ -424,6 +639,7 @@ function renderPeriodRankingTable() {
 
 function renderAll() {
   renderSummary();
+  renderDiagnostics();
   renderFactorReturnChart();
   renderWindowComparisonChart();
   renderLeaderTrendChart();

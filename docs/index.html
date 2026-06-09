@@ -13,11 +13,17 @@
       <h1>모멘텀 팩터 데일리 대시보드</h1>
       <p class="hero-copy">
         매일 미국 종가 기준으로 업데이트되는 모멘텀 팩터 비교 화면입니다.
-        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 투자 비중을 한 화면에서 비교합니다.
+        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 모형 비중을 한 화면에서 비교합니다.
       </p>
     </div>
     <div class="status-card" id="run-status">데이터를 불러오는 중...</div>
   </header>
+  <noscript>
+    <div class="noscript-warning">
+      이 대시보드는 정적 JSON 데이터를 불러와 표와 차트를 그리므로 JavaScript가 필요합니다.
+      JavaScript를 켠 뒤 다시 열어주세요.
+    </div>
+  </noscript>
 
   <main>
     <section class="notice">
@@ -68,6 +74,57 @@
       </article>
     </section>
 
+    <section class="panel diagnostics-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">현실성 점검</p>
+          <h2>데이터 품질 · 유동성 · 매매 가능성 게이트</h2>
+        </div>
+        <p>
+          현재 출력이 실제 매매 권고인지, 연구용 신호인지 판단하는 핵심 제한 조건을 한글로 풀어 표시합니다.
+          후보 종목, 가격 적격, 유동성 적격 종목 수를 함께 확인하세요.
+        </p>
+      </div>
+      <div class="diagnostic-grid">
+        <article class="diagnostic-card">
+          <h3>데이터 커버리지</h3>
+          <dl id="data-quality-summary"></dl>
+        </article>
+        <article class="diagnostic-card">
+          <h3>추천/신호 게이트</h3>
+          <div id="tradability-gate-list" class="gate-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel diagnostics-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">팩터 해석</p>
+          <h2>경제적 의미 · 중복도 · Forward Rank-IC</h2>
+        </div>
+        <p>
+          현재 라이브러리는 가격 기반 모멘텀 팩터들의 변형입니다. 서로 비슷한 팩터가 많은지,
+          신호가 이후 수익률과 어떤 순위 상관을 보였는지 진단합니다.
+        </p>
+      </div>
+      <p id="factor-scope-note" class="diagnostic-note">-</p>
+      <div class="diagnostic-grid three">
+        <article class="diagnostic-card">
+          <h3>팩터 카테고리</h3>
+          <div id="factor-category-summary" class="mini-list"></div>
+        </article>
+        <article class="diagnostic-card">
+          <h3>Forward Rank-IC 상위</h3>
+          <div id="factor-rank-ic-summary" class="mini-list"></div>
+        </article>
+        <article class="diagnostic-card">
+          <h3>팩터 중복도</h3>
+          <div id="factor-redundancy-summary" class="mini-list"></div>
+        </article>
+      </div>
+    </section>
+
     <section class="panel visual-panel" id="visual-dashboard">
       <div class="panel-heading">
         <div>
@@ -111,8 +168,8 @@
         <article class="viz-card">
           <div class="viz-card-heading">
             <div>
-              <p class="eyebrow">투자 비중</p>
-              <h3>상위 N개 투자 비중 시각화</h3>
+              <p class="eyebrow">모형 비중</p>
+              <h3>상위 N개 모형 비중 시각화</h3>
             </div>
             <span id="weight-chart-meta" class="chart-meta">-</span>
           </div>
@@ -128,7 +185,7 @@
           <h2>기존 결과물 기준 최신 추천/연구 신호</h2>
         </div>
         <p>
-          엑셀·PDF에 포함되던 최신 추천 또는 연구 신호 행을 웹에서 바로 확인합니다.
+          현재 실행에서 선택된 팩터의 최신 추천 또는 연구 신호 행입니다.
           최종 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
         </p>
       </div>
@@ -178,10 +235,10 @@
     <section class="panel">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">상위 N개 종목 비교</p>
+          <p class="eyebrow">선택 기간 최고 팩터 기준 백테스트 보유</p>
           <h2>일별 상위 종목 · 모멘텀 신호 · 산출 비중</h2>
         </div>
-        <p>비중은 브라우저에서 다시 계산하지 않고, 백테스트/출력 코드가 저장한 일별 보유 비중을 그대로 표시합니다.</p>
+        <p id="holdings-availability">비중은 브라우저에서 다시 계산하지 않고, 백테스트/출력 코드가 저장한 일별 보유 비중을 그대로 표시합니다.</p>
       </div>
       <div class="table-wrap">
         <table id="holdings-table">

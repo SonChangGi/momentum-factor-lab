@@ -10,7 +10,7 @@ import pytest
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import MarketData, generate_offline_sample_data
 from momentum_factor_lab.report import _executive_summary_lines, write_pdf, write_reports
-from momentum_factor_lab.workflow import run_analysis, write_run_results_json
+from momentum_factor_lab.workflow import _factor_rank_ic_summary, _factor_redundancy_summary, run_analysis, write_run_results_json
 
 
 LIQUIDITY_CAPACITY_COLUMNS = {
@@ -178,6 +178,9 @@ def test_offline_run_generates_required_outputs(tmp_path):
         "status_panel",
         "factor_family_leaderboard",
         "factor_overlap_top20",
+        "factor_rank_ic",
+        "factor_redundancy",
+        "factor_category_summary",
         "regime_performance",
         "tradability_gate",
         "universe_provenance",
@@ -207,10 +210,20 @@ def test_offline_run_generates_required_outputs(tmp_path):
     assert not result.benchmark_relative.empty
     assert set(result.benchmark_relative["benchmark"]) == {"SPY"}
     assert result.metadata["factor_count"] >= 55
+    assert result.metadata["liquidity_eligible_universe_size"] >= 0
+    assert result.metadata["factor_library_scope"] == "price_momentum_only"
+    assert result.metadata["factor_rank_ic_horizon_days"] == 21
+    assert not result.factor_rank_ic.empty
+    assert not result.factor_redundancy.empty
+    assert not result.factor_category_summary.empty
     assert result.metadata["factor_validation_status"] == "pass"
     assert result.metadata["data_quality_manifest_available"]
     assert result.metadata["data_quality_status_counts"]
-    assert "data_quality" in json.loads(json_path.read_text(encoding="utf-8"))
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "data_quality" in payload
+    assert payload["factor_rank_ic"]
+    assert payload["factor_redundancy"]
+    assert payload["factor_category_summary"]
     assert {"variant_type", "variant", "parameter_set"}.issubset(result.sensitivity.columns)
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
     assert result.metadata["same_sample_selection_blocked_for_tradable"]
@@ -219,6 +232,49 @@ def test_offline_run_generates_required_outputs(tmp_path):
     history_sheet = workbook["factor_score_history_top20"]
     assert factor_sheet.max_row > len(result.market_data.eligible_universe)
     assert history_sheet.max_row < 1_048_576
+
+
+def test_factor_rank_ic_uses_future_returns_not_contemporaneous_returns():
+    dates = pd.bdate_range("2026-01-01", periods=5)
+    prices = pd.DataFrame(
+        {
+            "AAA": [10.0, 11.0, 10.0, 11.0, 12.0],
+            "BBB": [10.0, 10.5, 10.0, 10.5, 11.0],
+            "CCC": [10.0, 9.0, 10.0, 9.0, 8.0],
+        },
+        index=dates,
+    )
+    scores = pd.DataFrame(
+        {
+            "AAA": [3.0, 1.0, 3.0, 3.0, 3.0],
+            "BBB": [2.0, 2.0, 2.0, 2.0, 2.0],
+            "CCC": [1.0, 3.0, 1.0, 1.0, 1.0],
+        },
+        index=dates,
+    )
+
+    summary = _factor_rank_ic_summary({"test_mom": scores}, prices, horizon_days=1)
+
+    row = summary.iloc[0]
+    assert row["factor"] == "test_mom"
+    assert row["observations"] == 4
+    assert row["mean_rank_ic"] > 0.95
+    same_day_returns = prices.pct_change(fill_method=None)
+    contemporaneous_ic = scores.iloc[1].rank().corr(same_day_returns.iloc[1].rank())
+    assert contemporaneous_ic < 0
+
+
+def test_factor_redundancy_counts_highly_correlated_factor_peers():
+    dates = pd.bdate_range("2026-01-01", periods=3)
+    base = pd.DataFrame({"AAA": [1, 2, 3], "BBB": [2, 3, 4], "CCC": [3, 4, 5]}, index=dates)
+    same = base * 10
+    reverse = -base
+
+    summary = _factor_redundancy_summary({"base": base, "same": same, "reverse": reverse}, threshold=0.95)
+
+    rows = summary.set_index("factor")
+    assert rows.loc["base", "high_corr_peer_count"] == 2
+    assert rows.loc["base", "max_abs_rank_corr"] == 1.0
 
 
 def test_raw_benchmark_and_nonbenchmark_etf_prices_do_not_enter_stock_analysis(tmp_path, monkeypatch):

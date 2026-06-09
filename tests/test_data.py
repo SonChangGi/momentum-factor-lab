@@ -10,7 +10,11 @@ from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import (
     _apply_finance_datareader_fallback,
     _apply_stooq_fallback,
+    _download_finance_datareader_symbol,
+    _download_stooq_symbol,
     _eligible_filter,
+    _finance_datareader_cache_path,
+    _stooq_cache_path,
     build_data_quality_frame,
     download_live_data,
 )
@@ -306,6 +310,27 @@ def test_stooq_fallback_defaults_to_all_missing_symbols(monkeypatch, tmp_path):
     assert set(sources["symbol"]) == {"MISS1", "MISS2"}
 
 
+def test_stooq_fallback_replaces_unusable_existing_column(monkeypatch, tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    prices = pd.DataFrame({"BAD": [np.nan] * 8 + [10.0, 11.0]}, index=dates)
+    volumes = pd.DataFrame({"BAD": [np.nan] * len(dates)}, index=dates)
+    config = RunConfig(cache_dir=tmp_path, min_history_days=5, min_liquidity_observations=3, stooq_fallback_limit=None)
+
+    def fake_download(symbol, cfg):
+        price = pd.Series(np.linspace(20, 29, len(dates)), index=dates, name=symbol)
+        volume = pd.Series(5_000, index=dates, name=symbol)
+        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
+
+    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_download)
+
+    fixed_prices, fixed_volumes, sources = _apply_stooq_fallback(prices, volumes, ["BAD"], config)
+
+    assert fixed_prices["BAD"].iloc[0] == 20.0
+    assert fixed_prices["BAD"].notna().sum() == len(dates)
+    assert fixed_volumes["BAD"].notna().sum() == len(dates)
+    assert sources.iloc[0]["symbol"] == "BAD"
+
+
 def test_finance_datareader_fallback_records_symbol_provider(monkeypatch, tmp_path):
     dates = pd.bdate_range("2024-01-01", periods=5)
     config = RunConfig(cache_dir=tmp_path, finance_datareader_fallback_limit=None)
@@ -327,6 +352,47 @@ def test_finance_datareader_fallback_records_symbol_provider(monkeypatch, tmp_pa
     assert set(volumes.columns) == {"FDR1", "FDR2"}
     assert set(sources["source"]) == {"finance-datareader-close-fallback"}
     assert set(sources["symbol"]) == {"FDR1", "FDR2"}
+
+
+def test_corrupt_provider_caches_return_invalid_status_without_crashing(tmp_path):
+    config = RunConfig(cache_dir=tmp_path)
+    stooq_cache = _stooq_cache_path(config, "BAD")
+    fdr_cache = _finance_datareader_cache_path(config, "BAD")
+    stooq_cache.parent.mkdir(parents=True, exist_ok=True)
+    fdr_cache.parent.mkdir(parents=True, exist_ok=True)
+    stooq_cache.write_text("Date,Close\nnot-a-date,abc\n", encoding="utf-8")
+    fdr_cache.write_text("Date,Close\nnot-a-date,abc\n", encoding="utf-8")
+
+    stooq_price, _, stooq_error, stooq_status, _, _ = _download_stooq_symbol("BAD", config)
+    fdr_price, _, fdr_error, fdr_status, _, _ = _download_finance_datareader_symbol("BAD", config)
+
+    assert stooq_price is None
+    assert stooq_status == "cache_hit_invalid"
+    assert "invalid stooq cache" in str(stooq_error)
+    assert fdr_price is None
+    assert fdr_status == "cache_hit_invalid"
+    assert "invalid FinanceDataReader cache" in str(fdr_error)
+
+
+def test_provider_caches_reject_nonnumeric_close_values(tmp_path):
+    config = RunConfig(cache_dir=tmp_path)
+    stooq_cache = _stooq_cache_path(config, "BADNUM")
+    fdr_cache = _finance_datareader_cache_path(config, "BADNUM")
+    stooq_cache.parent.mkdir(parents=True, exist_ok=True)
+    fdr_cache.parent.mkdir(parents=True, exist_ok=True)
+    payload = "Date,Close,Volume\n2024-01-02,abc,1000\n2024-01-03,,2000\n"
+    stooq_cache.write_text(payload, encoding="utf-8")
+    fdr_cache.write_text(payload, encoding="utf-8")
+
+    stooq_price, _, stooq_error, stooq_status, _, _ = _download_stooq_symbol("BADNUM", config)
+    fdr_price, _, fdr_error, fdr_status, _, _ = _download_finance_datareader_symbol("BADNUM", config)
+
+    assert stooq_price is None
+    assert stooq_status == "cache_hit_invalid"
+    assert "no numeric close prices" in str(stooq_error)
+    assert fdr_price is None
+    assert fdr_status == "cache_hit_invalid"
+    assert "no numeric close prices" in str(fdr_error)
 
 
 def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeypatch, tmp_path):
@@ -411,6 +477,56 @@ def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeyp
     summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
     assert int(summary["requested_price_symbols"]) == 3
     assert int(summary["eligible_price_symbols"]) == 3
+    assert int(summary["liquidity_eligible_symbols"]) == 3
+
+
+def test_live_download_attempts_free_fallback_when_yfinance_unavailable(monkeypatch, tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=8)
+    config = RunConfig(
+        cache_dir=tmp_path,
+        start_date="2024-01-01",
+        end_date="2024-01-12",
+        min_history_days=2,
+        min_price=1,
+        min_avg_dollar_volume=0,
+        min_liquidity_observations=2,
+        stale_after_days=10_000,
+        universe=["AAA"],
+        finance_datareader_fallback_limit=0,
+    )
+    candidate = _candidate_frame(["AAA"])
+    monkeypatch.setattr(
+        "momentum_factor_lab.data._candidate_universe",
+        lambda _: (
+            candidate,
+            pd.DataFrame([{"source": "fixture-universe", "status": "loaded", "records": 1}]),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", None)
+
+    def fake_stooq(symbol, cfg):
+        return (
+            pd.Series(np.linspace(20, 28, len(dates)), index=dates, name=symbol),
+            pd.Series(2_000_000, index=dates, name=symbol),
+            None,
+            "fetched",
+            str(tmp_path / f"{symbol}.csv"),
+            0,
+        )
+
+    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_stooq)
+
+    result = download_live_data(config)
+
+    assert not result.offline_sample
+    assert result.live_error is None
+    assert result.provider == "stooq-fallback"
+    assert {"SPY", "AAA"}.issubset(set(result.prices.columns))
+    yf_row = result.data_sources[result.data_sources["source"].eq("yfinance-adjusted-daily")].iloc[0]
+    assert yf_row["status"] == "unavailable"
+    assert "stooq-daily-close-fallback" in set(result.data_sources["source"])
+    summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
+    assert int(summary["eligible_price_symbols"]) == 1
 
 
 def test_yfinance_chunk_uses_csv_json_price_cache_without_network(tmp_path):

@@ -216,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.add_argument("--site-dir", default="docs", help="Directory where the static site will be written")
     dashboard.add_argument("--title", default=DEFAULT_SITE_TITLE, help="Korean dashboard page title")
+    dashboard.add_argument("--history-limit", type=int, default=60, help="Maximum dashboard runs to retain")
     dashboard.add_argument("--json", action="store_true", help="Emit generated site paths as JSON")
 
     scheduled = sub.add_parser(
@@ -229,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scheduled.add_argument("--site-dir", default=None, help="Override dashboard output directory")
     scheduled.add_argument("--title", default=None, help="Override dashboard title")
+    scheduled.add_argument("--history-limit", type=int, default=None, help="Override maximum retained dashboard runs")
     scheduled.add_argument("--json", action="store_true", help="Emit generated site paths as JSON")
     return parser
 
@@ -685,7 +687,7 @@ def run_wizard_command(args: argparse.Namespace) -> dict[str, object]:
 
 
 def dashboard_command(args: argparse.Namespace) -> dict[str, str]:
-    paths = write_dashboard_site(args.run_results, args.site_dir, title=args.title)
+    paths = write_dashboard_site(args.run_results, args.site_dir, title=args.title, history_limit=args.history_limit)
     if args.json:
         print(json.dumps(paths, indent=2, ensure_ascii=False))
     else:
@@ -718,7 +720,13 @@ def scheduled_dashboard_command(args: argparse.Namespace) -> dict[str, str]:
         raise ValueError("scheduled analysis did not produce a JSON output path")
     site_dir = args.site_dir or payload.get("site_dir") or "docs"
     title = args.title or payload.get("title") or DEFAULT_SITE_TITLE
-    paths = write_dashboard_site([str(outputs["json"])], site_dir, title=str(title))
+    try:
+        history_limit = args.history_limit if args.history_limit is not None else int(payload.get("history_limit", 60))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("dashboard config field 'history_limit' must be an integer") from exc
+    if history_limit < 1:
+        raise ValueError("history_limit must be at least 1")
+    paths = write_dashboard_site([str(outputs["json"])], site_dir, title=str(title), history_limit=history_limit)
     if args.json:
         print(json.dumps(paths, indent=2, ensure_ascii=False))
     else:

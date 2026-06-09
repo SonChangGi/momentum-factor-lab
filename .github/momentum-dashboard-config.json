@@ -1,6 +1,7 @@
 {
   "title": "모멘텀 팩터 데일리 대시보드",
   "site_dir": "docs",
+  "history_limit": 60,
   "run_args": [
     "--live",
     "--start-date", "2016-01-01",
@@ -9,8 +10,14 @@
     "--cache-dir", ".cache/momentum_factor_lab",
     "--universe-profile", "large_liquid",
     "--universe-source-mode", "packaged",
+    "--price-chunk-size", "25",
+    "--retry-count", "0",
+    "--stooq-fallback-limit", "250",
+    "--finance-datareader-fallback-limit", "0",
     "--top-n", "20",
     "--max-weight", "0.10",
+    "--target-aum", "100000",
+    "--max-adv-participation", "0.05",
     "--factor-selection-mode", "research_validation"
   ]
 }

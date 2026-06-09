@@ -256,3 +256,37 @@ def test_public_universe_refresh_records_partial_source_without_pit(monkeypatch,
     sec_row = result.data_sources[result.data_sources["status"].eq("failed")].iloc[0]
     assert sec_row["records"] == 0
     assert bool(sec_row["sec_user_agent_configured"])
+
+
+def test_public_universe_refresh_surfaces_stale_cache_status(monkeypatch, tmp_path):
+    sec_payload = (
+        '{"fields":["cik","name","ticker","exchange"],'
+        '"data":[[1,"AAA Corp","AAA","Nasdaq"],[2,"BBB Corp","BBB","NYSE"]]}'
+    )
+    nasdaq_payload = (
+        "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\n"
+        "AAA|AAA Corp|Q|N|N|100|N|N\n"
+        "File Creation Time: today"
+    )
+    other_payload = (
+        "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol\n"
+        "BBB|BBB Corp|N|BBB|N|100|N|BBB\n"
+        "File Creation Time: today"
+    )
+
+    def fake_fetch(url, cache_dir, cache_name, retry_count, retry_backoff_seconds, user_agent=None):
+        payloads = {
+            "sec_company_tickers_exchange.json": sec_payload,
+            "nasdaqlisted.txt": nasdaq_payload,
+            "otherlisted.txt": other_payload,
+        }
+        status = "stale_cache_fallback" if cache_name == "sec_company_tickers_exchange.json" else "fixture"
+        return payloads[cache_name], {"source": url, "status": status, "cache_path": str(tmp_path / cache_name), "retries": 0}
+
+    monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
+
+    result = build_public_universe_frame(cache_dir=tmp_path)
+
+    summary = result.data_sources[result.data_sources["source"].eq("public-universe-refresh")].iloc[0]
+    assert summary["status"] == "partial_or_stale_source_current_universe"
+    assert "stale_cache_fallback" in set(result.data_sources["status"])

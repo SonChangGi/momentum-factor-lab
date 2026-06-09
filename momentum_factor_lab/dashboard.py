@@ -47,11 +47,17 @@ HTML_TEMPLATE = """<!doctype html>
       <h1>{title}</h1>
       <p class="hero-copy">
         매일 미국 종가 기준으로 업데이트되는 모멘텀 팩터 비교 화면입니다.
-        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 투자 비중을 한 화면에서 비교합니다.
+        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 모형 비중을 한 화면에서 비교합니다.
       </p>
     </div>
     <div class="status-card" id="run-status">데이터를 불러오는 중...</div>
   </header>
+  <noscript>
+    <div class="noscript-warning">
+      이 대시보드는 정적 JSON 데이터를 불러와 표와 차트를 그리므로 JavaScript가 필요합니다.
+      JavaScript를 켠 뒤 다시 열어주세요.
+    </div>
+  </noscript>
 
   <main>
     <section class="notice">
@@ -102,6 +108,57 @@ HTML_TEMPLATE = """<!doctype html>
       </article>
     </section>
 
+    <section class="panel diagnostics-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">현실성 점검</p>
+          <h2>데이터 품질 · 유동성 · 매매 가능성 게이트</h2>
+        </div>
+        <p>
+          현재 출력이 실제 매매 권고인지, 연구용 신호인지 판단하는 핵심 제한 조건을 한글로 풀어 표시합니다.
+          후보 종목, 가격 적격, 유동성 적격 종목 수를 함께 확인하세요.
+        </p>
+      </div>
+      <div class="diagnostic-grid">
+        <article class="diagnostic-card">
+          <h3>데이터 커버리지</h3>
+          <dl id="data-quality-summary"></dl>
+        </article>
+        <article class="diagnostic-card">
+          <h3>추천/신호 게이트</h3>
+          <div id="tradability-gate-list" class="gate-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel diagnostics-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">팩터 해석</p>
+          <h2>경제적 의미 · 중복도 · Forward Rank-IC</h2>
+        </div>
+        <p>
+          현재 라이브러리는 가격 기반 모멘텀 팩터들의 변형입니다. 서로 비슷한 팩터가 많은지,
+          신호가 이후 수익률과 어떤 순위 상관을 보였는지 진단합니다.
+        </p>
+      </div>
+      <p id="factor-scope-note" class="diagnostic-note">-</p>
+      <div class="diagnostic-grid three">
+        <article class="diagnostic-card">
+          <h3>팩터 카테고리</h3>
+          <div id="factor-category-summary" class="mini-list"></div>
+        </article>
+        <article class="diagnostic-card">
+          <h3>Forward Rank-IC 상위</h3>
+          <div id="factor-rank-ic-summary" class="mini-list"></div>
+        </article>
+        <article class="diagnostic-card">
+          <h3>팩터 중복도</h3>
+          <div id="factor-redundancy-summary" class="mini-list"></div>
+        </article>
+      </div>
+    </section>
+
     <section class="panel visual-panel" id="visual-dashboard">
       <div class="panel-heading">
         <div>
@@ -145,8 +202,8 @@ HTML_TEMPLATE = """<!doctype html>
         <article class="viz-card">
           <div class="viz-card-heading">
             <div>
-              <p class="eyebrow">투자 비중</p>
-              <h3>상위 N개 투자 비중 시각화</h3>
+              <p class="eyebrow">모형 비중</p>
+              <h3>상위 N개 모형 비중 시각화</h3>
             </div>
             <span id="weight-chart-meta" class="chart-meta">-</span>
           </div>
@@ -162,7 +219,7 @@ HTML_TEMPLATE = """<!doctype html>
           <h2>기존 결과물 기준 최신 추천/연구 신호</h2>
         </div>
         <p>
-          엑셀·PDF에 포함되던 최신 추천 또는 연구 신호 행을 웹에서 바로 확인합니다.
+          현재 실행에서 선택된 팩터의 최신 추천 또는 연구 신호 행입니다.
           최종 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
         </p>
       </div>
@@ -212,10 +269,10 @@ HTML_TEMPLATE = """<!doctype html>
     <section class="panel">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">상위 N개 종목 비교</p>
+          <p class="eyebrow">선택 기간 최고 팩터 기준 백테스트 보유</p>
           <h2>일별 상위 종목 · 모멘텀 신호 · 산출 비중</h2>
         </div>
-        <p>비중은 브라우저에서 다시 계산하지 않고, 백테스트/출력 코드가 저장한 일별 보유 비중을 그대로 표시합니다.</p>
+        <p id="holdings-availability">비중은 브라우저에서 다시 계산하지 않고, 백테스트/출력 코드가 저장한 일별 보유 비중을 그대로 표시합니다.</p>
       </div>
       <div class="table-wrap">
         <table id="holdings-table">
@@ -311,6 +368,7 @@ body {
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
+.noscript-warning { margin: 1rem clamp(1rem, 4vw, 4rem); padding: 1rem 1.25rem; border-radius: 18px; background: #fff4e6; color: #8a4b00; border: 1px solid #ffd8a8; font-weight: 800; line-height: 1.6; }
 .controls { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
 select, input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .8rem; color: var(--ink); background: #fff; font: inherit; }
@@ -340,6 +398,20 @@ tbody tr:hover { background: #f8fbff; }
 .negative { color: #c92a2a; font-weight: 800; }
 .badge { display: inline-flex; padding: .2rem .55rem; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 800; }
 .visual-panel { background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%); }
+.diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.diagnostic-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.diagnostic-card { border: 1px solid var(--line); border-radius: 20px; padding: 1rem; background: #fff; min-width: 0; }
+.diagnostic-card h3 { margin: 0 0 .8rem; font-size: 1rem; }
+.diagnostic-card dl { display: grid; grid-template-columns: minmax(110px, .7fr) minmax(0, 1fr); gap: .55rem .85rem; margin: 0; }
+.diagnostic-card dt { color: var(--muted); font-weight: 800; }
+.diagnostic-card dd { margin: 0; font-weight: 800; overflow-wrap: anywhere; }
+.diagnostic-note { margin-top: -0.25rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .85rem 1rem; line-height: 1.6; }
+.gate-list, .mini-list { display: grid; gap: .6rem; }
+.gate-item, .mini-item { border: 1px solid var(--line); border-radius: 16px; padding: .75rem; background: #f8fafc; line-height: 1.45; }
+.gate-item.pass { border-color: #b7ebd5; background: #effcf7; }
+.gate-item.block { border-color: #ffd8a8; background: #fff8ef; }
+.gate-item strong, .mini-item strong { display: block; margin-bottom: .25rem; overflow-wrap: anywhere; }
+.gate-item small, .mini-item small { color: var(--muted); }
 .viz-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 .viz-card {
   border: 1px solid var(--line); border-radius: 22px; padding: 1rem;
@@ -372,7 +444,7 @@ tbody tr:hover { background: #f8fbff; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
 @media (max-width: 980px) {
   .hero, .panel-heading, footer { flex-direction: column; }
-  .controls, .cards, .two-col, .viz-grid, .window-chart { grid-template-columns: 1fr; }
+  .controls, .cards, .two-col, .viz-grid, .window-chart, .diagnostic-grid, .diagnostic-grid.three { grid-template-columns: 1fr; }
   .bar-row, .compact-bars .bar-row { grid-template-columns: 1fr; gap: .35rem; }
   .bar-value { text-align: left; }
   .status-card { width: 100%; }
@@ -395,16 +467,46 @@ const formatNumber = (value) => {
   return Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 4 });
 };
 
+const formatInteger = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 0 });
+};
+
+const formatCount = (value) => {
+  const formatted = formatInteger(value);
+  return formatted === '-' ? '-' : `${formatted}개`;
+};
+
 const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
 const textValue = (value) => value === null || value === undefined ? '-' : String(value);
+
+function formatKoreanDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return textValue(value);
+  return `${date.toLocaleString('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })} KST`;
+}
 
 function humanProvider(value) {
   const text = textValue(value);
   const labels = {
     'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'stooq-fallback': 'Stooq 무료 일별 종가 대체 데이터',
+    'finance-datareader-fallback': 'FinanceDataReader 무료 종가 대체 데이터',
+    'no-live-price-provider': '사용 가능한 실시간 가격 제공자 없음',
     'offline-sample': '오프라인 샘플 데이터',
     'offline_sample': '오프라인 샘플 데이터',
   };
+  if (text.includes('+')) {
+    return text.split('+').map((part) => labels[part] || `기타 제공자(${part})`).join(' + ');
+  }
   return labels[text] || text;
 }
 
@@ -421,6 +523,18 @@ function humanOutputLabel(value) {
 function humanStatus(status, outputLabel) {
   const text = textValue(status);
   if (text === '-') return humanOutputLabel(outputLabel);
+  if (text === 'sample_offline_not_current') {
+    return '오프라인 샘플 · 현재 추천 아님';
+  }
+  if (text === 'current_live') {
+    return '최신 데이터 · 실행 가능성 점검 통과';
+  }
+  if (text.includes('subset')) {
+    return '일부 종목 실행 · 연구용 신호';
+  }
+  if (text.includes('with_limitations')) {
+    return '최신 데이터 · 제한 조건 때문에 연구용 신호';
+  }
   if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
     return '현재 데이터 사용 · 연구용 신호 · 매매 권고 아님';
   }
@@ -434,6 +548,32 @@ function humanStatus(status, outputLabel) {
     return '제한 조건 때문에 추천 보류';
   }
   return text;
+}
+
+function isPracticalRun(run = currentRun()) {
+  const summary = run.summary || {};
+  return String(summary.recommendation_output_label || '').includes('Practical')
+    || String(summary.recommendation_status || '') === 'current_live';
+}
+
+function humanFactorCategory(value) {
+  const text = textValue(value);
+  const labels = {
+    traditional: '전통 모멘텀',
+    recent: '최근 수익률',
+    composite: '복합 모멘텀',
+    risk_adjusted: '위험조정 모멘텀',
+    trend: '추세/이동평균',
+    drawdown: '낙폭/고점 근접',
+    breakout: '돌파',
+    reversal: '반전 보정',
+    acceleration: '가속도',
+    quality: '추세 품질',
+    cross_sectional: '횡단면 상대강도',
+    robust: '이상치 완화',
+    range: '가격 범위 위치',
+  };
+  return labels[text] || `기타(${text})`;
 }
 
 function humanWeightingMethod(value) {
@@ -465,6 +605,24 @@ function selectedWindow() {
 
 function setText(selector, value) {
   document.querySelector(selector).textContent = textValue(value);
+}
+
+function appendDefinition(target, label, value) {
+  const dt = document.createElement('dt');
+  dt.textContent = label;
+  const dd = document.createElement('dd');
+  dd.textContent = textValue(value);
+  target.append(dt, dd);
+}
+
+function formatCounts(counts, labels = {}) {
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return '-';
+  const entries = Object.entries(counts).filter(([, value]) => Number(value) > 0);
+  if (!entries.length) return '-';
+  return entries
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([key, value]) => `${labels[key] || key} ${formatInteger(value)}`)
+    .join(' · ');
 }
 
 function setStatusMessage(message) {
@@ -527,7 +685,18 @@ function currentWeightedHoldings() {
   const portfolioTotal = allRows.reduce((sum, row) => sum + row.actual_weight, 0);
   const unshownTotal = Math.max(0, portfolioTotal - displayedTotal);
   const cashTotal = Math.max(0, 1 - portfolioTotal);
-  return { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, maxWeight };
+  return {
+    weighted,
+    displayedTotal,
+    portfolioTotal,
+    unshownTotal,
+    cashTotal,
+    topN,
+    maxWeight,
+    availableCount: allRows.length,
+    selectedFactor: allRows[0]?.factor || '-',
+    windowLabel: allRows[0]?.window_label || windowKey || '-',
+  };
 }
 
 function appendBarRow(target, label, valueLabel, value, maxAbs) {
@@ -556,13 +725,16 @@ function appendBarRow(target, label, valueLabel, value, maxAbs) {
 function fillControls() {
   const runSelect = document.querySelector('#run-select');
   runSelect.replaceChildren();
-  (state.data.runs || []).forEach((run, index) => {
+  const runs = state.data.runs || [];
+  runs.forEach((run, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = `${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
+    const prefix = runs.length <= 1 ? '최신 실행만 표시' : `실행 ${index + 1}`;
+    option.textContent = `${prefix} · ${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
     runSelect.appendChild(option);
   });
   runSelect.value = String(state.activeRunIndex);
+  runSelect.disabled = runs.length <= 1;
 
   const run = currentRun();
   const windows = run.periods || [];
@@ -618,7 +790,113 @@ function renderSummary() {
     textValue(humanOutputLabel(summary.recommendation_output_label)),
   );
 
-  setText('#generated-at', `대시보드 생성 시각: ${state.data.generated_at_utc || '-'}`);
+  setText('#generated-at', `대시보드 생성 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
+}
+
+function renderDiagnostics() {
+  const run = currentRun();
+  const summary = run.summary || {};
+  const quality = run.data_quality_summary || {};
+  const dataSummary = document.querySelector('#data-quality-summary');
+  dataSummary.replaceChildren();
+  appendDefinition(dataSummary, '후보 종목', formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size));
+  appendDefinition(dataSummary, '가격 적격 종목', formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size));
+  appendDefinition(dataSummary, '유동성 적격 종목', formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size));
+  appendDefinition(dataSummary, '가격 수집 종목', formatCount(quality.fetched_price_symbol_count));
+  appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
+  appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
+  appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
+  appendDefinition(
+    dataSummary,
+    '품질 상태',
+    formatCounts(quality.data_quality_status_counts, {
+      pass: '통과',
+      missing_price: '가격 누락',
+      missing_volume: '거래량 누락',
+      provider_adjustment_incompatible: '조정가격 불일치',
+      stale_price: '오래된 가격',
+      insufficient_history: '이력 부족',
+      below_liquidity_floor: '유동성 부족',
+      benchmark_comparator_only: '벤치마크 전용',
+    }),
+  );
+  appendDefinition(dataSummary, '유동성 상태', formatCounts(quality.liquidity_status_counts, { pass: '통과', fail: '미통과' }));
+  appendDefinition(dataSummary, '용량 상태', formatCounts(quality.capacity_status_counts, { pass: '통과', fail: '미통과' }));
+
+  const gateTarget = document.querySelector('#tradability-gate-list');
+  gateTarget.replaceChildren();
+  const gates = run.tradability_gate || [];
+  if (!gates.length) {
+    appendEmpty('#tradability-gate-list', '추천/신호 게이트 정보가 없습니다.');
+  } else {
+    gates.forEach((gate) => {
+      const item = document.createElement('div');
+      item.className = `gate-item ${gate.passed ? 'pass' : 'block'}`;
+      const title = document.createElement('strong');
+      title.textContent = `${gate.passed ? '통과' : '점검 필요'} · ${gate.label_ko || gate.key}`;
+      const detail = document.createElement('small');
+      detail.textContent = gate.description_ko || '추가 실행 가능성 점검 항목입니다.';
+      item.append(title, detail);
+      gateTarget.appendChild(item);
+    });
+  }
+
+  const diagnostics = run.factor_diagnostics || {};
+  setText('#factor-scope-note', diagnostics.scope_note_ko || '팩터 진단 정보가 없습니다.');
+
+  const categoryTarget = document.querySelector('#factor-category-summary');
+  categoryTarget.replaceChildren();
+  const categories = diagnostics.category_summary || [];
+  if (!categories.length) {
+    appendEmpty('#factor-category-summary', '팩터 카테고리 요약이 없습니다.');
+  } else {
+    categories.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = `${humanFactorCategory(row.category)} · ${formatInteger(row.factor_count)}개`;
+      const detail = document.createElement('small');
+      detail.textContent = `평균 Rank-IC ${formatNumber(row.avg_mean_rank_ic)} · 양수 비율 ${formatPercent(row.avg_positive_ic_rate)} · 예: ${row.example_factors || '-'}`;
+      item.append(title, detail);
+      categoryTarget.appendChild(item);
+    });
+  }
+
+  const icTarget = document.querySelector('#factor-rank-ic-summary');
+  icTarget.replaceChildren();
+  const rankIcRows = diagnostics.rank_ic_top || [];
+  if (!rankIcRows.length) {
+    appendEmpty('#factor-rank-ic-summary', 'Forward Rank-IC 진단이 없습니다.');
+  } else {
+    rankIcRows.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = row.factor || '-';
+      const detail = document.createElement('small');
+      detail.textContent = `${formatInteger(row.horizon_days ?? diagnostics.rank_ic_horizon_days)}거래일 후 Rank-IC ${formatNumber(row.mean_rank_ic)} · 관측 ${formatInteger(row.observations)}회 · 양수 비율 ${formatPercent(row.positive_ic_rate)} · 중첩 일별 관측`;
+      item.append(title, detail);
+      icTarget.appendChild(item);
+    });
+  }
+
+  const redundancyTarget = document.querySelector('#factor-redundancy-summary');
+  redundancyTarget.replaceChildren();
+  const redundancyRows = diagnostics.redundancy_top || [];
+  if (!redundancyRows.length) {
+    appendEmpty('#factor-redundancy-summary', '팩터 중복도 진단이 없습니다.');
+  } else {
+    redundancyRows.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = `${row.factor || '-'} ↔ ${row.nearest_factor || '-'}`;
+      const detail = document.createElement('small');
+      detail.textContent = `순위상관 ${formatNumber(row.signed_rank_corr)} · 높은 상관 피어 ${formatInteger(row.high_corr_peer_count)}개 · 진단일 ${row.diagnostic_date || '-'}`;
+      item.append(title, detail);
+      redundancyTarget.appendChild(item);
+    });
+  }
 }
 
 function renderFactorTable() {
@@ -640,10 +918,18 @@ function renderFactorTable() {
 }
 
 function renderHoldingsTable() {
-  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal } = currentWeightedHoldings();
+  const run = currentRun();
+  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, availableCount, selectedFactor, windowLabel } = currentWeightedHoldings();
+  const weightLabel = isPracticalRun(run) ? '투자 비중' : '모형/연구 비중';
   setText(
     '#weight-summary',
     `전체 ${formatPercent(portfolioTotal)} · 표시 ${formatPercent(displayedTotal)} · 미표시 ${formatPercent(unshownTotal)} · 현금 ${formatPercent(cashTotal)}`,
+  );
+  setText(
+    '#holdings-availability',
+    run.history_payload_type === 'summary'
+      ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
+      : `${windowLabel} 최고 팩터 ${selectedFactor} 기준 백테스트 보유입니다. 전체 ${formatInteger(availableCount)}개 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 기존 분석 코드가 저장한 일별 보유 비중을 그대로 사용합니다.`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
@@ -765,10 +1051,11 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
+  const run = currentRun();
   const { weighted, unshownTotal, cashTotal, topN, maxWeight } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 비중' : '모형/연구 비중'} · 상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
     appendEmpty('#weight-chart', '선택한 기준일과 기간에 표시할 상위 종목 데이터가 없습니다.');
     return;
@@ -806,6 +1093,7 @@ function renderPeriodRankingTable() {
 
 function renderAll() {
   renderSummary();
+  renderDiagnostics();
   renderFactorReturnChart();
   renderWindowComparisonChart();
   renderLeaderTrendChart();
@@ -890,6 +1178,9 @@ def build_dashboard_payload(
             "factor_period_rankings": ranking_rows,
             "holdings": holding_rows,
             "latest_output_rows": latest_recommendations,
+            "data_quality_summary": _data_quality_summary(result),
+            "tradability_gate": _tradability_gate_rows(result.metadata),
+            "factor_diagnostics": _factor_diagnostics_payload(result),
             "notes_ko": [
                 "웹사이트 입력값은 브라우저 표시용이며 다음 자동 실행 설정을 저장하지 않습니다.",
                 "자동 실행 입력값은 .github/momentum-dashboard-config.json에서 관리합니다.",
@@ -904,22 +1195,14 @@ def write_dashboard_site(
     site_dir: str | Path,
     *,
     title: str = DEFAULT_SITE_TITLE,
+    history_limit: int = 60,
 ) -> dict[str, str]:
     """Write a static Korean dashboard site for one or more run-result JSON files."""
 
+    if history_limit < 1:
+        raise ValueError("history_limit must be at least 1")
     paths = _expand_run_result_paths(run_result_patterns)
-    payloads = [_payload_from_run_json(path) for path in paths]
-    payloads.sort(key=lambda payload: str(payload.get("summary", {}).get("run_timestamp_utc", "")))
-    combined = _json_safe(
-        {
-            "schema_version": 1,
-            "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-            "title": title,
-            "runs": payloads,
-            "latest_run_index": len(payloads) - 1,
-        }
-    )
-    if not payloads:
+    if not paths:
         raise ValueError("at least one run-results JSON file is required")
 
     site_path = Path(site_dir)
@@ -932,6 +1215,21 @@ def write_dashboard_site(
     css_path = assets_dir / "styles.css"
     js_path = assets_dir / "dashboard.js"
     data_path = data_dir / "dashboard.json"
+
+    payloads = _merge_dashboard_history(
+        data_path,
+        [_payload_from_run_json(path) for path in paths],
+        history_limit=history_limit,
+    )
+    combined = _json_safe(
+        {
+            "schema_version": 1,
+            "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+            "title": title,
+            "runs": payloads,
+            "latest_run_index": len(payloads) - 1,
+        }
+    )
 
     escaped_title = html.escape(title, quote=True)
     index_path.write_text(HTML_TEMPLATE.format(title=escaped_title), encoding="utf-8")
@@ -970,7 +1268,86 @@ def _dashboard_summary(result: RunResult) -> dict[str, Any]:
         "factor_selection_mode": result.metadata.get("factor_selection_mode"),
         "candidate_universe_size": result.metadata.get("candidate_universe_size"),
         "eligible_price_universe_size": result.metadata.get("eligible_price_universe_size"),
+        "liquidity_eligible_universe_size": result.metadata.get("liquidity_eligible_universe_size"),
         "factor_count": result.metadata.get("factor_count"),
+        "factor_library_scope": result.metadata.get("factor_library_scope"),
+        "factor_rank_ic_horizon_days": result.metadata.get("factor_rank_ic_horizon_days"),
+        "factor_high_redundancy_count": result.metadata.get("factor_high_redundancy_count"),
+    }
+
+
+GATE_LABELS_KO: dict[str, tuple[str, str]] = {
+    "fresh_live_data": ("최신 실데이터", "전일/최근 미국 종가 데이터가 충분히 최신인지 확인합니다."),
+    "factor_selection_policy_available": ("사전 정의된 팩터 선택 정책", "같은 실행에서 고른 팩터를 매매 권고로 쓰지 않도록 막습니다."),
+    "no_explicit_price_symbol_cap": ("가격 수집 범위 제한 없음", "디버그용 종목 수 제한이 걸린 실행인지 확인합니다."),
+    "complete_requested_price_coverage": ("요청 종목 가격 커버리지", "요청한 후보 종목이 가격/이력 조건을 충분히 통과했는지 확인합니다."),
+    "broad_or_approved_tradable_universe": ("거래 가능 유니버스 근거", "충분히 넓거나 사용자가 승인한 거래 가능 후보군인지 확인합니다."),
+    "point_in_time_universe": ("시점 기준 유니버스 근거", "생존편향을 줄이기 위한 시점 기준 유니버스 증거가 있는지 확인합니다."),
+    "data_quality_manifest_available": ("데이터 품질 명세", "종목별 데이터 품질 진단표가 생성됐는지 확인합니다."),
+    "row_level_data_quality_pass": ("추천 행 데이터 품질", "추천/신호 후보 행의 가격 품질이 기준을 통과했는지 확인합니다."),
+    "liquidity_filter_evidence": ("유동성 근거", "거래량/거래대금 관측치가 충분한지 확인합니다."),
+    "row_level_liquidity_pass": ("추천 행 유동성", "추천/신호 후보 행이 유동성 기준을 통과했는지 확인합니다."),
+    "capacity_estimated_and_pass": ("운용 규모 수용성", "목표 운용규모와 ADV 참여율 기준에서 무리가 없는지 확인합니다."),
+}
+
+
+def _tradability_gate_rows(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    requirements = metadata.get("tradability_requirements", {})
+    if not isinstance(requirements, dict):
+        return []
+    rows = []
+    blockers = set(metadata.get("tradability_blockers") or metadata.get("fail_closed_reasons") or [])
+    for key, passed in requirements.items():
+        label, description = GATE_LABELS_KO.get(str(key), (str(key), "추가 실행 가능성 점검 항목입니다."))
+        rows.append(
+            {
+                "key": str(key),
+                "label_ko": label,
+                "description_ko": description,
+                "passed": bool(passed),
+                "blocking": str(key) in blockers or not bool(passed),
+            }
+        )
+    return rows
+
+
+def _data_quality_summary(result: RunResult) -> dict[str, Any]:
+    source_counts = {}
+    if not result.data_sources.empty and "source" in result.data_sources:
+        source_counts = result.data_sources["source"].value_counts().to_dict()
+    status_counts = {}
+    if not result.data_quality.empty and "data_quality_status" in result.data_quality:
+        status_counts = result.data_quality["data_quality_status"].value_counts().to_dict()
+    summary = result.metadata
+    return {
+        "candidate_universe_size": summary.get("candidate_universe_size"),
+        "eligible_price_universe_size": summary.get("eligible_price_universe_size"),
+        "liquidity_eligible_universe_size": summary.get("liquidity_eligible_universe_size"),
+        "fetched_price_symbol_count": summary.get("fetched_price_symbol_count"),
+        "excluded_symbols": summary.get("excluded_symbols"),
+        "provider": summary.get("provider"),
+        "data_as_of": summary.get("data_as_of"),
+        "data_quality_status_counts": status_counts,
+        "source_counts": source_counts,
+        "liquidity_status_counts": summary.get("recommendation_liquidity_status_counts", {}),
+        "capacity_status_counts": summary.get("recommendation_capacity_status_counts", {}),
+    }
+
+
+def _factor_diagnostics_payload(result: RunResult) -> dict[str, Any]:
+    return {
+        "scope_note_ko": (
+            "현재 팩터 라이브러리는 가격 기반 모멘텀·추세·위험조정 변형입니다. 가치·퀄리티 같은 "
+            "재무제표 팩터는 포함하지 않습니다. Forward Rank-IC는 연구용 탐색 진단이며 21거래일 "
+            "미래수익률을 매일 중첩 관측하므로 관측 수를 독립 표본 수로 해석하면 안 됩니다."
+        ),
+        "rank_ic_horizon_days": result.metadata.get("factor_rank_ic_horizon_days"),
+        "rank_ic_max_dates": result.metadata.get("factor_rank_ic_max_dates"),
+        "diagnostic_methodology": result.metadata.get("factor_diagnostic_methodology", {}),
+        "high_redundancy_count": result.metadata.get("factor_high_redundancy_count"),
+        "category_summary": result.factor_category_summary.head(20).to_dict(orient="records"),
+        "rank_ic_top": result.factor_rank_ic.head(10).to_dict(orient="records"),
+        "redundancy_top": result.factor_redundancy.head(10).to_dict(orient="records"),
     }
 
 
@@ -1196,7 +1573,94 @@ def _fallback_dashboard_payload(payload: dict[str, Any], path: Path) -> dict[str
             "factor_period_rankings": [],
             "holdings": holdings,
             "latest_output_rows": rows[:50],
+            "data_quality_summary": {
+                "candidate_universe_size": metadata.get("candidate_universe_size"),
+                "eligible_price_universe_size": metadata.get("eligible_price_universe_size"),
+                "liquidity_eligible_universe_size": metadata.get("liquidity_eligible_universe_size"),
+                "provider": metadata.get("provider"),
+                "data_as_of": metadata.get("data_as_of"),
+                "data_quality_status_counts": {},
+                "source_counts": {},
+            },
+            "tradability_gate": _tradability_gate_rows(metadata),
+            "factor_diagnostics": {
+                "scope_note_ko": "legacy JSON에는 상세 팩터 진단이 없어 제한된 정보만 표시합니다.",
+                "category_summary": payload.get("factor_category_summary", []) if isinstance(payload.get("factor_category_summary"), list) else [],
+                "rank_ic_top": payload.get("factor_rank_ic", [])[:10] if isinstance(payload.get("factor_rank_ic"), list) else [],
+                "redundancy_top": payload.get("factor_redundancy", [])[:10] if isinstance(payload.get("factor_redundancy"), list) else [],
+            },
             "notes_ko": ["이 파일은 legacy run-results JSON에서 만든 제한적 대시보드 payload입니다."],
+        }
+    )
+
+
+def _merge_dashboard_history(
+    existing_data_path: Path,
+    new_payloads: list[dict[str, Any]],
+    *,
+    history_limit: int,
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    if existing_data_path.exists():
+        try:
+            existing = json.loads(existing_data_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        if isinstance(existing, dict) and isinstance(existing.get("runs"), list):
+            payloads.extend(item for item in existing["runs"] if isinstance(item, dict))
+    payloads.extend(new_payloads)
+    deduped: dict[str, dict[str, Any]] = {}
+    for payload in payloads:
+        summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+        key = str(
+            summary.get("run_timestamp_utc")
+            or payload.get("source_json")
+            or payload.get("generated_at_utc")
+            or len(deduped)
+        )
+        deduped[key] = payload
+    ordered = sorted(
+        deduped.values(),
+        key=lambda payload: str(
+            (payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}).get("run_timestamp_utc")
+            or payload.get("generated_at_utc")
+            or ""
+        ),
+    )
+    ordered = ordered[-history_limit:]
+    if not ordered:
+        return []
+    compacted = [_compact_historical_run(payload) for payload in ordered[:-1]]
+    latest = {**ordered[-1], "history_payload_type": "full"}
+    return [*compacted, latest]
+
+
+def _compact_historical_run(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep prior runs useful for comparison without shipping every holding row."""
+
+    return _json_safe(
+        {
+            "schema_version": payload.get("schema_version", 1),
+            "generated_at_utc": payload.get("generated_at_utc"),
+            "source_json": payload.get("source_json"),
+            "history_payload_type": "summary",
+            "history_compaction_note_ko": (
+                "이전 실행은 GitHub Pages 초기 로딩 속도를 위해 상위 보유 행과 최신 출력 행을 제거한 "
+                "요약 이력입니다. 전체 종목/비중 상세는 최신 실행에서 확인하세요."
+            ),
+            "summary": payload.get("summary", {}),
+            "periods": payload.get("periods", []),
+            "factor_leaders": list(payload.get("factor_leaders", []))[-120:],
+            "factor_period_rankings": list(payload.get("factor_period_rankings", []))[-400:],
+            "holdings": [],
+            "latest_output_rows": [],
+            "data_quality_summary": payload.get("data_quality_summary", {}),
+            "tradability_gate": payload.get("tradability_gate", []),
+            "factor_diagnostics": payload.get("factor_diagnostics", {}),
+            "notes_ko": [
+                *(payload.get("notes_ko", []) if isinstance(payload.get("notes_ko"), list) else []),
+                "과거 실행은 compact 요약으로 보관되어 상세 보유 비중 표시는 최신 실행에 한정됩니다.",
+            ],
         }
     )
 

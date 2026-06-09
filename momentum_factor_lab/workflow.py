@@ -48,6 +48,9 @@ class RunResult:
     data_quality: pd.DataFrame = field(default_factory=pd.DataFrame)
     cost_stress: pd.DataFrame = field(default_factory=pd.DataFrame)
     selection_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    factor_rank_ic: pd.DataFrame = field(default_factory=pd.DataFrame)
+    factor_redundancy: pd.DataFrame = field(default_factory=pd.DataFrame)
+    factor_category_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +304,203 @@ def _score_factors(metrics: pd.DataFrame) -> pd.DataFrame:
     ).abs().rank(pct=True)
     components["composite_score"] = components.mean(axis=1)
     return components.sort_values("composite_score", ascending=False)
+
+
+def _spearman_rank_corr(left: pd.Series, right: pd.Series) -> float:
+    aligned = pd.concat(
+        [
+            pd.to_numeric(left, errors="coerce").rename("left"),
+            pd.to_numeric(right, errors="coerce").rename("right"),
+        ],
+        axis=1,
+    ).dropna()
+    if len(aligned) < 3:
+        return float("nan")
+    if aligned["left"].nunique() < 2 or aligned["right"].nunique() < 2:
+        return float("nan")
+    return float(aligned["left"].rank().corr(aligned["right"].rank()))
+
+
+def _factor_rank_ic_summary(
+    factor_scores: dict[str, pd.DataFrame],
+    prices: pd.DataFrame,
+    *,
+    horizon_days: int = 21,
+    max_dates: int = 756,
+) -> pd.DataFrame:
+    """Summarize no-lookahead rank IC from signal ranks at t to future t+h returns."""
+
+    columns = [
+        "factor",
+        "horizon_days",
+        "observations",
+        "mean_rank_ic",
+        "median_rank_ic",
+        "positive_ic_rate",
+        "diagnostic_start_date",
+        "diagnostic_end_date",
+        "overlapping_observations",
+    ]
+    if prices.empty:
+        return pd.DataFrame(columns=columns)
+    future_returns = prices.shift(-horizon_days).divide(prices) - 1.0
+    rows: list[dict[str, object]] = []
+    for factor, scores in factor_scores.items():
+        ics: list[float] = []
+        score_window = scores.sort_index().tail(max_dates)
+        for date, score_row in score_window.iterrows():
+            if date not in future_returns.index:
+                continue
+            ic = _spearman_rank_corr(score_row, future_returns.loc[date])
+            if math.isfinite(ic):
+                ics.append(ic)
+        start_date = str(pd.Timestamp(score_window.index.min()).date()) if not score_window.empty else None
+        end_date = str(pd.Timestamp(score_window.index.max()).date()) if not score_window.empty else None
+        if ics:
+            values = pd.Series(ics, dtype=float)
+            rows.append(
+                {
+                    "factor": factor,
+                    "horizon_days": horizon_days,
+                    "observations": int(values.count()),
+                    "mean_rank_ic": float(values.mean()),
+                    "median_rank_ic": float(values.median()),
+                    "positive_ic_rate": float(values.gt(0).mean()),
+                    "diagnostic_start_date": start_date,
+                    "diagnostic_end_date": end_date,
+                    "overlapping_observations": True,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "factor": factor,
+                    "horizon_days": horizon_days,
+                    "observations": 0,
+                    "mean_rank_ic": np.nan,
+                    "median_rank_ic": np.nan,
+                    "positive_ic_rate": np.nan,
+                    "diagnostic_start_date": start_date,
+                    "diagnostic_end_date": end_date,
+                    "overlapping_observations": True,
+                }
+            )
+    return pd.DataFrame(rows, columns=columns).sort_values(["mean_rank_ic", "observations"], ascending=[False, False])
+
+
+def _factor_redundancy_summary(factor_scores: dict[str, pd.DataFrame], *, threshold: float = 0.95) -> pd.DataFrame:
+    """Summarize latest-date cross-sectional rank-correlation redundancy."""
+
+    columns = [
+        "factor",
+        "nearest_factor",
+        "max_abs_rank_corr",
+        "signed_rank_corr",
+        "high_corr_peer_count",
+        "diagnostic_date",
+    ]
+    if not factor_scores:
+        return pd.DataFrame(columns=columns)
+    latest_dates = [scores.dropna(how="all").index.max() for scores in factor_scores.values() if not scores.empty]
+    latest_dates = [pd.Timestamp(value) for value in latest_dates if pd.notna(value)]
+    if not latest_dates:
+        return pd.DataFrame(columns=columns)
+    latest_date = min(latest_dates)
+    latest_scores: dict[str, pd.Series] = {}
+    for factor, scores in factor_scores.items():
+        if scores.empty:
+            continue
+        idx = pd.DatetimeIndex(scores.index)
+        position = idx.searchsorted(latest_date, side="right") - 1
+        if position >= 0:
+            latest_scores[factor] = scores.iloc[int(position)]
+    rows: list[dict[str, object]] = []
+    for factor, series in latest_scores.items():
+        peer_corrs: list[tuple[str, float]] = []
+        for peer, peer_series in latest_scores.items():
+            if peer == factor:
+                continue
+            corr = _spearman_rank_corr(series, peer_series)
+            if math.isfinite(corr):
+                peer_corrs.append((peer, corr))
+        if peer_corrs:
+            nearest, corr = max(peer_corrs, key=lambda item: abs(item[1]))
+            high_corr_count = sum(abs(value) >= threshold for _, value in peer_corrs)
+            rows.append(
+                {
+                    "factor": factor,
+                    "nearest_factor": nearest,
+                    "max_abs_rank_corr": float(abs(corr)),
+                    "signed_rank_corr": float(corr),
+                    "high_corr_peer_count": int(high_corr_count),
+                    "diagnostic_date": str(pd.Timestamp(latest_date).date()),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "factor": factor,
+                    "nearest_factor": None,
+                    "max_abs_rank_corr": np.nan,
+                    "signed_rank_corr": np.nan,
+                    "high_corr_peer_count": 0,
+                    "diagnostic_date": str(pd.Timestamp(latest_date).date()),
+                }
+            )
+    return pd.DataFrame(rows, columns=columns).sort_values(["max_abs_rank_corr", "factor"], ascending=[False, True])
+
+
+def _factor_category_summary(
+    factor_definitions: pd.DataFrame,
+    factor_rank_ic: pd.DataFrame,
+    factor_redundancy: pd.DataFrame,
+) -> pd.DataFrame:
+    columns = [
+        "category",
+        "factor_count",
+        "avg_mean_rank_ic",
+        "avg_positive_ic_rate",
+        "avg_max_abs_rank_corr",
+        "high_corr_factor_count",
+        "example_factors",
+    ]
+    if factor_definitions.empty or "category" not in factor_definitions:
+        return pd.DataFrame(columns=columns)
+    frame = factor_definitions[["factor", "category"]].copy()
+    if not factor_rank_ic.empty:
+        frame = frame.merge(factor_rank_ic[["factor", "mean_rank_ic", "positive_ic_rate"]], on="factor", how="left")
+    if not factor_redundancy.empty:
+        frame = frame.merge(
+            factor_redundancy[["factor", "max_abs_rank_corr", "high_corr_peer_count"]],
+            on="factor",
+            how="left",
+        )
+    rows: list[dict[str, object]] = []
+    for category, group in frame.groupby("category", dropna=False):
+        high_corr = (
+            pd.to_numeric(group["high_corr_peer_count"], errors="coerce")
+            if "high_corr_peer_count" in group
+            else pd.Series(0, index=group.index, dtype=float)
+        )
+        rows.append(
+            {
+                "category": str(category),
+                "factor_count": int(len(group)),
+                "avg_mean_rank_ic": _safe_mean(group.get("mean_rank_ic", pd.Series(dtype=float))),
+                "avg_positive_ic_rate": _safe_mean(group.get("positive_ic_rate", pd.Series(dtype=float))),
+                "avg_max_abs_rank_corr": _safe_mean(group.get("max_abs_rank_corr", pd.Series(dtype=float))),
+                "high_corr_factor_count": int(high_corr.fillna(0).gt(0).sum()),
+                "example_factors": ", ".join(group["factor"].head(4).astype(str).tolist()),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns).sort_values(["factor_count", "category"], ascending=[False, True])
+
+
+def _safe_mean(series: pd.Series) -> float | None:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.mean())
 
 
 def _benchmark_relative_metrics(backtests: dict[str, BacktestResult], prices: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
@@ -1137,6 +1337,9 @@ def run_analysis(config: RunConfig) -> RunResult:
     factor_scores = compute_factor_scores(analysis_prices)
     factor_validation = validate_factor_library(analysis_prices)
     factor_definitions = factor_definitions_frame()
+    factor_rank_ic = _factor_rank_ic_summary(factor_scores, analysis_prices)
+    factor_redundancy = _factor_redundancy_summary(factor_scores)
+    factor_category_summary = _factor_category_summary(factor_definitions, factor_rank_ic, factor_redundancy)
     eligibility_mask = build_eligibility_mask(
         analysis_prices,
         market_data.volumes.reindex(index=analysis_prices.index, columns=analysis_prices.columns),
@@ -1273,6 +1476,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         "point_in_time_universe": _has_point_in_time_universe(market_data),
         "candidate_universe_size": len(market_data.candidate_universe),
         "eligible_price_universe_size": len(analysis_prices.columns),
+        "liquidity_eligible_universe_size": int(eligibility_mask.iloc[-1].fillna(False).sum()) if not eligibility_mask.empty else 0,
         "fetched_price_symbol_count": len(prices.columns),
         "benchmark_symbol": normalize_symbol(config.benchmark),
         "benchmark_price_available": normalize_symbol(config.benchmark) in prices.columns,
@@ -1317,6 +1521,26 @@ def run_analysis(config: RunConfig) -> RunResult:
             "Many explainable momentum factors are compared; validation, predeclared/walk-forward selection, "
             "and multiple-testing/data-snooping warnings are required before treating outputs as investable."
         ),
+        "factor_library_scope": "price_momentum_only",
+        "factor_rank_ic_horizon_days": 21,
+        "factor_rank_ic_max_dates": 756,
+        "factor_diagnostic_methodology": {
+            "rank_ic": (
+                "Exploratory in-sample cross-sectional Spearman Rank-IC from signal date t to future "
+                "t+21 trading-day returns. Daily observations overlap, so counts are diagnostic coverage, "
+                "not independent statistical sample sizes."
+            ),
+            "redundancy": "Latest common signal-date cross-sectional Spearman rank-correlation between factor score vectors.",
+            "scope": "Price-only momentum, trend, breakout, acceleration, drawdown, robust, and risk-adjusted variants.",
+        },
+        "factor_high_redundancy_count": int(
+            pd.to_numeric(factor_redundancy.get("high_corr_peer_count", pd.Series(dtype=float)), errors="coerce")
+            .fillna(0)
+            .gt(0)
+            .sum()
+        )
+        if not factor_redundancy.empty
+        else 0,
         "survivorship_bias_caveat": disclaimers.DATA_LIMITATIONS,
         "non_advice_disclaimer": disclaimers.NON_ADVICE,
         "live_data_gate": disclaimers.LIVE_DATA_GATE,
@@ -1342,6 +1566,9 @@ def run_analysis(config: RunConfig) -> RunResult:
         data_quality=data_quality,
         cost_stress=cost_stress,
         selection_history=selection_history,
+        factor_rank_ic=factor_rank_ic,
+        factor_redundancy=factor_redundancy,
+        factor_category_summary=factor_category_summary,
     )
 
 
@@ -1359,6 +1586,9 @@ def write_run_results_json(result: RunResult, path: Path) -> None:
         "sensitivity": result.sensitivity.to_dict(orient="records"),
         "cost_stress": result.cost_stress.to_dict(orient="records"),
         "selection_history": result.selection_history.to_dict(orient="records"),
+        "factor_rank_ic": result.factor_rank_ic.to_dict(orient="records"),
+        "factor_redundancy": result.factor_redundancy.to_dict(orient="records"),
+        "factor_category_summary": result.factor_category_summary.to_dict(orient="records"),
         output_key: result.recommendations.to_dict(orient="records"),
         "data_quality": result.data_quality.to_dict(orient="records"),
         "data_sources": result.data_sources.to_dict(orient="records"),

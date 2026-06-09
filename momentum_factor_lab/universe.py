@@ -493,8 +493,13 @@ def build_public_universe_frame(
     combined = _merge_universe_sources(pd.concat(frames, ignore_index=True))
     combined = combined.sort_values(["is_etf", "symbol"], ascending=[True, True])
     combined = stock_only_universe_frame(combined)
-    failed = any(str(row.get("status")) == "failed" for row in source_rows)
-    summary_status = "partial_source_current_universe" if failed else "loaded_current_universe"
+    statuses = {str(row.get("status")) for row in source_rows}
+    failed = "failed" in statuses
+    stale = "stale_cache_fallback" in statuses
+    if failed or stale:
+        summary_status = "partial_or_stale_source_current_universe" if stale else "partial_source_current_universe"
+    else:
+        summary_status = "loaded_current_universe"
     summary = {
         "source": "public-universe-refresh",
         "status": summary_status,

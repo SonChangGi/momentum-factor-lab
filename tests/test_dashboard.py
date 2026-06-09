@@ -33,6 +33,12 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert payload["holdings"]
     assert {"symbol", "score", "default_weight", "window", "weight_source"}.issubset(payload["holdings"][0])
     assert payload["holdings"][0]["weight_source"] == "백테스트 일별 보유 비중"
+    assert payload["data_quality_summary"]["candidate_universe_size"] >= 2000
+    assert payload["tradability_gate"]
+    assert {"key", "label_ko", "description_ko", "passed"}.issubset(payload["tradability_gate"][0])
+    assert payload["factor_diagnostics"]["category_summary"]
+    assert payload["factor_diagnostics"]["rank_ic_top"]
+    assert payload["factor_diagnostics"]["redundancy_top"]
     assert payload["notes_ko"][0].startswith("웹사이트 입력값")
 
 
@@ -150,7 +156,11 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
     assert "시각화 대시보드" in html
     assert "팩터 수익률 막대 차트" in html
-    assert "상위 N개 투자 비중 시각화" in html
+    assert "상위 N개 모형 비중 시각화" in html
+    assert "데이터 품질 · 유동성 · 매매 가능성 게이트" in html
+    assert "경제적 의미 · 중복도 · Forward Rank-IC" in html
+    assert "후보 종목, 가격 적격, 유동성 적격 종목 수" in html
+    assert "JavaScript가 필요합니다" in html
     assert "산출 비중" in html
     assert "최신 출력" in html
     assert "매일 실행 입력값" in html
@@ -160,12 +170,18 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "매일 실행 input" not in html
     assert "renderFactorReturnChart" in js
     assert "renderWeightChart" in js
+    assert "renderDiagnostics" in js
+    assert "후보 종목" in js
+    assert "가격 적격 종목" in js
+    assert "유동성 적격 종목" in js
+    assert "formatKoreanDateTime" in js
     assert "renderCurrentOutputTable" in js
     assert "renderWithBusy" in js
     assert "recomputeWeights" not in js
     assert "weighted.slice(0, 15)" not in js
     combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
     assert combined["runs"][0]["summary"]["selected_factor"] == "mom_1m"
+    assert combined["runs"][0]["history_payload_type"] == "full"
     assert combined["latest_run_index"] == 0
     assert "latest" not in combined
     assert Path(paths["data"]).stat().st_size < 20_000
@@ -237,10 +253,11 @@ def test_scheduled_dashboard_command_uses_config_and_builder(monkeypatch, tmp_pa
         captured["run_args"] = args
         return {"outputs": {"json": str(run_json)}}
 
-    def fake_write_dashboard_site(paths, site_dir, *, title):
+    def fake_write_dashboard_site(paths, site_dir, *, title, history_limit):
         captured["paths"] = paths
         captured["site_dir"] = site_dir
         captured["title"] = title
+        captured["history_limit"] = history_limit
         return {"index": str(Path(site_dir) / "index.html")}
 
     monkeypatch.setattr(cli, "run_command", fake_run_command)
@@ -253,6 +270,7 @@ def test_scheduled_dashboard_command_uses_config_and_builder(monkeypatch, tmp_pa
     assert captured["run_args"].command == "run"
     assert captured["site_dir"] == str(tmp_path / "configured-site")
     assert captured["title"] == "테스트 대시보드"
+    assert captured["history_limit"] == 60
     assert captured["paths"] == [str(run_json)]
 
 
@@ -348,7 +366,11 @@ def test_scheduled_dashboard_json_output_is_parseable(monkeypatch, tmp_path, cap
         return {"outputs": {"json": str(run_json)}}
 
     monkeypatch.setattr(cli, "run_command", noisy_run_command)
-    monkeypatch.setattr(cli, "write_dashboard_site", lambda paths, site_dir, *, title: {"index": str(Path(site_dir) / "index.html")})
+    monkeypatch.setattr(
+        cli,
+        "write_dashboard_site",
+        lambda paths, site_dir, *, title, history_limit: {"index": str(Path(site_dir) / "index.html")},
+    )
     args = cli.build_parser().parse_args(["scheduled-dashboard", "--config", str(config_path), "--json"])
 
     cli.scheduled_dashboard_command(args)
@@ -357,6 +379,78 @@ def test_scheduled_dashboard_json_output_is_parseable(monkeypatch, tmp_path, cap
     parsed = json.loads(stdout)
     assert parsed["index"].endswith("index.html")
     assert "suppressed" not in stdout
+
+
+def test_dashboard_history_preserves_dedupes_sorts_and_caps(tmp_path):
+    site_dir = tmp_path / "site"
+    data_dir = site_dir / "data"
+    data_dir.mkdir(parents=True)
+    existing_run_old = {
+        "schema_version": 1,
+        "generated_at_utc": "2026-06-07T00:00:00Z",
+        "summary": {"run_timestamp_utc": "2026-06-07T00:00:00Z", "selected_factor": "old"},
+        "periods": [],
+        "factor_leaders": [],
+        "factor_period_rankings": [],
+        "holdings": [],
+    }
+    existing_run_dup = {
+        "schema_version": 1,
+        "generated_at_utc": "2026-06-08T00:00:00Z",
+        "summary": {"run_timestamp_utc": "2026-06-08T00:00:00Z", "selected_factor": "old-duplicate"},
+        "periods": [],
+        "factor_leaders": [],
+        "factor_period_rankings": [],
+        "holdings": [],
+    }
+    (data_dir / "dashboard.json").write_text(
+        json.dumps({"schema_version": 1, "runs": [existing_run_old, existing_run_dup], "latest_run_index": 1}),
+        encoding="utf-8",
+    )
+    run_json = tmp_path / "run_results_new.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-08T01:00:00Z",
+                    "summary": {"run_timestamp_utc": "2026-06-08T00:00:00Z", "selected_factor": "newer-duplicate"},
+                    "periods": [],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_json_2 = tmp_path / "run_results_new2.json"
+    run_json_2.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-09T00:00:00Z",
+                    "summary": {"run_timestamp_utc": "2026-06-09T00:00:00Z", "selected_factor": "latest"},
+                    "periods": [],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = write_dashboard_site([run_json, run_json_2], site_dir, history_limit=2)
+
+    combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
+    factors = [run["summary"]["selected_factor"] for run in combined["runs"]]
+    assert factors == ["newer-duplicate", "latest"]
+    assert combined["runs"][0]["history_payload_type"] == "summary"
+    assert combined["runs"][0]["holdings"] == []
+    assert combined["runs"][1]["history_payload_type"] == "full"
+    assert combined["latest_run_index"] == 1
 
 def test_daily_dashboard_workflow_documents_kst_schedule():
     workflow = Path(".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
