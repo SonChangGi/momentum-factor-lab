@@ -16,6 +16,53 @@ const formatNumber = (value) => {
 const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
 const textValue = (value) => value === null || value === undefined ? '-' : String(value);
 
+function humanProvider(value) {
+  const text = textValue(value);
+  const labels = {
+    'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'offline-sample': '오프라인 샘플 데이터',
+    'offline_sample': '오프라인 샘플 데이터',
+  };
+  return labels[text] || text;
+}
+
+function humanOutputLabel(value) {
+  const text = textValue(value);
+  const labels = {
+    'Research signals (not tradable)': '연구용 신호(매매 권고 아님)',
+    'Practical recommendations': '실행 가능성 검토를 통과한 추천 후보',
+    'No current recommendation': '현재 추천 후보 없음',
+  };
+  return labels[text] || text;
+}
+
+function humanStatus(status, outputLabel) {
+  const text = textValue(status);
+  if (text === '-') return humanOutputLabel(outputLabel);
+  if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
+    return '현재 데이터 사용 · 연구용 신호 · 매매 권고 아님';
+  }
+  if (text.includes('pass')) {
+    return '현재 데이터 사용 · 품질 점검 통과';
+  }
+  if (text.includes('stale')) {
+    return '데이터가 최신이 아닐 수 있음';
+  }
+  if (text.includes('fail') || text.includes('blocked')) {
+    return '제한 조건 때문에 추천 보류';
+  }
+  return text;
+}
+
+function humanWeightingMethod(value) {
+  const text = textValue(value);
+  const labels = {
+    equal: '동일 비중',
+    score_size_liquidity: '점수·규모·유동성 기반',
+  };
+  return labels[text] || text;
+}
+
 function currentRun() {
   const runs = state.data?.runs || [];
   return runs[state.activeRunIndex] || runs[state.data?.latest_run_index || 0] || state.data?.latest || {};
@@ -34,15 +81,16 @@ function selectedWindow() {
   return document.querySelector('#window-select').value;
 }
 
-function recomputeWeights(rows, topN, maxWeight) {
-  const selected = rows.slice(0, topN);
-  if (!selected.length) return [];
-  const base = Math.min(1 / selected.length, maxWeight);
-  return selected.map((row, index) => ({ ...row, display_weight: base, display_rank: index + 1 }));
-}
-
 function setText(selector, value) {
   document.querySelector(selector).textContent = textValue(value);
+}
+
+function setStatusMessage(message) {
+  const statusCard = document.querySelector('#run-status');
+  statusCard.replaceChildren();
+  statusCard.textContent = message;
+  statusCard.setAttribute('aria-busy', 'true');
+  statusCard.classList.add('is-updating');
 }
 
 function appendCell(tr, value, options = {}) {
@@ -83,10 +131,21 @@ function currentWeightedHoldings() {
   const windowKey = selectedWindow();
   const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
   const maxWeight = Math.max(0.01, Math.min(1, Number(document.querySelector('#max-weight-input').value || 10) / 100));
-  const rows = (run.holdings || []).filter((row) => row.date === date && row.window === windowKey);
-  const weighted = recomputeWeights(rows, topN, maxWeight);
-  const total = weighted.reduce((sum, row) => sum + row.display_weight, 0);
-  return { weighted, total, topN, maxWeight };
+  const allRows = (run.holdings || [])
+    .filter((row) => row.date === date && row.window === windowKey)
+    .map((row) => ({ ...row, actual_weight: Number(row.default_weight || 0) }));
+  const weighted = allRows
+    .slice(0, topN)
+    .map((row, index) => ({
+      ...row,
+      display_weight: row.actual_weight,
+      display_rank: index + 1,
+    }));
+  const displayedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
+  const portfolioTotal = allRows.reduce((sum, row) => sum + row.actual_weight, 0);
+  const unshownTotal = Math.max(0, portfolioTotal - displayedTotal);
+  const cashTotal = Math.max(0, 1 - portfolioTotal);
+  return { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, maxWeight };
 }
 
 function appendBarRow(target, label, valueLabel, value, maxAbs) {
@@ -118,7 +177,7 @@ function fillControls() {
   (state.data.runs || []).forEach((run, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = `${run.summary?.data_as_of || 'unknown'} · ${run.summary?.selected_factor || '-'}`;
+    option.textContent = `${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
     runSelect.appendChild(option);
   });
   runSelect.value = String(state.activeRunIndex);
@@ -160,16 +219,24 @@ function renderSummary() {
   setText('#best-factor-detail', row ? `${row.window_label} 수익률 ${formatPercent(row.best_return)}` : '-');
   setText('#selected-factor', summary.selected_factor || '-');
   setText('#selected-factor-detail', row ? `선택 팩터 순위 ${row.selected_factor_rank || '-'} · ${formatPercent(row.selected_factor_return)}` : '-');
-  setText('#recommendation-status', summary.recommendation_status || '-');
-  setText('#data-provider', `${summary.data_as_of || '-'} · ${summary.provider || '-'}`);
+  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
+  setText('#data-provider', `${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
 
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
+  statusCard.removeAttribute('aria-busy');
+  statusCard.classList.remove('is-updating');
   const strong = document.createElement('strong');
   strong.textContent = summary.data_as_of || '-';
-  statusCard.append(strong, document.createElement('br'), textValue(summary.provider || '-'), document.createElement('br'), textValue(summary.recommendation_output_label || ''));
+  statusCard.append(
+    strong,
+    document.createElement('br'),
+    textValue(humanProvider(summary.provider)),
+    document.createElement('br'),
+    textValue(humanOutputLabel(summary.recommendation_output_label)),
+  );
 
-  setText('#generated-at', `대시보드 생성: ${state.data.generated_at_utc || '-'}`);
+  setText('#generated-at', `대시보드 생성 시각: ${state.data.generated_at_utc || '-'}`);
 }
 
 function renderFactorTable() {
@@ -191,8 +258,11 @@ function renderFactorTable() {
 }
 
 function renderHoldingsTable() {
-  const { weighted, total } = currentWeightedHoldings();
-  setText('#weight-summary', `${formatPercent(total)} / 현금 ${formatPercent(Math.max(0, 1 - total))}`);
+  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal } = currentWeightedHoldings();
+  setText(
+    '#weight-summary',
+    `전체 ${formatPercent(portfolioTotal)} · 표시 ${formatPercent(displayedTotal)} · 미표시 ${formatPercent(unshownTotal)} · 현금 ${formatPercent(cashTotal)}`,
+  );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
   weighted.forEach((row) => {
@@ -205,6 +275,33 @@ function renderHoldingsTable() {
     appendCell(tr, row.score_date || row.date);
     tbody.appendChild(tr);
   });
+}
+
+function renderCurrentOutputTable() {
+  const run = currentRun();
+  const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
+  const rows = (run.latest_output_rows || []).slice(0, topN);
+  const tbody = document.querySelector('#current-output-table tbody');
+  tbody.replaceChildren();
+  rows.forEach((row, index) => {
+    const tr = document.createElement('tr');
+    appendCell(tr, row.rank || index + 1);
+    appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, formatNumber(row.score));
+    appendCell(tr, formatPercent(row.weight), { className: classForNumber(row.weight) });
+    appendCell(tr, formatPercent(row.pre_cap_weight), { className: classForNumber(row.pre_cap_weight) });
+    appendCell(tr, humanWeightingMethod(row.weighting_method));
+    appendCell(tr, row.signal_date || run.summary?.data_as_of || '-');
+    tbody.appendChild(tr);
+  });
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = '최신 추천/연구 신호 출력 행이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
 }
 
 function renderFactorReturnChart() {
@@ -286,19 +383,26 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
-  const { weighted, total, topN, maxWeight } = currentWeightedHoldings();
+  const { weighted, unshownTotal, cashTotal, topN, maxWeight } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `상위 ${topN}개 · 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
     appendEmpty('#weight-chart', '선택한 기준일과 기간에 표시할 상위 종목 데이터가 없습니다.');
     return;
   }
-  const maxWeightValue = Math.max(...weighted.map((row) => Number(row.display_weight) || 0), 0.01);
-  weighted.slice(0, 15).forEach((row) => appendBarRow(target, row.symbol, formatPercent(row.display_weight), row.display_weight, maxWeightValue));
-  const cash = Math.max(0, 1 - total);
-  if (cash > 0) {
-    appendBarRow(target, '현금/미투자', formatPercent(cash), cash, Math.max(maxWeightValue, cash));
+  const maxWeightValue = Math.max(
+    ...weighted.map((row) => Number(row.display_weight) || 0),
+    Number(unshownTotal) || 0,
+    Number(cashTotal) || 0,
+    0.01,
+  );
+  weighted.forEach((row) => appendBarRow(target, row.symbol, formatPercent(row.display_weight), row.display_weight, maxWeightValue));
+  if (unshownTotal > 0.000001) {
+    appendBarRow(target, '미표시 보유분', formatPercent(unshownTotal), unshownTotal, maxWeightValue);
+  }
+  if (cashTotal > 0.000001) {
+    appendBarRow(target, '현금/미투자', formatPercent(cashTotal), cashTotal, maxWeightValue);
   }
 }
 
@@ -324,9 +428,17 @@ function renderAll() {
   renderWindowComparisonChart();
   renderLeaderTrendChart();
   renderWeightChart();
+  renderCurrentOutputTable();
   renderFactorTable();
   renderHoldingsTable();
   renderPeriodRankingTable();
+}
+
+function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
+  setStatusMessage(message);
+  window.setTimeout(() => {
+    renderAll();
+  }, 160);
 }
 
 fetch('data/dashboard.json')
@@ -342,11 +454,11 @@ fetch('data/dashboard.json')
     document.querySelector('#run-select').addEventListener('change', (event) => {
       state.activeRunIndex = Number(event.target.value || 0);
       fillControls();
-      renderAll();
+      renderWithBusy('실행 결과를 전환하는 중입니다...');
     });
-    ['#date-select', '#window-select', '#topn-input', '#max-weight-input'].forEach((selector) => {
-      document.querySelector(selector).addEventListener('input', renderAll);
-      document.querySelector(selector).addEventListener('change', renderAll);
+    ['#date-select', '#window-select', '#topn-input'].forEach((selector) => {
+      document.querySelector(selector).addEventListener('input', () => renderWithBusy('선택값을 반영하는 중입니다...'));
+      document.querySelector(selector).addEventListener('change', () => renderWithBusy('선택값을 반영하는 중입니다...'));
     });
   })
   .catch((error) => {

@@ -12,36 +12,43 @@
   font-family: Inter, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  word-break: keep-all; overflow-wrap: anywhere;
+}
 .hero {
   display: flex; justify-content: space-between; gap: 2rem; align-items: stretch;
   padding: 3rem clamp(1rem, 4vw, 4rem); color: white;
   background: linear-gradient(135deg, #132033 0%, #2457d6 72%, #44b3ff 100%);
 }
+.hero > * { min-width: 0; }
 .hero h1 { margin: .25rem 0 1rem; font-size: clamp(2rem, 5vw, 4rem); }
 .hero-copy { max-width: 760px; line-height: 1.7; opacity: .92; }
-.eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+.eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .035em; font-size: .78rem; line-height: 1.45; }
 .hero .eyebrow { color: #c7dcff; }
 .status-card { min-width: 260px; align-self: center; border: 1px solid rgba(255,255,255,.32); border-radius: 24px; padding: 1.25rem; background: rgba(255,255,255,.14); backdrop-filter: blur(8px); line-height: 1.6; }
+.status-card.is-updating { outline: 2px solid rgba(255,255,255,.56); }
+.status-card.is-updating::after { content: " · 처리 중"; font-weight: 800; }
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
 .controls { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
 select, input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .8rem; color: var(--ink); background: #fff; font: inherit; }
+input[readonly] { background: #f8fafc; color: var(--muted); }
 .unit { position: absolute; right: .8rem; bottom: .75rem; color: var(--muted); }
 .cards { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
 .card { border-radius: 22px; padding: 1.1rem; }
 .card span { color: var(--muted); font-weight: 700; font-size: .85rem; }
-.card strong { display: block; margin: .45rem 0; font-size: 1.35rem; }
+.card strong { display: block; margin: .45rem 0; font-size: clamp(1.05rem, 2vw, 1.35rem); line-height: 1.25; overflow-wrap: anywhere; }
 .card small { color: var(--muted); line-height: 1.5; }
 .panel { border-radius: 26px; padding: 1.25rem; margin-bottom: 1.25rem; }
 .panel-heading { display: flex; justify-content: space-between; gap: 1.5rem; align-items: end; margin-bottom: 1rem; }
 .panel-heading h2, .explain h2, .disclaimer h2 { margin: 0; }
 .panel-heading p { margin: 0; color: var(--muted); max-width: 620px; line-height: 1.6; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 18px; }
-table { width: 100%; border-collapse: collapse; min-width: 760px; background: #fff; }
-th, td { text-align: left; padding: .78rem .9rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; min-width: 760px; background: #fff; table-layout: auto; }
+th, td { text-align: left; padding: .78rem .9rem; border-bottom: 1px solid var(--line); white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
 th { background: #f8fafc; color: #475569; font-size: .8rem; }
 td { font-size: .92rem; }
 tbody tr:hover { background: #f8fbff; }
@@ -62,19 +69,19 @@ tbody tr:hover { background: #f8fbff; }
 .viz-card.wide { grid-column: 1 / -1; }
 .viz-card-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: .9rem; }
 .viz-card h3 { margin: 0; font-size: 1.05rem; }
-.chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; white-space: nowrap; }
+.chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; }
 .bar-chart { display: grid; gap: .62rem; }
-.bar-row { display: grid; grid-template-columns: minmax(120px, .9fr) minmax(180px, 2fr) 88px; gap: .75rem; align-items: center; }
-.bar-label { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; }
+.bar-label { font-weight: 800; overflow-wrap: anywhere; line-height: 1.35; }
 .bar-track { height: 12px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
 .bar-fill { height: 100%; width: var(--bar-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--accent), #44b3ff); }
 .bar-fill.negative { background: linear-gradient(90deg, #f03e3e, #ff8787); }
 .bar-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 800; }
-.compact-bars .bar-row { grid-template-columns: minmax(72px, .55fr) minmax(140px, 1.6fr) 76px; }
+.compact-bars .bar-row { grid-template-columns: minmax(0, .55fr) minmax(120px, 1.6fr) 76px; }
 .window-chart { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
 .window-chip { border: 1px solid var(--line); border-radius: 18px; padding: .85rem; background: #fff; }
 .window-chip span { display: block; color: var(--muted); font-size: .78rem; font-weight: 800; }
-.window-chip strong { display: block; margin: .35rem 0; font-size: 1.05rem; }
+.window-chip strong { display: block; margin: .35rem 0; font-size: 1.05rem; overflow-wrap: anywhere; }
 .window-chip small { color: var(--muted); line-height: 1.45; }
 .trend-chart { min-height: 220px; }
 .trend-bars { display: flex; gap: .35rem; align-items: end; height: 180px; padding: .75rem .35rem .25rem; border: 1px solid var(--line); border-radius: 18px; background: #fff; overflow-x: auto; }

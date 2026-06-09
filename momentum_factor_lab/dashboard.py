@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from .portfolio import balanced_weights
-
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .workflow import RunResult
 
@@ -58,7 +56,7 @@ HTML_TEMPLATE = """<!doctype html>
   <main>
     <section class="notice">
       <strong>중요:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
-      다음 자동 실행 설정을 저장하지 않습니다. 매일 실행 input은 저장소의
+      다음 자동 실행 설정을 저장하지 않습니다. 매일 실행 입력값은 저장소의
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
     </section>
 
@@ -72,11 +70,11 @@ HTML_TEMPLATE = """<!doctype html>
       <label>최근 기간
         <select id="window-select"></select>
       </label>
-      <label>상위 N개 종목 수
+      <label>상위 N개 표시
         <input id="topn-input" type="number" min="1" max="50" value="20" />
       </label>
-      <label>종목당 최대 비중
-        <input id="max-weight-input" type="number" min="1" max="100" step="1" value="10" />
+      <label>실행 시 종목당 최대 비중
+        <input id="max-weight-input" type="number" min="1" max="100" step="1" value="10" readonly />
         <span class="unit">%</span>
       </label>
     </section>
@@ -98,9 +96,9 @@ HTML_TEMPLATE = """<!doctype html>
         <small id="data-provider">-</small>
       </article>
       <article class="card">
-        <span>표시용 총 비중</span>
+        <span>산출 비중 합계</span>
         <strong id="weight-summary">-</strong>
-        <small>잔여 비중은 현금/미투자 영역으로 표시합니다.</small>
+        <small>기존 분석 코드가 산출한 비중을 그대로 합산합니다.</small>
       </article>
     </section>
 
@@ -112,7 +110,7 @@ HTML_TEMPLATE = """<!doctype html>
         </div>
         <p>
           위 입력값을 바꾸면 아래 차트가 즉시 갱신됩니다. 표보다 먼저 팩터별 상대 강도와
-          상위 종목 비중을 빠르게 파악하도록 구성했습니다.
+          상위 종목의 실제 산출 비중을 빠르게 파악하도록 구성했습니다.
         </p>
       </div>
       <div class="viz-grid">
@@ -160,6 +158,35 @@ HTML_TEMPLATE = """<!doctype html>
     <section class="panel">
       <div class="panel-heading">
         <div>
+          <p class="eyebrow">최신 출력</p>
+          <h2>기존 결과물 기준 최신 추천/연구 신호</h2>
+        </div>
+        <p>
+          엑셀·PDF에 포함되던 최신 추천 또는 연구 신호 행을 웹에서 바로 확인합니다.
+          최종 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
+        </p>
+      </div>
+      <div class="table-wrap">
+        <table id="current-output-table">
+          <thead>
+            <tr>
+              <th>순위</th>
+              <th>종목</th>
+              <th>모멘텀 신호</th>
+              <th>최종 비중</th>
+              <th>사전 산출 비중</th>
+              <th>비중 산출 방식</th>
+              <th>신호일</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
           <p class="eyebrow">기간별 팩터 비교</p>
           <h2>최근 기간별 최고 모멘텀 팩터</h2>
         </div>
@@ -186,9 +213,9 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="panel-heading">
         <div>
           <p class="eyebrow">상위 N개 종목 비교</p>
-          <h2>일별 상위 종목 · 모멘텀 신호 · 표시용 투자 비중</h2>
+          <h2>일별 상위 종목 · 모멘텀 신호 · 산출 비중</h2>
         </div>
-        <p>비중은 선택한 상위 N개 종목 수와 종목당 최대 비중으로 브라우저에서 동일가중 상한 방식으로 다시 계산합니다.</p>
+        <p>비중은 브라우저에서 다시 계산하지 않고, 백테스트/출력 코드가 저장한 일별 보유 비중을 그대로 표시합니다.</p>
       </div>
       <div class="table-wrap">
         <table id="holdings-table">
@@ -197,7 +224,7 @@ HTML_TEMPLATE = """<!doctype html>
               <th>순위</th>
               <th>종목</th>
               <th>모멘텀 신호</th>
-              <th>표시용 비중</th>
+              <th>산출 비중</th>
               <th>팩터</th>
               <th>신호일</th>
             </tr>
@@ -224,7 +251,8 @@ HTML_TEMPLATE = """<!doctype html>
         <ul>
           <li><strong>최고 팩터</strong>는 선택 기간의 누적 전략 수익률이 가장 높은 팩터입니다.</li>
           <li><strong>모멘텀 신호</strong>는 해당 팩터가 계산한 종목별 점수이며, 높을수록 상위 후보입니다.</li>
-          <li><strong>표시용 비중</strong>은 투자 조언이 아니라 비교를 돕기 위한 모델 비중입니다.</li>
+          <li><strong>산출 비중</strong>은 기존 분석 코드가 만든 일별 보유 비중이며, 투자 조언이 아닙니다.</li>
+          <li>일별 보유 비중은 가격 변동 후 비중이므로 실행 시 목표 최대 비중과 조금 다를 수 있습니다.</li>
           <li>데이터 품질, 유동성, 생존편향, 무료 데이터 한계는 기존 리포트와 동일하게 적용됩니다.</li>
         </ul>
       </div>
@@ -263,36 +291,43 @@ CSS_CONTENT = """:root {
   font-family: Inter, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink); }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  word-break: keep-all; overflow-wrap: anywhere;
+}
 .hero {
   display: flex; justify-content: space-between; gap: 2rem; align-items: stretch;
   padding: 3rem clamp(1rem, 4vw, 4rem); color: white;
   background: linear-gradient(135deg, #132033 0%, #2457d6 72%, #44b3ff 100%);
 }
+.hero > * { min-width: 0; }
 .hero h1 { margin: .25rem 0 1rem; font-size: clamp(2rem, 5vw, 4rem); }
 .hero-copy { max-width: 760px; line-height: 1.7; opacity: .92; }
-.eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; font-size: .78rem; }
+.eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .035em; font-size: .78rem; line-height: 1.45; }
 .hero .eyebrow { color: #c7dcff; }
 .status-card { min-width: 260px; align-self: center; border: 1px solid rgba(255,255,255,.32); border-radius: 24px; padding: 1.25rem; background: rgba(255,255,255,.14); backdrop-filter: blur(8px); line-height: 1.6; }
+.status-card.is-updating { outline: 2px solid rgba(255,255,255,.56); }
+.status-card.is-updating::after { content: " · 처리 중"; font-weight: 800; }
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
 .controls { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
 select, input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .8rem; color: var(--ink); background: #fff; font: inherit; }
+input[readonly] { background: #f8fafc; color: var(--muted); }
 .unit { position: absolute; right: .8rem; bottom: .75rem; color: var(--muted); }
 .cards { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
 .card { border-radius: 22px; padding: 1.1rem; }
 .card span { color: var(--muted); font-weight: 700; font-size: .85rem; }
-.card strong { display: block; margin: .45rem 0; font-size: 1.35rem; }
+.card strong { display: block; margin: .45rem 0; font-size: clamp(1.05rem, 2vw, 1.35rem); line-height: 1.25; overflow-wrap: anywhere; }
 .card small { color: var(--muted); line-height: 1.5; }
 .panel { border-radius: 26px; padding: 1.25rem; margin-bottom: 1.25rem; }
 .panel-heading { display: flex; justify-content: space-between; gap: 1.5rem; align-items: end; margin-bottom: 1rem; }
 .panel-heading h2, .explain h2, .disclaimer h2 { margin: 0; }
 .panel-heading p { margin: 0; color: var(--muted); max-width: 620px; line-height: 1.6; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 18px; }
-table { width: 100%; border-collapse: collapse; min-width: 760px; background: #fff; }
-th, td { text-align: left; padding: .78rem .9rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; min-width: 760px; background: #fff; table-layout: auto; }
+th, td { text-align: left; padding: .78rem .9rem; border-bottom: 1px solid var(--line); white-space: normal; overflow-wrap: anywhere; vertical-align: top; }
 th { background: #f8fafc; color: #475569; font-size: .8rem; }
 td { font-size: .92rem; }
 tbody tr:hover { background: #f8fbff; }
@@ -313,19 +348,19 @@ tbody tr:hover { background: #f8fbff; }
 .viz-card.wide { grid-column: 1 / -1; }
 .viz-card-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: .9rem; }
 .viz-card h3 { margin: 0; font-size: 1.05rem; }
-.chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; white-space: nowrap; }
+.chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; }
 .bar-chart { display: grid; gap: .62rem; }
-.bar-row { display: grid; grid-template-columns: minmax(120px, .9fr) minmax(180px, 2fr) 88px; gap: .75rem; align-items: center; }
-.bar-label { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; }
+.bar-label { font-weight: 800; overflow-wrap: anywhere; line-height: 1.35; }
 .bar-track { height: 12px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
 .bar-fill { height: 100%; width: var(--bar-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--accent), #44b3ff); }
 .bar-fill.negative { background: linear-gradient(90deg, #f03e3e, #ff8787); }
 .bar-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 800; }
-.compact-bars .bar-row { grid-template-columns: minmax(72px, .55fr) minmax(140px, 1.6fr) 76px; }
+.compact-bars .bar-row { grid-template-columns: minmax(0, .55fr) minmax(120px, 1.6fr) 76px; }
 .window-chart { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
 .window-chip { border: 1px solid var(--line); border-radius: 18px; padding: .85rem; background: #fff; }
 .window-chip span { display: block; color: var(--muted); font-size: .78rem; font-weight: 800; }
-.window-chip strong { display: block; margin: .35rem 0; font-size: 1.05rem; }
+.window-chip strong { display: block; margin: .35rem 0; font-size: 1.05rem; overflow-wrap: anywhere; }
 .window-chip small { color: var(--muted); line-height: 1.45; }
 .trend-chart { min-height: 220px; }
 .trend-bars { display: flex; gap: .35rem; align-items: end; height: 180px; padding: .75rem .35rem .25rem; border: 1px solid var(--line); border-radius: 18px; background: #fff; overflow-x: auto; }
@@ -363,6 +398,53 @@ const formatNumber = (value) => {
 const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
 const textValue = (value) => value === null || value === undefined ? '-' : String(value);
 
+function humanProvider(value) {
+  const text = textValue(value);
+  const labels = {
+    'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'offline-sample': '오프라인 샘플 데이터',
+    'offline_sample': '오프라인 샘플 데이터',
+  };
+  return labels[text] || text;
+}
+
+function humanOutputLabel(value) {
+  const text = textValue(value);
+  const labels = {
+    'Research signals (not tradable)': '연구용 신호(매매 권고 아님)',
+    'Practical recommendations': '실행 가능성 검토를 통과한 추천 후보',
+    'No current recommendation': '현재 추천 후보 없음',
+  };
+  return labels[text] || text;
+}
+
+function humanStatus(status, outputLabel) {
+  const text = textValue(status);
+  if (text === '-') return humanOutputLabel(outputLabel);
+  if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
+    return '현재 데이터 사용 · 연구용 신호 · 매매 권고 아님';
+  }
+  if (text.includes('pass')) {
+    return '현재 데이터 사용 · 품질 점검 통과';
+  }
+  if (text.includes('stale')) {
+    return '데이터가 최신이 아닐 수 있음';
+  }
+  if (text.includes('fail') || text.includes('blocked')) {
+    return '제한 조건 때문에 추천 보류';
+  }
+  return text;
+}
+
+function humanWeightingMethod(value) {
+  const text = textValue(value);
+  const labels = {
+    equal: '동일 비중',
+    score_size_liquidity: '점수·규모·유동성 기반',
+  };
+  return labels[text] || text;
+}
+
 function currentRun() {
   const runs = state.data?.runs || [];
   return runs[state.activeRunIndex] || runs[state.data?.latest_run_index || 0] || state.data?.latest || {};
@@ -381,15 +463,16 @@ function selectedWindow() {
   return document.querySelector('#window-select').value;
 }
 
-function recomputeWeights(rows, topN, maxWeight) {
-  const selected = rows.slice(0, topN);
-  if (!selected.length) return [];
-  const base = Math.min(1 / selected.length, maxWeight);
-  return selected.map((row, index) => ({ ...row, display_weight: base, display_rank: index + 1 }));
-}
-
 function setText(selector, value) {
   document.querySelector(selector).textContent = textValue(value);
+}
+
+function setStatusMessage(message) {
+  const statusCard = document.querySelector('#run-status');
+  statusCard.replaceChildren();
+  statusCard.textContent = message;
+  statusCard.setAttribute('aria-busy', 'true');
+  statusCard.classList.add('is-updating');
 }
 
 function appendCell(tr, value, options = {}) {
@@ -430,10 +513,21 @@ function currentWeightedHoldings() {
   const windowKey = selectedWindow();
   const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
   const maxWeight = Math.max(0.01, Math.min(1, Number(document.querySelector('#max-weight-input').value || 10) / 100));
-  const rows = (run.holdings || []).filter((row) => row.date === date && row.window === windowKey);
-  const weighted = recomputeWeights(rows, topN, maxWeight);
-  const total = weighted.reduce((sum, row) => sum + row.display_weight, 0);
-  return { weighted, total, topN, maxWeight };
+  const allRows = (run.holdings || [])
+    .filter((row) => row.date === date && row.window === windowKey)
+    .map((row) => ({ ...row, actual_weight: Number(row.default_weight || 0) }));
+  const weighted = allRows
+    .slice(0, topN)
+    .map((row, index) => ({
+      ...row,
+      display_weight: row.actual_weight,
+      display_rank: index + 1,
+    }));
+  const displayedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
+  const portfolioTotal = allRows.reduce((sum, row) => sum + row.actual_weight, 0);
+  const unshownTotal = Math.max(0, portfolioTotal - displayedTotal);
+  const cashTotal = Math.max(0, 1 - portfolioTotal);
+  return { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, maxWeight };
 }
 
 function appendBarRow(target, label, valueLabel, value, maxAbs) {
@@ -465,7 +559,7 @@ function fillControls() {
   (state.data.runs || []).forEach((run, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = `${run.summary?.data_as_of || 'unknown'} · ${run.summary?.selected_factor || '-'}`;
+    option.textContent = `${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
     runSelect.appendChild(option);
   });
   runSelect.value = String(state.activeRunIndex);
@@ -507,16 +601,24 @@ function renderSummary() {
   setText('#best-factor-detail', row ? `${row.window_label} 수익률 ${formatPercent(row.best_return)}` : '-');
   setText('#selected-factor', summary.selected_factor || '-');
   setText('#selected-factor-detail', row ? `선택 팩터 순위 ${row.selected_factor_rank || '-'} · ${formatPercent(row.selected_factor_return)}` : '-');
-  setText('#recommendation-status', summary.recommendation_status || '-');
-  setText('#data-provider', `${summary.data_as_of || '-'} · ${summary.provider || '-'}`);
+  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
+  setText('#data-provider', `${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
 
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
+  statusCard.removeAttribute('aria-busy');
+  statusCard.classList.remove('is-updating');
   const strong = document.createElement('strong');
   strong.textContent = summary.data_as_of || '-';
-  statusCard.append(strong, document.createElement('br'), textValue(summary.provider || '-'), document.createElement('br'), textValue(summary.recommendation_output_label || ''));
+  statusCard.append(
+    strong,
+    document.createElement('br'),
+    textValue(humanProvider(summary.provider)),
+    document.createElement('br'),
+    textValue(humanOutputLabel(summary.recommendation_output_label)),
+  );
 
-  setText('#generated-at', `대시보드 생성: ${state.data.generated_at_utc || '-'}`);
+  setText('#generated-at', `대시보드 생성 시각: ${state.data.generated_at_utc || '-'}`);
 }
 
 function renderFactorTable() {
@@ -538,8 +640,11 @@ function renderFactorTable() {
 }
 
 function renderHoldingsTable() {
-  const { weighted, total } = currentWeightedHoldings();
-  setText('#weight-summary', `${formatPercent(total)} / 현금 ${formatPercent(Math.max(0, 1 - total))}`);
+  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal } = currentWeightedHoldings();
+  setText(
+    '#weight-summary',
+    `전체 ${formatPercent(portfolioTotal)} · 표시 ${formatPercent(displayedTotal)} · 미표시 ${formatPercent(unshownTotal)} · 현금 ${formatPercent(cashTotal)}`,
+  );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
   weighted.forEach((row) => {
@@ -552,6 +657,33 @@ function renderHoldingsTable() {
     appendCell(tr, row.score_date || row.date);
     tbody.appendChild(tr);
   });
+}
+
+function renderCurrentOutputTable() {
+  const run = currentRun();
+  const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
+  const rows = (run.latest_output_rows || []).slice(0, topN);
+  const tbody = document.querySelector('#current-output-table tbody');
+  tbody.replaceChildren();
+  rows.forEach((row, index) => {
+    const tr = document.createElement('tr');
+    appendCell(tr, row.rank || index + 1);
+    appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, formatNumber(row.score));
+    appendCell(tr, formatPercent(row.weight), { className: classForNumber(row.weight) });
+    appendCell(tr, formatPercent(row.pre_cap_weight), { className: classForNumber(row.pre_cap_weight) });
+    appendCell(tr, humanWeightingMethod(row.weighting_method));
+    appendCell(tr, row.signal_date || run.summary?.data_as_of || '-');
+    tbody.appendChild(tr);
+  });
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = '최신 추천/연구 신호 출력 행이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
 }
 
 function renderFactorReturnChart() {
@@ -633,19 +765,26 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
-  const { weighted, total, topN, maxWeight } = currentWeightedHoldings();
+  const { weighted, unshownTotal, cashTotal, topN, maxWeight } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `상위 ${topN}개 · 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
     appendEmpty('#weight-chart', '선택한 기준일과 기간에 표시할 상위 종목 데이터가 없습니다.');
     return;
   }
-  const maxWeightValue = Math.max(...weighted.map((row) => Number(row.display_weight) || 0), 0.01);
-  weighted.slice(0, 15).forEach((row) => appendBarRow(target, row.symbol, formatPercent(row.display_weight), row.display_weight, maxWeightValue));
-  const cash = Math.max(0, 1 - total);
-  if (cash > 0) {
-    appendBarRow(target, '현금/미투자', formatPercent(cash), cash, Math.max(maxWeightValue, cash));
+  const maxWeightValue = Math.max(
+    ...weighted.map((row) => Number(row.display_weight) || 0),
+    Number(unshownTotal) || 0,
+    Number(cashTotal) || 0,
+    0.01,
+  );
+  weighted.forEach((row) => appendBarRow(target, row.symbol, formatPercent(row.display_weight), row.display_weight, maxWeightValue));
+  if (unshownTotal > 0.000001) {
+    appendBarRow(target, '미표시 보유분', formatPercent(unshownTotal), unshownTotal, maxWeightValue);
+  }
+  if (cashTotal > 0.000001) {
+    appendBarRow(target, '현금/미투자', formatPercent(cashTotal), cashTotal, maxWeightValue);
   }
 }
 
@@ -671,9 +810,17 @@ function renderAll() {
   renderWindowComparisonChart();
   renderLeaderTrendChart();
   renderWeightChart();
+  renderCurrentOutputTable();
   renderFactorTable();
   renderHoldingsTable();
   renderPeriodRankingTable();
+}
+
+function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
+  setStatusMessage(message);
+  window.setTimeout(() => {
+    renderAll();
+  }, 160);
 }
 
 fetch('data/dashboard.json')
@@ -689,11 +836,11 @@ fetch('data/dashboard.json')
     document.querySelector('#run-select').addEventListener('change', (event) => {
       state.activeRunIndex = Number(event.target.value || 0);
       fillControls();
-      renderAll();
+      renderWithBusy('실행 결과를 전환하는 중입니다...');
     });
-    ['#date-select', '#window-select', '#topn-input', '#max-weight-input'].forEach((selector) => {
-      document.querySelector(selector).addEventListener('input', renderAll);
-      document.querySelector(selector).addEventListener('change', renderAll);
+    ['#date-select', '#window-select', '#topn-input'].forEach((selector) => {
+      document.querySelector(selector).addEventListener('input', () => renderWithBusy('선택값을 반영하는 중입니다...'));
+      document.querySelector(selector).addEventListener('change', () => renderWithBusy('선택값을 반영하는 중입니다...'));
     });
   })
   .catch((error) => {
@@ -745,7 +892,7 @@ def build_dashboard_payload(
             "latest_output_rows": latest_recommendations,
             "notes_ko": [
                 "웹사이트 입력값은 브라우저 표시용이며 다음 자동 실행 설정을 저장하지 않습니다.",
-                "자동 실행 input은 .github/momentum-dashboard-config.json에서 관리합니다.",
+                "자동 실행 입력값은 .github/momentum-dashboard-config.json에서 관리합니다.",
                 "모든 결과는 연구/의사결정 보조용이며 투자 조언이 아닙니다.",
             ],
         }
@@ -922,21 +1069,27 @@ def _holding_rows(
         factor = leader["best_factor"]
         scores = result.factor_scores.get(factor)
         score_index = score_indexes.get(factor)
+        backtest = result.backtests.get(factor)
+        weight_frame = backtest.weights if backtest is not None else pd.DataFrame()
+        weight_index = pd.DatetimeIndex(weight_frame.index) if not weight_frame.empty else pd.DatetimeIndex([])
         if scores is None or scores.empty or score_index is None or score_index.empty:
             continue
         requested_date = pd.Timestamp(leader["date"])
-        score_date = _nearest_score_date(score_index, requested_date)
+        weight_date = _nearest_score_date(weight_index, requested_date) if len(weight_index) else None
+        weights = weight_frame.loc[weight_date] if weight_date is not None else pd.Series(dtype=float)
+        active_weights = weights.dropna()
+        active_weights = active_weights[active_weights.abs() > 1e-12].sort_values(ascending=False)
+        if active_weights.empty:
+            continue
+        score_date = _active_signal_date(backtest, weight_date, score_index)
         if score_date is None:
             continue
-        row_scores = scores.loc[score_date].dropna().sort_values(ascending=False)
-        if row_scores.empty:
+        row_scores = scores.loc[score_date].dropna()
+        active_symbols = [symbol for symbol in active_weights.index if symbol in row_scores.index]
+        active_scores = row_scores.reindex(active_symbols).dropna().sort_values(ascending=False)
+        if active_scores.empty:
             continue
-        weights = balanced_weights(
-            row_scores,
-            top_n=min(max_holdings_per_period, result.config.top_n),
-            max_weight=result.config.max_weight,
-        )
-        for rank, (symbol, score) in enumerate(row_scores.head(max_holdings_per_period).items(), start=1):
+        for rank, (symbol, score) in enumerate(active_scores.head(max_holdings_per_period).items(), start=1):
             rows.append(
                 {
                     "date": leader["date"],
@@ -947,7 +1100,9 @@ def _holding_rows(
                     "rank": rank,
                     "symbol": str(symbol),
                     "score": float(score),
-                    "default_weight": _float_or_none(weights.get(symbol, 0.0)),
+                    "default_weight": _float_or_none(active_weights.get(symbol, 0.0)),
+                    "weight_date": _date_str(weight_date) if weight_date is not None else None,
+                    "weight_source": "백테스트 일별 보유 비중",
                 }
             )
     return rows
@@ -958,6 +1113,20 @@ def _nearest_score_date(index: pd.DatetimeIndex, requested_date: pd.Timestamp) -
     if positions < 0:
         return None
     return pd.Timestamp(index[int(positions)])
+
+
+def _active_signal_date(backtest: Any, weight_date: pd.Timestamp | None, score_index: pd.DatetimeIndex) -> pd.Timestamp | None:
+    if weight_date is None:
+        return None
+    signal_dates = getattr(backtest, "signal_dates", pd.Series(dtype="datetime64[ns]"))
+    if isinstance(signal_dates, pd.Series) and not signal_dates.empty:
+        rebalance_index = pd.DatetimeIndex(signal_dates.index)
+        # Weights become effective on the trading day after a rebalance date, so
+        # use the latest rebalance strictly before the displayed weight date.
+        position = rebalance_index.searchsorted(weight_date, side="left") - 1
+        if position >= 0:
+            return pd.Timestamp(signal_dates.iloc[int(position)])
+    return _nearest_score_date(score_index, weight_date)
 
 
 def _payload_from_run_json(path: Path) -> dict[str, Any]:
