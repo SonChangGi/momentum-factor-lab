@@ -75,30 +75,6 @@ HTML_TEMPLATE = """<!doctype html>
       08:47·09:17 보강 실행은 당일 08:00 이후 이미 실행된 경우 자동으로 건너뜁니다.
     </section>
 
-    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
-      <div>
-        <p class="eyebrow">수동 업데이트</p>
-        <h2>오늘 기준 최신 데이터로 다시 실행</h2>
-        <p>
-          버튼을 누르면 이 저장소의 GitHub Actions 수동 실행 화면이 열립니다.
-          저장소 쓰기 권한이 있는 GitHub 계정으로 로그인 후 <strong>Run workflow</strong>를 누르면
-          <code>workflow_dispatch</code>가 실행되어 최신 무료 가격 데이터 수집, 팩터 백테스트,
-          종목/비중 산출, <code>docs/data/dashboard.json</code> 갱신, GitHub Pages 배포까지
-          같은 파이프라인으로 진행됩니다.
-        </p>
-        <p class="manual-update-note">
-          보안상 공개 정적 페이지에는 GitHub 토큰을 저장하지 않습니다. 따라서 브라우저 버튼은
-          인증된 GitHub 실행 화면으로 안전하게 연결하며, 자동 예약 실행은 기존대로 유지됩니다.
-        </p>
-      </div>
-      <div class="manual-update-actions">
-        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
-        <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
-        <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
-        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
-      </div>
-    </section>
-
     <section class="controls" aria-label="대시보드 입력값">
       <label>실행 결과
         <select id="run-select"></select>
@@ -429,26 +405,6 @@ body {
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
-.manual-update {
-  display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); gap: 1rem; align-items: center;
-  padding: 1.25rem; border-radius: 22px; margin-bottom: 1.25rem;
-  background: linear-gradient(135deg, #ffffff 0%, #eef5ff 100%); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06);
-}
-.manual-update h2 { margin: 0 0 .65rem; }
-.manual-update p { margin: 0; color: #334155; line-height: 1.7; }
-.manual-update p + p { margin-top: .55rem; }
-.manual-update-note { font-size: .92rem; color: var(--muted); }
-.manual-update-actions { display: grid; gap: .65rem; justify-items: stretch; }
-.button {
-  display: inline-flex; justify-content: center; align-items: center; min-height: 2.75rem;
-  border-radius: 14px; border: 1px solid transparent; padding: .7rem 1rem; font: inherit; font-weight: 900; cursor: pointer; text-decoration: none;
-}
-.button.primary { color: #fff; background: var(--accent); box-shadow: 0 12px 22px rgba(36, 87, 214, .24); }
-.button.primary:hover { background: #1d4ed8; }
-.button.secondary { color: var(--accent); background: #fff; border-color: #bfd0ff; }
-.button.secondary:hover { background: #f8fbff; }
-.code-pill { display: block; padding: .75rem .85rem; border-radius: 14px; background: #132033; color: #e8efff; font-size: .82rem; line-height: 1.45; overflow-wrap: anywhere; }
-#manual-update-status { color: var(--muted); line-height: 1.5; }
 .noscript-warning { margin: 1rem clamp(1rem, 4vw, 4rem); padding: 1rem 1.25rem; border-radius: 18px; background: #fff4e6; color: #8a4b00; border: 1px solid #ffd8a8; font-weight: 800; line-height: 1.6; }
 .controls { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
@@ -538,7 +494,7 @@ tbody tr:hover { background: #f8fbff; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
 @media (max-width: 980px) {
   .hero, .panel-heading, footer { flex-direction: column; }
-  .controls, .manual-update, .cards, .two-col, .viz-grid, .window-chart, .diagnostic-grid, .diagnostic-grid.three { grid-template-columns: 1fr; }
+  .controls, .cards, .two-col, .viz-grid, .window-chart, .diagnostic-grid, .diagnostic-grid.three { grid-template-columns: 1fr; }
   .bar-row, .compact-bars .bar-row { grid-template-columns: 1fr; gap: .35rem; }
   .bar-value { text-align: left; }
   .status-card { width: 100%; }
@@ -546,48 +502,10 @@ footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--
 """
 
 
-JS_CONTENT = """const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
-const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
-
-const state = {
+JS_CONTENT = """const state = {
   data: null,
   activeRunIndex: 0,
 };
-
-function bindManualUpdateControls() {
-  const button = document.querySelector('#manual-update-button');
-  if (button) {
-    button.setAttribute('href', MANUAL_UPDATE_WORKFLOW_URL);
-    button.setAttribute('target', '_blank');
-    button.setAttribute('rel', 'noopener');
-    if (typeof button.addEventListener === 'function') {
-      button.addEventListener('click', () => {
-        const status = document.querySelector('#manual-update-status');
-        if (status) {
-          status.textContent = '저장소 쓰기 권한이 있는 GitHub 계정으로 Run workflow를 눌러 최신 데이터 재실행을 시작하세요.';
-        }
-      });
-    }
-  }
-
-  const command = document.querySelector('#manual-update-command');
-  if (command) command.textContent = MANUAL_UPDATE_COMMAND;
-
-  const copyButton = document.querySelector('#copy-update-command');
-  if (!copyButton || typeof copyButton.addEventListener !== 'function') return;
-  copyButton.addEventListener('click', async () => {
-    const status = document.querySelector('#manual-update-status');
-    try {
-      if (typeof navigator === 'undefined' || !navigator.clipboard || !window.isSecureContext) {
-        throw new Error('clipboard unavailable');
-      }
-      await navigator.clipboard.writeText(MANUAL_UPDATE_COMMAND);
-      if (status) status.textContent = 'CLI 실행 명령을 복사했습니다. 터미널에서 붙여넣어 수동 실행할 수 있습니다.';
-    } catch (_) {
-      if (status) status.textContent = `복사가 제한되었습니다. 아래 명령을 직접 복사하세요: ${MANUAL_UPDATE_COMMAND}`;
-    }
-  });
-}
 
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -1650,8 +1568,6 @@ function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
   }, 160);
 }
 
-bindManualUpdateControls();
-
 fetch('data/dashboard.json')
   .then((response) => response.json())
   .then((payload) => {
@@ -1756,7 +1672,6 @@ def build_dashboard_payload(
             "factor_diagnostics": _factor_diagnostics_payload(result),
             "notes_ko": [
                 "웹사이트 입력값은 브라우저 표시용이며 다음 자동 실행 설정을 저장하지 않습니다.",
-                "수동 업데이트 버튼은 공개 정적 페이지에 토큰을 저장하지 않고 GitHub Actions workflow_dispatch 화면으로 연결합니다.",
                 "자동 실행 입력값은 .github/momentum-dashboard-config.json에서 관리합니다.",
                 "모든 결과는 연구/의사결정 보조용이며 투자 조언이 아닙니다.",
             ],
