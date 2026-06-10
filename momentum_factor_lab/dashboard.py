@@ -237,6 +237,7 @@ HTML_TEMPLATE = """<!doctype html>
             <span id="backtest-chart-meta" class="chart-meta">-</span>
           </div>
           <div id="backtest-chart" class="line-chart" aria-live="polite"></div>
+          <div id="performance-metrics-table" class="performance-metrics" aria-live="polite"></div>
         </article>
         <article class="viz-card">
           <div class="viz-card-heading">
@@ -541,6 +542,21 @@ tbody tr:hover { background: #f8fbff; }
 .legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .35rem; vertical-align: -.05rem; background: var(--accent); }
 .legend-dot.best { background: var(--good); }
 .legend-dot.benchmark { background: #7c3aed; }
+.performance-metrics { margin-top: 1rem; display: grid; gap: .7rem; }
+.performance-metrics-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: end; flex-wrap: wrap; }
+.performance-metrics-heading h4 { margin: 0; font-size: 1rem; }
+.performance-metrics-heading p { margin: .25rem 0 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
+.performance-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
+.performance-table { min-width: 880px; }
+.performance-table th, .performance-table td { white-space: nowrap; }
+.performance-table th:first-child, .performance-table td:first-child { position: sticky; left: 0; background: #fff; z-index: 1; min-width: 220px; }
+.performance-table thead th:first-child { background: #f8fafc; z-index: 2; }
+.metric-cell { display: grid; gap: .2rem; }
+.metric-name { font-weight: 900; color: #0f172a; }
+.series-name { color: var(--muted); font-size: .78rem; font-weight: 800; }
+.series-name.selected { color: var(--accent); }
+.series-name.best { color: var(--good); }
+.series-name.benchmark { color: #7c3aed; }
 .scenario-note { margin-top: .75rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .75rem; line-height: 1.55; font-size: .9rem; }
 .empty-state { color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; padding: 1rem; background: #fff; line-height: 1.6; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
@@ -964,6 +980,12 @@ function appendStatusLine(target, label, value) {
   valueNode.textContent = textValue(value);
   row.append(labelNode, valueNode);
   target.appendChild(row);
+}
+
+function appendHeader(tr, value) {
+  const th = document.createElement('th');
+  th.textContent = textValue(value);
+  tr.appendChild(th);
 }
 
 function appendCell(tr, value, options = {}) {
@@ -1510,7 +1532,7 @@ function benchmarkBacktestSeries(run) {
   return series;
 }
 
-function seriesPointsThroughDate(series, date, limit = 120) {
+function seriesPointsThroughDate(series, date, limit = 260) {
   if (!series || !Array.isArray(series.dates)) return [];
   const points = series.dates.map((pointDate, index) => ({
     date: pointDate,
@@ -1534,6 +1556,196 @@ function formatAxisDate(value) {
   return String(value);
 }
 
+function formatChartAxisDate(value, mode = 'month') {
+  if (!value) return '-';
+  const parts = String(value).split('-').map((part) => Number(part));
+  if (parts.length < 3 || parts.some((part) => !Number.isFinite(part))) return formatAxisDate(value);
+  const [year, month, day] = parts;
+  if (mode === 'quarter') return `${String(year).slice(2)}년 ${Math.floor((month - 1) / 3) + 1}분기`;
+  if (mode === 'week') return `${month}/${day}`;
+  return `${String(year).slice(2)}.${String(month).padStart(2, '0')}`;
+}
+
+function parseDateString(value) {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function daysBetween(start, end) {
+  const startDate = parseDateString(start);
+  const endDate = parseDateString(end);
+  if (!startDate || !endDate) return 0;
+  return Math.max(0, Math.round((endDate - startDate) / 86400000));
+}
+
+function dateTickKey(year, month, day, mode) {
+  if (mode === 'week') return `${year}-${String(month).padStart(2, '0')}-W${Math.ceil(day / 7)}`;
+  if (mode === 'quarter') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function dateTickMarks(dates) {
+  if (!dates.length) return [];
+  const spanDays = daysBetween(dates[0], dates.at(-1));
+  const mode = spanDays <= 70 ? 'week' : (spanDays <= 420 ? 'month' : 'quarter');
+  const ticks = [];
+  let previousKey = '';
+  dates.forEach((date, index) => {
+    const parts = String(date).split('-').map((part) => Number(part));
+    if (parts.length < 3 || parts.some((part) => !Number.isFinite(part))) return;
+    const [year, month, day] = parts;
+    const key = dateTickKey(year, month, day, mode);
+    if (index === 0 || index === dates.length - 1 || key !== previousKey) {
+      if (mode !== 'quarter' || index === 0 || index === dates.length - 1 || [1, 4, 7, 10].includes(month)) {
+        ticks.push({ index, date, label: formatChartAxisDate(date, mode) });
+      }
+    }
+    previousKey = key;
+  });
+  const maxTicks = 12;
+  if (ticks.length <= maxTicks) return ticks;
+  const stride = Math.ceil((ticks.length - 2) / (maxTicks - 2));
+  return ticks.filter((tick, index) => index === 0 || index === ticks.length - 1 || index % stride === 0);
+}
+
+function formatPercentTick(value) {
+  if (!Number.isFinite(Number(value))) return '-';
+  const percent = Number(value) * 100;
+  const decimals = Math.abs(percent) < 10 && Math.abs(percent % 1) > 0.001 ? 1 : 0;
+  return `${percent.toFixed(decimals)}%`;
+}
+
+function niceReturnTicks(minReturn, maxReturn) {
+  let lower = Math.min(Number(minReturn) || 0, 0);
+  let upper = Math.max(Number(maxReturn) || 0, 0);
+  if (Math.abs(upper - lower) < 0.02) {
+    lower -= 0.02;
+    upper += 0.02;
+  }
+  const candidates = [0.01, 0.02, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0, 5.0];
+  let step = candidates.at(-1);
+  for (const candidate of candidates) {
+    const start = Math.floor(lower / candidate) * candidate;
+    const end = Math.ceil(upper / candidate) * candidate;
+    const count = Math.round((end - start) / candidate) + 1;
+    if (count >= 4 && count <= 7) {
+      step = candidate;
+      break;
+    }
+  }
+  const start = Math.floor(lower / step) * step;
+  const end = Math.ceil(upper / step) * step;
+  const ticks = [];
+  for (let value = start; value <= end + step / 2; value += step) {
+    ticks.push(Number(value.toFixed(6)));
+  }
+  return ticks;
+}
+
+const PERFORMANCE_PERIODS = [
+  { key: '1W', label: '최근 1주', tradingDays: 5 },
+  { key: '1M', label: '최근 1개월', tradingDays: 21 },
+  { key: '3M', label: '최근 3개월', tradingDays: 63 },
+  { key: '6M', label: '최근 6개월', tradingDays: 126 },
+  { key: '1Y', label: '최근 1년', tradingDays: 252 },
+  { key: 'YTD', label: 'YTD', ytd: true },
+];
+
+const PERFORMANCE_METRICS = [
+  { key: 'cumulativeReturn', label: '누적 수익률', formatter: formatPercent },
+  { key: 'sharpe', label: '샤프지수', formatter: (value) => formatNumberWithDigits(value, 2) },
+  { key: 'volatility', label: '변동성(표준편차)', formatter: formatPercent },
+  { key: 'maxDrawdown', label: 'MDD', formatter: formatPercent },
+  { key: 'sortino', label: '소르티노 지수', formatter: (value) => formatNumberWithDigits(value, 2) },
+  { key: 'calmar', label: '칼마 지수', formatter: (value) => formatNumberWithDigits(value, 2) },
+  { key: 'cvar', label: 'CVaR(95%)', formatter: formatPercent },
+  { key: 'winRate', label: '일간 승률', formatter: formatPercent },
+];
+
+function formatNumberWithDigits(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value)) || !Number.isFinite(Number(value))) return '-';
+  return Number(value).toLocaleString('ko-KR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function periodPoints(points, period) {
+  if (!points.length) return [];
+  if (period.ytd) {
+    const endYear = String(points.at(-1).date || '').slice(0, 4);
+    const ytdPoints = points.filter((point) => String(point.date || '').startsWith(endYear));
+    return ytdPoints.length >= 2 ? ytdPoints : points.slice(-Math.min(points.length, 2));
+  }
+  return points.slice(-Math.min(points.length, period.tradingDays + 1));
+}
+
+function returnSeries(points) {
+  const returns = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = Number(points[index - 1].equity);
+    const current = Number(points[index].equity);
+    if (Number.isFinite(previous) && Number.isFinite(current) && previous > 0) {
+      returns.push(current / previous - 1);
+    }
+  }
+  return returns;
+}
+
+function sampleStd(values) {
+  if (values.length < 2) return null;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(Math.max(0, variance));
+}
+
+function maxDrawdownFromPoints(points) {
+  let peak = -Infinity;
+  let maxDrawdown = 0;
+  points.forEach((point) => {
+    const equity = Number(point.equity);
+    if (!Number.isFinite(equity)) return;
+    peak = Math.max(peak, equity);
+    if (peak > 0) maxDrawdown = Math.min(maxDrawdown, equity / peak - 1);
+  });
+  return maxDrawdown;
+}
+
+function cvarFromReturns(returns, tail = 0.05) {
+  const clean = returns.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const count = Math.max(1, Math.ceil(clean.length * tail));
+  const tailReturns = clean.slice(0, count);
+  return tailReturns.reduce((sum, value) => sum + value, 0) / tailReturns.length;
+}
+
+function performanceMetrics(points, period) {
+  const slice = periodPoints(points, period);
+  if (slice.length < 2) return null;
+  const returns = returnSeries(slice);
+  if (!returns.length) return null;
+  const first = Number(slice[0].equity);
+  const last = Number(slice.at(-1).equity);
+  const cumulativeReturn = first > 0 ? last / first - 1 : null;
+  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const std = sampleStd(returns);
+  const downside = returns.map((value) => Math.min(0, value));
+  const downsideStd = sampleStd(downside);
+  const annualizedReturn = cumulativeReturn === null || cumulativeReturn <= -1
+    ? null
+    : ((1 + cumulativeReturn) ** (252 / returns.length) - 1);
+  const volatility = std === null ? null : std * Math.sqrt(252);
+  const maxDrawdown = maxDrawdownFromPoints(slice);
+  const winRate = returns.filter((value) => value > 0).length / returns.length;
+  return {
+    cumulativeReturn,
+    sharpe: std && std > 0 ? (mean / std) * Math.sqrt(252) : null,
+    volatility,
+    maxDrawdown,
+    sortino: downsideStd && downsideStd > 0 ? (mean / downsideStd) * Math.sqrt(252) : null,
+    calmar: maxDrawdown < 0 && annualizedReturn !== null ? annualizedReturn / Math.abs(maxDrawdown) : null,
+    cvar: cvarFromReturns(returns),
+    winRate,
+  };
+}
+
 function appendSvgText(svg, text, x, y, className, anchor = 'middle') {
   const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
   label.textContent = text;
@@ -1553,9 +1765,10 @@ function renderBacktestChart() {
   const best = periodBestStats(run, date, windowKey);
   const benchmark = benchmarkBacktestSeries(run);
   const selectedSeries = normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, factor), date));
-  const bestSeries = best?.factor && best.factor !== factor
+  const bestMetricSeries = best?.factor
     ? normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, best.factor), date))
     : [];
+  const bestSeries = best?.factor && best.factor !== factor ? bestMetricSeries : [];
   const benchmarkSeries = normalizedLine(seriesPointsThroughDate(benchmark, date));
   const benchmarkLabel = benchmark?.label_ko || benchmark?.symbol || run.summary?.chart_benchmark || '나스닥 벤치마크';
   const target = document.querySelector('#backtest-chart');
@@ -1566,20 +1779,20 @@ function renderBacktestChart() {
   );
   if (!selectedSeries.length) {
     appendEmpty('#backtest-chart', '선택 팩터의 최근 백테스트 추이 데이터가 없습니다. 기간 최고 팩터 데이터를 대신 표시하지 않습니다.');
+    renderPerformanceMetricsTable([]);
     return;
   }
   const allPoints = [...selectedSeries, ...bestSeries, ...benchmarkSeries];
   const allValues = allPoints.map((point) => point.normalized).filter((value) => Number.isFinite(value));
-  let minValue = Math.min(...allValues, 0.95, 1.0);
-  let maxValue = Math.max(...allValues, 1.05, 1.0);
-  const rangePadding = Math.max((maxValue - minValue) * 0.08, 0.01);
-  minValue -= rangePadding;
-  maxValue += rangePadding;
+  const returnValues = allValues.map((value) => value - 1);
+  const tickReturns = niceReturnTicks(Math.min(...returnValues, 0), Math.max(...returnValues, 0));
+  const minValue = Math.min(...tickReturns) + 1;
+  const maxValue = Math.max(...tickReturns) + 1;
   const allDates = [...new Set(allPoints.map((point) => point.date).filter(Boolean))].sort();
   const dateToIndex = new Map(allDates.map((pointDate, index) => [pointDate, index]));
   const width = 760;
   const height = 260;
-  const plot = { left: 64, right: 18, top: 18, bottom: 46 };
+  const plot = { left: 68, right: 18, top: 18, bottom: 50 };
   const plotWidth = width - plot.left - plot.right;
   const plotHeight = height - plot.top - plot.bottom;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -1591,9 +1804,8 @@ function renderBacktestChart() {
     const index = dateToIndex.get(point.date) ?? 0;
     return plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
   };
-  const tickValues = Array.from({ length: 5 }, (_, index) => minValue + (maxValue - minValue) * (index / 4));
-  tickValues.forEach((tick) => {
-    const y = yFor(tick);
+  tickReturns.forEach((tickReturn) => {
+    const y = yFor(tickReturn + 1);
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     line.setAttribute('x1', String(plot.left));
     line.setAttribute('x2', String(width - plot.right));
@@ -1601,7 +1813,7 @@ function renderBacktestChart() {
     line.setAttribute('y2', String(y));
     line.setAttribute('class', 'line-grid');
     svg.appendChild(line);
-    appendSvgText(svg, formatPercent(tick - 1), plot.left - 9, y + 4, 'axis-label', 'end');
+    appendSvgText(svg, formatPercentTick(tickReturn), plot.left - 9, y + 4, 'axis-label', 'end');
   });
   const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
   yAxis.setAttribute('x1', String(plot.left));
@@ -1617,8 +1829,8 @@ function renderBacktestChart() {
   xAxis.setAttribute('y2', String(height - plot.bottom));
   xAxis.setAttribute('class', 'axis-line');
   svg.appendChild(xAxis);
-  const xTickIndexes = [...new Set([0, Math.floor((allDates.length - 1) / 2), allDates.length - 1])].filter((index) => index >= 0);
-  xTickIndexes.forEach((index) => {
+  dateTickMarks(allDates).forEach((tickMark) => {
+    const { index } = tickMark;
     const x = plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
     const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     tick.setAttribute('x1', String(x));
@@ -1627,7 +1839,7 @@ function renderBacktestChart() {
     tick.setAttribute('y2', String(height - plot.bottom + 5));
     tick.setAttribute('class', 'axis-line');
     svg.appendChild(tick);
-    appendSvgText(svg, formatAxisDate(allDates[index]), x, height - plot.bottom + 19, 'axis-label');
+    appendSvgText(svg, tickMark.label, x, height - plot.bottom + 19, 'axis-label');
   });
   appendSvgText(svg, 'X축: 날짜', plot.left + plotWidth / 2, height - 5, 'axis-title');
   const yTitle = appendSvgText(svg, 'Y축: 누적 성과', 13, plot.top + plotHeight / 2, 'axis-title');
@@ -1680,6 +1892,84 @@ function renderBacktestChart() {
     legend.appendChild(benchmarkLegend);
   }
   target.appendChild(legend);
+  renderPerformanceMetricsTable([
+    { key: 'selected', label: `선택 팩터 ${factor || '-'}`, points: selectedSeries },
+    {
+      key: 'best',
+      label: `기간 최고 팩터 ${best?.factor || '-'}`,
+      points: bestMetricSeries.length ? bestMetricSeries : selectedSeries,
+    },
+    { key: 'benchmark', label: benchmarkLabel, points: benchmarkSeries },
+  ]);
+}
+
+function renderPerformanceMetricsTable(seriesList) {
+  const target = document.querySelector('#performance-metrics-table');
+  if (!target) return;
+  target.replaceChildren();
+  const availableSeries = (seriesList || []).filter((series) => Array.isArray(series.points) && series.points.length >= 2);
+  if (!availableSeries.length) {
+    appendEmpty('#performance-metrics-table', '성과 지표를 계산할 수 있는 누적 성과 데이터가 없습니다.');
+    return;
+  }
+
+  const heading = document.createElement('div');
+  heading.className = 'performance-metrics-heading';
+  const headingText = document.createElement('div');
+  const title = document.createElement('h4');
+  title.textContent = '기간별 성과 지표 비교';
+  const note = document.createElement('p');
+  note.textContent = '각 기간 말일 기준 일별 수익률로 계산합니다. 샤프·변동성·소르티노·칼마는 연율화, CVaR은 최악 5% 일간 손실 평균입니다.';
+  headingText.append(title, note);
+  heading.appendChild(headingText);
+  target.appendChild(heading);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'performance-table-wrap';
+  const table = document.createElement('table');
+  table.className = 'performance-table';
+  table.setAttribute('aria-label', '선택 팩터, 기간 최고 팩터, 나스닥 벤치마크의 기간별 성과 지표 비교');
+  const thead = document.createElement('thead');
+  const header = document.createElement('tr');
+  appendHeader(header, '지표 · 대상');
+  PERFORMANCE_PERIODS.forEach((period) => appendHeader(header, period.label));
+  thead.appendChild(header);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const metricCache = new Map(availableSeries.map((series) => [
+    series.key,
+    new Map(PERFORMANCE_PERIODS.map((period) => [period.key, performanceMetrics(series.points, period)])),
+  ]));
+  PERFORMANCE_METRICS.forEach((metric) => {
+    availableSeries.forEach((series) => {
+      const tr = document.createElement('tr');
+      const labelCell = document.createElement('td');
+      const labelBox = document.createElement('div');
+      labelBox.className = 'metric-cell';
+      const metricName = document.createElement('span');
+      metricName.className = 'metric-name';
+      metricName.textContent = metric.label;
+      const seriesName = document.createElement('span');
+      seriesName.className = `series-name ${series.key}`;
+      seriesName.textContent = series.label;
+      labelBox.append(metricName, seriesName);
+      labelCell.appendChild(labelBox);
+      tr.appendChild(labelCell);
+
+      PERFORMANCE_PERIODS.forEach((period) => {
+        const metrics = metricCache.get(series.key)?.get(period.key);
+        const value = metrics?.[metric.key];
+        const signedMetric = ['cumulativeReturn', 'maxDrawdown', 'cvar'].includes(metric.key);
+        const className = signedMetric && Number.isFinite(Number(value)) ? classForNumber(value) : '';
+        appendCell(tr, metric.formatter(value), { className });
+      });
+      tbody.appendChild(tr);
+    });
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  target.appendChild(wrap);
 }
 
 function renderPeriodRankingTable() {

@@ -145,6 +145,21 @@ tbody tr:hover { background: #f8fbff; }
 .legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .35rem; vertical-align: -.05rem; background: var(--accent); }
 .legend-dot.best { background: var(--good); }
 .legend-dot.benchmark { background: #7c3aed; }
+.performance-metrics { margin-top: 1rem; display: grid; gap: .7rem; }
+.performance-metrics-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: end; flex-wrap: wrap; }
+.performance-metrics-heading h4 { margin: 0; font-size: 1rem; }
+.performance-metrics-heading p { margin: .25rem 0 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
+.performance-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
+.performance-table { min-width: 880px; }
+.performance-table th, .performance-table td { white-space: nowrap; }
+.performance-table th:first-child, .performance-table td:first-child { position: sticky; left: 0; background: #fff; z-index: 1; min-width: 220px; }
+.performance-table thead th:first-child { background: #f8fafc; z-index: 2; }
+.metric-cell { display: grid; gap: .2rem; }
+.metric-name { font-weight: 900; color: #0f172a; }
+.series-name { color: var(--muted); font-size: .78rem; font-weight: 800; }
+.series-name.selected { color: var(--accent); }
+.series-name.best { color: var(--good); }
+.series-name.benchmark { color: #7c3aed; }
 .scenario-note { margin-top: .75rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .75rem; line-height: 1.55; font-size: .9rem; }
 .empty-state { color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; padding: 1rem; background: #fff; line-height: 1.6; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }

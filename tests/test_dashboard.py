@@ -230,6 +230,20 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "X축: 날짜" in js
     assert "Y축: 누적 성과" in js
     assert "나스닥 벤치마크" in js
+    assert 'id="performance-metrics-table"' in html
+    assert "기간별 성과 지표 비교" in js
+    assert "niceReturnTicks" in js
+    assert "dateTickMarks" in js
+    assert "최근 1주" in js
+    assert "최근 1년" in js
+    assert "YTD" in js
+    assert "누적 수익률" in js
+    assert "샤프지수" in js
+    assert "변동성(표준편차)" in js
+    assert "소르티노 지수" in js
+    assert "칼마 지수" in js
+    assert "CVaR(95%)" in js
+    assert "최악 5% 일간 손실 평균" in js
     assert "08:17을 기본 실행 시각" in html
     assert "이미 실행된 경우" in html
     assert "최신 데이터 업데이트 실행" in html
@@ -352,6 +366,15 @@ const a = computeScenarioAllocation([['AAA', 3], ['BBB', 2], ['CCC', 1]], 3, 0.1
 const b = computeScenarioAllocation([['ZZZ', 9], ['YYY', 8]], 2, 0.40);
 const c = computeScenarioAllocation([['AAA', 5], ['BBB', 4], ['CCC', 3], ['DDD', 2], ['EEE', 1]], 5, 0.50);
 const d = computeScenarioAllocation([['HIGH', 0.01], ['ZERO', 0], ['NEG', -10]], 3, 0.90);
+let equity = 1;
+const perfPoints = Array.from({{ length: 45 }}, (_, index) => {{
+  equity *= index % 7 === 0 ? 0.985 : 1.006;
+  const date = new Date(Date.UTC(2026, 0, 2 + index)).toISOString().slice(0, 10);
+  return {{ date, equity, normalized: equity }};
+}});
+const ticks = niceReturnTicks(-0.08, 0.55);
+const dateTicks = dateTickMarks(perfPoints.map((point) => point.date));
+const perf = performanceMetrics(perfPoints, PERFORMANCE_PERIODS.find((period) => period.key === '1M'));
 if (a.weighted[0].symbol !== 'AAA') throw new Error('factor A ranking failed');
 if (b.weighted[0].symbol !== 'ZZZ') throw new Error('factor B ranking failed');
 if (Math.abs(a.weighted[0].display_weight - 0.10) > 1e-12) throw new Error('max cap was not applied');
@@ -361,6 +384,11 @@ if (Math.abs(b.cashTotal - 0.20) > 1e-12) throw new Error('factor B cash failed'
 if (!(c.weighted[0].display_weight > 0.39 && c.weighted[0].display_weight < 0.41)) throw new Error('score-proportional weight failed');
 if (!(c.weighted[0].display_weight > c.weighted[1].display_weight && c.weighted[1].display_weight > c.weighted[2].display_weight)) throw new Error('score ordering was not reflected in weights');
 if (!(d.weighted[0].display_weight > d.weighted[1].display_weight && d.weighted[1].display_weight > d.weighted[2].display_weight)) throw new Error('mixed sign score ordering was not reflected in weights');
+if (!ticks.includes(0) || !ticks.includes(0.5)) throw new Error('clean return tick marks missing');
+if (dateTicks.length < 4) throw new Error('date tick marks are too sparse');
+if (!Number.isFinite(perf.cumulativeReturn)) throw new Error('performance return missing');
+if (!Number.isFinite(perf.volatility)) throw new Error('performance volatility missing');
+if (!Number.isFinite(perf.maxDrawdown) || perf.maxDrawdown > 0) throw new Error('performance MDD invalid');
 `, sandbox);
 """,
         encoding="utf-8",
