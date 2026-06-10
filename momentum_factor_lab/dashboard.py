@@ -546,12 +546,14 @@ tbody tr:hover { background: #f8fbff; }
 .performance-metrics-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: end; flex-wrap: wrap; }
 .performance-metrics-heading h4 { margin: 0; font-size: 1rem; }
 .performance-metrics-heading p { margin: .25rem 0 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
-.performance-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
-.performance-table { min-width: 880px; }
-.performance-table th, .performance-table td { white-space: nowrap; }
-.performance-table th:first-child, .performance-table td:first-child { position: sticky; left: 0; background: #fff; z-index: 1; min-width: 220px; }
-.performance-table thead th:first-child { background: #f8fafc; z-index: 2; }
-.metric-cell { display: grid; gap: .2rem; }
+.performance-period-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: .85rem; align-items: start; }
+.performance-period-card { border: 1px solid var(--line); border-radius: 18px; background: #fff; overflow: hidden; box-shadow: 0 10px 24px rgba(15, 23, 42, .04); }
+.performance-period-card h5 { margin: 0; padding: .8rem .95rem; font-size: .95rem; background: #f8fafc; border-bottom: 1px solid var(--line); }
+.performance-table-wrap { overflow-x: auto; }
+.performance-table { min-width: 420px; }
+.performance-table th, .performance-table td { white-space: nowrap; padding: .58rem .7rem; }
+.performance-table th:not(:first-child), .performance-table td:not(:first-child) { text-align: right; }
+.performance-table th:first-child, .performance-table td:first-child { min-width: 116px; }
 .metric-name { font-weight: 900; color: #0f172a; }
 .series-name { color: var(--muted); font-size: .78rem; font-weight: 800; }
 .series-name.selected { color: var(--accent); }
@@ -1919,45 +1921,54 @@ function renderPerformanceMetricsTable(seriesList) {
   const title = document.createElement('h4');
   title.textContent = '기간별 성과 지표 비교';
   const note = document.createElement('p');
-  note.textContent = '각 기간 말일 기준 일별 수익률로 계산합니다. 샤프·변동성·소르티노·칼마는 연율화, CVaR은 최악 5% 일간 손실 평균입니다.';
+  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 샤프·변동성·소르티노·칼마는 연율화, CVaR은 최악 5% 일간 손실 평균입니다.';
   headingText.append(title, note);
   heading.appendChild(headingText);
   target.appendChild(heading);
 
-  const wrap = document.createElement('div');
-  wrap.className = 'performance-table-wrap';
-  const table = document.createElement('table');
-  table.className = 'performance-table';
-  table.setAttribute('aria-label', '선택 팩터, 기간 최고 팩터, 나스닥 벤치마크의 기간별 성과 지표 비교');
-  const thead = document.createElement('thead');
-  const header = document.createElement('tr');
-  appendHeader(header, '지표 · 대상');
-  PERFORMANCE_PERIODS.forEach((period) => appendHeader(header, period.label));
-  thead.appendChild(header);
-  table.appendChild(thead);
-
-  const tbody = document.createElement('tbody');
   const metricCache = new Map(availableSeries.map((series) => [
     series.key,
     new Map(PERFORMANCE_PERIODS.map((period) => [period.key, performanceMetrics(series.points, period)])),
   ]));
-  PERFORMANCE_METRICS.forEach((metric) => {
-    availableSeries.forEach((series) => {
-      const tr = document.createElement('tr');
-      const labelCell = document.createElement('td');
-      const labelBox = document.createElement('div');
-      labelBox.className = 'metric-cell';
-      const metricName = document.createElement('span');
-      metricName.className = 'metric-name';
-      metricName.textContent = metric.label;
-      const seriesName = document.createElement('span');
-      seriesName.className = `series-name ${series.key}`;
-      seriesName.textContent = series.label;
-      labelBox.append(metricName, seriesName);
-      labelCell.appendChild(labelBox);
-      tr.appendChild(labelCell);
+  const shortSeriesLabel = (series) => ({
+    selected: '선택 팩터',
+    best: '기간 최고',
+    benchmark: '나스닥',
+  })[series.key] || series.label;
 
-      PERFORMANCE_PERIODS.forEach((period) => {
+  const grid = document.createElement('div');
+  grid.className = 'performance-period-grid';
+  PERFORMANCE_PERIODS.forEach((period) => {
+    const card = document.createElement('section');
+    card.className = 'performance-period-card';
+    const periodTitle = document.createElement('h5');
+    periodTitle.textContent = period.label;
+    card.appendChild(periodTitle);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'performance-table-wrap';
+    const table = document.createElement('table');
+    table.className = 'performance-table';
+    table.setAttribute('aria-label', `${period.label} 선택 팩터, 기간 최고 팩터, 나스닥 벤치마크 성과 지표 비교`);
+    const thead = document.createElement('thead');
+    const header = document.createElement('tr');
+    appendHeader(header, '지표');
+    availableSeries.forEach((series) => {
+      const th = document.createElement('th');
+      const label = document.createElement('span');
+      label.className = `series-name ${series.key}`;
+      label.textContent = shortSeriesLabel(series);
+      th.appendChild(label);
+      header.appendChild(th);
+    });
+    thead.appendChild(header);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    PERFORMANCE_METRICS.forEach((metric) => {
+      const tr = document.createElement('tr');
+      appendCell(tr, metric.label, { strong: true });
+      availableSeries.forEach((series) => {
         const metrics = metricCache.get(series.key)?.get(period.key);
         const value = metrics?.[metric.key];
         const signedMetric = ['cumulativeReturn', 'maxDrawdown', 'cvar'].includes(metric.key);
@@ -1966,10 +1977,12 @@ function renderPerformanceMetricsTable(seriesList) {
       });
       tbody.appendChild(tr);
     });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+    grid.appendChild(card);
   });
-  table.appendChild(tbody);
-  wrap.appendChild(table);
-  target.appendChild(wrap);
+  target.appendChild(grid);
 }
 
 function renderPeriodRankingTable() {

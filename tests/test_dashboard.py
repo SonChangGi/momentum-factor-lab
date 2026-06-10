@@ -232,6 +232,9 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "나스닥 벤치마크" in js
     assert 'id="performance-metrics-table"' in html
     assert "기간별 성과 지표 비교" in js
+    assert "각 기간 카드에서 같은 지표" in js
+    assert "performance-period-grid" in js
+    assert "performance-period-card" in js
     assert "niceReturnTicks" in js
     assert "dateTickMarks" in js
     assert "최근 1주" in js
