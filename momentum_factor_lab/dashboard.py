@@ -64,6 +64,8 @@ HTML_TEMPLATE = """<!doctype html>
       <strong>중요:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
       다음 자동 실행 설정을 저장하지 않습니다. 매일 실행 입력값은 저장소의
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
+      자동 실행은 GitHub Actions 예약 지연을 줄이기 위해 한국시간 08:17을 기본 실행 시각으로 두고,
+      08:47·09:17 보강 실행은 당일 08:00 이후 이미 실행된 경우 자동으로 건너뜁니다.
     </section>
 
     <section class="controls" aria-label="대시보드 입력값">
@@ -100,6 +102,11 @@ HTML_TEMPLATE = """<!doctype html>
         <span>추천/신호 상태</span>
         <strong id="recommendation-status">-</strong>
         <small id="data-provider">-</small>
+      </article>
+      <article class="card">
+        <span>최근 실행 시각</span>
+        <strong id="latest-run-at">-</strong>
+        <small id="latest-run-detail">-</small>
       </article>
       <article class="card">
         <span>산출 비중 합계</span>
@@ -362,9 +369,13 @@ body {
 .hero-copy { max-width: 760px; line-height: 1.7; opacity: .92; }
 .eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .035em; font-size: .78rem; line-height: 1.45; }
 .hero .eyebrow { color: #c7dcff; }
-.status-card { min-width: 260px; align-self: center; border: 1px solid rgba(255,255,255,.32); border-radius: 24px; padding: 1.25rem; background: rgba(255,255,255,.14); backdrop-filter: blur(8px); line-height: 1.6; }
+.status-card { min-width: 300px; align-self: center; border: 1px solid rgba(255,255,255,.32); border-radius: 24px; padding: 1.25rem; background: rgba(255,255,255,.14); backdrop-filter: blur(8px); line-height: 1.6; }
 .status-card.is-updating { outline: 2px solid rgba(255,255,255,.56); }
 .status-card.is-updating::after { content: " · 처리 중"; font-weight: 800; }
+.status-line { display: grid; grid-template-columns: 7.2rem minmax(0, 1fr); gap: .65rem; align-items: start; }
+.status-line + .status-line { margin-top: .35rem; }
+.status-label { color: #dce9ff; font-weight: 800; }
+.status-value { overflow-wrap: anywhere; }
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
@@ -374,7 +385,7 @@ label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex;
 select, input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .8rem; color: var(--ink); background: #fff; font: inherit; }
 input[readonly] { background: #f8fafc; color: var(--muted); }
 .unit { position: absolute; right: .8rem; bottom: .75rem; color: var(--muted); }
-.cards { display: grid; grid-template-columns: repeat(4, minmax(170px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
 .card { border-radius: 22px; padding: 1.1rem; }
 .card span { color: var(--muted); font-weight: 700; font-size: .85rem; }
 .card strong { display: block; margin: .45rem 0; font-size: clamp(1.05rem, 2vw, 1.35rem); line-height: 1.25; overflow-wrap: anywhere; }
@@ -590,6 +601,10 @@ function currentRun() {
   return runs[state.activeRunIndex] || runs[state.data?.latest_run_index || 0] || state.data?.latest || {};
 }
 
+function runPayloadGeneratedAt(run) {
+  return run?.generated_at_utc || state.data?.generated_at_utc || null;
+}
+
 function uniqueDates(run) {
   const source = (run.factor_leaders || []).length ? run.factor_leaders : (run.holdings || []);
   return [...new Set(source.map((row) => row.date).filter(Boolean))].sort().reverse();
@@ -631,6 +646,19 @@ function setStatusMessage(message) {
   statusCard.textContent = message;
   statusCard.setAttribute('aria-busy', 'true');
   statusCard.classList.add('is-updating');
+}
+
+function appendStatusLine(target, label, value) {
+  const row = document.createElement('div');
+  row.className = 'status-line';
+  const labelNode = document.createElement('span');
+  labelNode.className = 'status-label';
+  labelNode.textContent = label;
+  const valueNode = document.createElement('span');
+  valueNode.className = 'status-value';
+  valueNode.textContent = textValue(value);
+  row.append(labelNode, valueNode);
+  target.appendChild(row);
 }
 
 function appendCell(tr, value, options = {}) {
@@ -730,7 +758,7 @@ function fillControls() {
     const option = document.createElement('option');
     option.value = String(index);
     const prefix = runs.length <= 1 ? '최신 실행만 표시' : `실행 ${index + 1}`;
-    option.textContent = `${prefix} · ${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
+    option.textContent = `${prefix} · 기준일 ${run.summary?.data_as_of || '알 수 없음'} · 실행 ${formatKoreanDateTime(run.summary?.run_timestamp_utc)} · ${run.summary?.selected_factor || '-'}`;
     runSelect.appendChild(option);
   });
   runSelect.value = String(state.activeRunIndex);
@@ -769,28 +797,28 @@ function renderSummary() {
   const windowKey = selectedWindow();
   const row = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
   const summary = run.summary || {};
+  const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
+  const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
   setText('#best-factor', row?.best_factor || '-');
   setText('#best-factor-detail', row ? `${row.window_label} 수익률 ${formatPercent(row.best_return)}` : '-');
   setText('#selected-factor', summary.selected_factor || '-');
   setText('#selected-factor-detail', row ? `선택 팩터 순위 ${row.selected_factor_rank || '-'} · ${formatPercent(row.selected_factor_return)}` : '-');
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
-  setText('#data-provider', `${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
+  setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
+  setText('#latest-run-at', latestRunAt);
+  setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
 
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
   statusCard.removeAttribute('aria-busy');
   statusCard.classList.remove('is-updating');
-  const strong = document.createElement('strong');
-  strong.textContent = summary.data_as_of || '-';
-  statusCard.append(
-    strong,
-    document.createElement('br'),
-    textValue(humanProvider(summary.provider)),
-    document.createElement('br'),
-    textValue(humanOutputLabel(summary.recommendation_output_label)),
-  );
+  appendStatusLine(statusCard, '데이터 기준일', summary.data_as_of || '-');
+  appendStatusLine(statusCard, '최근 실행', latestRunAt);
+  appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
+  appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
+  appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
 
-  setText('#generated-at', `대시보드 생성 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
+  setText('#generated-at', `사이트 빌드 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
 }
 
 function renderDiagnostics() {
@@ -805,6 +833,8 @@ function renderDiagnostics() {
   appendDefinition(dataSummary, '가격 수집 종목', formatCount(quality.fetched_price_symbol_count));
   appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
   appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
+  appendDefinition(dataSummary, '최근 실행 시각', formatKoreanDateTime(summary.run_timestamp_utc));
+  appendDefinition(dataSummary, '실행 결과 생성 시각', formatKoreanDateTime(runPayloadGeneratedAt(run)));
   appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
   appendDefinition(
     dataSummary,

@@ -30,6 +30,8 @@
       <strong>중요:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
       다음 자동 실행 설정을 저장하지 않습니다. 매일 실행 입력값은 저장소의
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
+      자동 실행은 GitHub Actions 예약 지연을 줄이기 위해 한국시간 08:17을 기본 실행 시각으로 두고,
+      08:47·09:17 보강 실행은 당일 08:00 이후 이미 실행된 경우 자동으로 건너뜁니다.
     </section>
 
     <section class="controls" aria-label="대시보드 입력값">
@@ -66,6 +68,11 @@
         <span>추천/신호 상태</span>
         <strong id="recommendation-status">-</strong>
         <small id="data-provider">-</small>
+      </article>
+      <article class="card">
+        <span>최근 실행 시각</span>
+        <strong id="latest-run-at">-</strong>
+        <small id="latest-run-detail">-</small>
       </article>
       <article class="card">
         <span>산출 비중 합계</span>

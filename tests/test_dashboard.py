@@ -154,6 +154,9 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     js = Path(paths["js"]).read_text(encoding="utf-8")
     assert "모멘텀 팩터 데일리 대시보드" in html
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
+    assert "최근 실행 시각" in html
+    assert "08:17을 기본 실행 시각" in html
+    assert "이미 실행된 경우" in html
     assert "시각화 대시보드" in html
     assert "팩터 수익률 막대 차트" in html
     assert "상위 N개 모형 비중 시각화" in html
@@ -175,6 +178,11 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "가격 적격 종목" in js
     assert "유동성 적격 종목" in js
     assert "formatKoreanDateTime" in js
+    assert "latest-run-at" in js
+    assert "appendStatusLine" in js
+    assert "최근 실행 시각" in js
+    assert "runPayloadGeneratedAt" in js
+    assert "사이트 빌드 시각" in js
     assert "renderCurrentOutputTable" in js
     assert "renderWithBusy" in js
     assert "recomputeWeights" not in js
@@ -456,7 +464,16 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     workflow = Path(".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
     config = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
 
-    assert "cron: '0 23 * * *'" in workflow
-    assert "08:00 KST" in workflow or "08:00 Korea" in workflow
+    assert "cron: '17 23 * * *'" in workflow
+    assert "cron: '47 23 * * *'" in workflow
+    assert "cron: '17 0 * * *'" in workflow
+    assert "08:17 KST" in workflow
+    assert "08:00 KST" in workflow
+    assert "concurrency:" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "Refresh checkout to latest branch head" in workflow
+    assert "dashboard_freshness" in workflow
+    assert "continue-on-error: true" in workflow
+    assert "Remote branch already has a dashboard execution after 08:00 KST" in workflow
     assert config["site_dir"] == "docs"
     assert "--live" in config["run_args"]

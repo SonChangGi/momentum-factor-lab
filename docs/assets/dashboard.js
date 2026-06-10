@@ -136,6 +136,10 @@ function currentRun() {
   return runs[state.activeRunIndex] || runs[state.data?.latest_run_index || 0] || state.data?.latest || {};
 }
 
+function runPayloadGeneratedAt(run) {
+  return run?.generated_at_utc || state.data?.generated_at_utc || null;
+}
+
 function uniqueDates(run) {
   const source = (run.factor_leaders || []).length ? run.factor_leaders : (run.holdings || []);
   return [...new Set(source.map((row) => row.date).filter(Boolean))].sort().reverse();
@@ -177,6 +181,19 @@ function setStatusMessage(message) {
   statusCard.textContent = message;
   statusCard.setAttribute('aria-busy', 'true');
   statusCard.classList.add('is-updating');
+}
+
+function appendStatusLine(target, label, value) {
+  const row = document.createElement('div');
+  row.className = 'status-line';
+  const labelNode = document.createElement('span');
+  labelNode.className = 'status-label';
+  labelNode.textContent = label;
+  const valueNode = document.createElement('span');
+  valueNode.className = 'status-value';
+  valueNode.textContent = textValue(value);
+  row.append(labelNode, valueNode);
+  target.appendChild(row);
 }
 
 function appendCell(tr, value, options = {}) {
@@ -276,7 +293,7 @@ function fillControls() {
     const option = document.createElement('option');
     option.value = String(index);
     const prefix = runs.length <= 1 ? '최신 실행만 표시' : `실행 ${index + 1}`;
-    option.textContent = `${prefix} · ${run.summary?.data_as_of || '알 수 없음'} · ${run.summary?.selected_factor || '-'}`;
+    option.textContent = `${prefix} · 기준일 ${run.summary?.data_as_of || '알 수 없음'} · 실행 ${formatKoreanDateTime(run.summary?.run_timestamp_utc)} · ${run.summary?.selected_factor || '-'}`;
     runSelect.appendChild(option);
   });
   runSelect.value = String(state.activeRunIndex);
@@ -315,28 +332,28 @@ function renderSummary() {
   const windowKey = selectedWindow();
   const row = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
   const summary = run.summary || {};
+  const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
+  const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
   setText('#best-factor', row?.best_factor || '-');
   setText('#best-factor-detail', row ? `${row.window_label} 수익률 ${formatPercent(row.best_return)}` : '-');
   setText('#selected-factor', summary.selected_factor || '-');
   setText('#selected-factor-detail', row ? `선택 팩터 순위 ${row.selected_factor_rank || '-'} · ${formatPercent(row.selected_factor_return)}` : '-');
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
-  setText('#data-provider', `${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
+  setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
+  setText('#latest-run-at', latestRunAt);
+  setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
 
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
   statusCard.removeAttribute('aria-busy');
   statusCard.classList.remove('is-updating');
-  const strong = document.createElement('strong');
-  strong.textContent = summary.data_as_of || '-';
-  statusCard.append(
-    strong,
-    document.createElement('br'),
-    textValue(humanProvider(summary.provider)),
-    document.createElement('br'),
-    textValue(humanOutputLabel(summary.recommendation_output_label)),
-  );
+  appendStatusLine(statusCard, '데이터 기준일', summary.data_as_of || '-');
+  appendStatusLine(statusCard, '최근 실행', latestRunAt);
+  appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
+  appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
+  appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
 
-  setText('#generated-at', `대시보드 생성 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
+  setText('#generated-at', `사이트 빌드 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
 }
 
 function renderDiagnostics() {
@@ -351,6 +368,8 @@ function renderDiagnostics() {
   appendDefinition(dataSummary, '가격 수집 종목', formatCount(quality.fetched_price_symbol_count));
   appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
   appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
+  appendDefinition(dataSummary, '최근 실행 시각', formatKoreanDateTime(summary.run_timestamp_utc));
+  appendDefinition(dataSummary, '실행 결과 생성 시각', formatKoreanDateTime(runPayloadGeneratedAt(run)));
   appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
   appendDefinition(
     dataSummary,
