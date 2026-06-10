@@ -65,10 +65,26 @@ def test_config_validation_rejects_invalid_risk_inputs(kwargs, message):
         config.validate()
 
 
-def test_selected_factor_defaults_to_predeclared_effective_mode():
+def test_selected_factor_requires_explicit_predeclared_mode():
     config = RunConfig(selected_factor="mom_1m")
 
     assert config.factor_selection_mode == "research_validation"
+    assert config.effective_factor_selection_mode == "research_validation"
+    with pytest.raises(ValueError, match="selected_factor requires factor_selection_mode"):
+        config.validate()
+
+
+def test_predeclared_mode_requires_selected_factor():
+    config = RunConfig(factor_selection_mode="predeclared")
+
+    with pytest.raises(ValueError, match="predeclared.*selected_factor"):
+        config.validate()
+
+
+def test_explicit_predeclared_selected_factor_is_effective():
+    config = RunConfig(selected_factor="mom_1m", factor_selection_mode="predeclared")
+
+    config.validate()
     assert config.effective_factor_selection_mode == "predeclared"
 
 

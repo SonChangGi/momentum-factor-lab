@@ -60,14 +60,29 @@ function humanOutputLabel(value) {
   const text = textValue(value);
   const labels = {
     'Research signals (not tradable)': '연구용 신호(매매 권고 아님)',
-    'Practical recommendations': '실행 가능성 검토를 통과한 추천 후보',
+    'Reference research signals (not current)': '참고용 연구 신호(현재 매매 권고 아님)',
+    'Practical recommendations': '사전 고정 팩터와 실행 가능성 검토를 통과한 후보',
     'No current recommendation': '현재 추천 후보 없음',
   };
   return labels[text] || text;
 }
 
-function humanStatus(status, outputLabel) {
+function humanStatus(status, outputLabel, summary = {}) {
   const text = textValue(status);
+  if (summary.same_run_factor_selection_blocked_for_tradable === true
+      || summary.same_sample_selection_blocked_for_tradable === true) {
+    return '같은 실행에서 고른 팩터 · 연구용 신호 · 매매 권고 아님';
+  }
+  if (
+    summary.research_only === true
+    || summary.recommendation_output_key === 'research_signals'
+    || summary.current_recommendations_available === false
+    || summary.tradable_recommendations_available === false
+  ) {
+    return text.includes('sample')
+      ? '오프라인/참고 실행 · 현재 매매 권고 아님'
+      : '연구용 신호 · 매매 권고 아님';
+  }
   if (text === '-') return humanOutputLabel(outputLabel);
   if (text === 'sample_offline_not_current') {
     return '오프라인 샘플 · 현재 추천 아님';
@@ -94,12 +109,6 @@ function humanStatus(status, outputLabel) {
     return '제한 조건 때문에 추천 보류';
   }
   return text;
-}
-
-function isPracticalRun(run = currentRun()) {
-  const summary = run.summary || {};
-  return String(summary.recommendation_output_label || '').includes('Practical')
-    || String(summary.recommendation_status || '') === 'current_live';
 }
 
 function humanFactorCategory(value) {
@@ -542,7 +551,7 @@ function renderSummary() {
       ? `${selectedStats.window_label} 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)} · ${factorDescription(factor, run)}`
       : `자료 없음 · ${factorDescription(factor, run)}`,
   );
-  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
+  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label, summary));
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
   setText('#latest-run-at', latestRunAt);
   setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
@@ -556,6 +565,16 @@ function renderSummary() {
   appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
   appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
   appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
+  appendStatusLine(
+    statusCard,
+    '같은 실행 선택 차단',
+      summary.same_sample_selection_blocked_for_tradable === true
+      ? '차단됨 · 실전 추천으로 사용하지 않음'
+      : '해당 없음 또는 사전 고정 정책',
+  );
+  if (summary.factor_selection_warning) {
+    appendStatusLine(statusCard, '팩터 선택 경고', summary.factor_selection_warning);
+  }
 
   setText('#generated-at', `사이트 빌드 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
 }
@@ -704,7 +723,7 @@ function renderHoldingsTable() {
     maxWeight,
     missingReason,
   } = currentWeightedHoldings();
-  const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
+  const weightLabel = '브라우저 표시용 연구 시나리오 배분(매매 권고 아님)';
   setText(
     '#weight-summary',
     `시나리오 배분 ${formatPercent(portfolioTotal)} · 화면 표시 ${formatPercent(displayedTotal)} · 현금/미사용 ${formatPercent(cashTotal)}`,
@@ -880,11 +899,10 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
-  const run = currentRun();
   const { weighted, cashTotal, topN, maxWeight, unusedCandidateCount } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 시나리오' : '연구 시나리오'} · 상위 ${topN}개 · 브라우저 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `연구 시나리오(매매 권고 아님) · 상위 ${topN}개 · 브라우저 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
     appendEmpty('#weight-chart', '선택한 기준일과 팩터에 표시할 상위 종목 점수 스냅샷이 없습니다.');
     return;

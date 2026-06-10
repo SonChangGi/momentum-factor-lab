@@ -108,6 +108,59 @@ class TradabilityAssessment:
         }
 
 
+TRADABLE_FACTOR_SELECTION_SOURCES = frozenset({"predeclared"})
+RESEARCH_ONLY_ZERO_WEIGHT_COLUMNS = frozenset(
+    {
+        "weight",
+        "proposed_weight",
+        "pre_cap_weight",
+        "weight_cap_excess",
+        "target_notional",
+        "adv_participation",
+        "capacity_utilization",
+        "capacity_aum_limit",
+    }
+)
+
+
+def _has_tradable_factor_selection_policy(selection_source: str) -> bool:
+    return selection_source in TRADABLE_FACTOR_SELECTION_SOURCES
+
+
+def _has_no_same_sample_factor_selection(same_sample_blocked: bool) -> bool:
+    return not same_sample_blocked
+
+
+def _zero_research_signal_weights(recommendations: pd.DataFrame, reasons: list[str]) -> pd.DataFrame:
+    """Fail closed by removing all tradable/proposed weight fields from research rows."""
+
+    frame = recommendations.copy()
+    reason_text = "; ".join(reasons) if reasons else "tradability_gate_failed"
+    for column in RESEARCH_ONLY_ZERO_WEIGHT_COLUMNS:
+        if column in frame:
+            frame[column] = 0.0
+    if "capacity_pass" in frame:
+        frame["capacity_pass"] = False
+    if "capacity_status" in frame:
+        capacity_pass_mask = frame["capacity_status"].eq("pass")
+        frame.loc[capacity_pass_mask, "capacity_status"] = "research_only_gate_failed"
+        if "capacity_warning" in frame:
+            frame.loc[capacity_pass_mask, "capacity_warning"] = (
+                "Research-only fail-closed output: capacity evidence is not a tradable approval "
+                f"because unmet gates include {reason_text}."
+            )
+    frame["tradable_weight_enabled"] = False
+    frame["research_only_reason"] = reason_text
+    return frame
+
+
+def _mark_tradable_weight_enabled(recommendations: pd.DataFrame) -> pd.DataFrame:
+    frame = recommendations.copy()
+    frame["tradable_weight_enabled"] = True
+    frame["research_only_reason"] = ""
+    return frame
+
+
 
 def _analysis_prices(market_data: MarketData, config: RunConfig) -> pd.DataFrame:
     """Return stock-only candidate prices for factor research and portfolios.
@@ -791,9 +844,10 @@ def _resolve_selected_factor(
             "walk_forward",
             (
                 f"{selected_factor} selected by in-run walk-forward diagnostics using only prior windows; "
-                "validation rankings are reported separately for audit. This is not treated as a frozen live policy."
+                "validation rankings are reported separately for audit. Practical labels still require all "
+                "tradability gates to pass and a factor frozen before this live run."
             ),
-            False,
+            True,
         )
     return (
         validation_selected_factor,
@@ -803,7 +857,7 @@ def _resolve_selected_factor(
             "research ranking after comparing validation Sharpe, Sortino, Calmar, max drawdown, "
             "CAGR, turnover, and train/validation stability across the full momentum factor library. "
             "Same-run validation selection is blocked from tradable recommendation output; use a "
-            "predeclared selected factor or walk-forward selection for practical labels."
+            "predeclared selected factor frozen before the run for practical labels."
         ),
         True,
     )
@@ -1286,10 +1340,12 @@ def _apply_tradability_gate(
     current_available: bool,
     subset_run: bool,
     selection_source: str,
+    same_sample_blocked: bool,
 ) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "factor_selection_policy_available": selection_source in {"predeclared", "walk_forward"},
+        "factor_selection_policy_available": _has_tradable_factor_selection_policy(selection_source),
+        "no_same_sample_factor_selection": _has_no_same_sample_factor_selection(same_sample_blocked),
         "no_explicit_price_symbol_cap": _has_no_explicit_price_symbol_cap(config, subset_run),
         "complete_requested_price_coverage": _has_complete_requested_price_coverage(market_data),
         "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
@@ -1390,10 +1446,13 @@ def run_analysis(config: RunConfig) -> RunResult:
         fresh_live_data_available,
         subset_run,
         selection_source,
+        same_sample_blocked,
     )
     status = tradability_assessment.status
     if not tradability_assessment.recommendation_output_available:
-        recommendations["weight"] = 0.0
+        recommendations = _zero_research_signal_weights(recommendations, tradability_assessment.fail_closed_reasons)
+    else:
+        recommendations = _mark_tradable_weight_enabled(recommendations)
     recommendations["recommendation_status"] = status
     recommendations["recommendation_output"] = tradability_assessment.output_key
     recommendations["signal_date"] = str(analysis_prices.index.max().date()) if not analysis_prices.empty else "unavailable"
@@ -1434,11 +1493,13 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selection_window": config.selection_window,
         "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
         "selection_policy_frozen_for_live": selection_source == "predeclared",
+        "same_run_factor_selection_blocked_for_tradable": same_sample_blocked,
         "same_sample_selection_blocked_for_tradable": same_sample_blocked,
         "factor_selection_warning": (
-            "Validation-selected factor is a same-run research ranking and is blocked from tradable "
-            "recommendation output; predeclare a selected factor or use walk-forward selection for practical labels."
-            if selection_source == "research_validation"
+            "Selected factor comes from same-run validation/research diagnostics and is blocked from tradable "
+            "recommendation output. Predeclare/freeze the selected factor before the live run before treating "
+            "output rows as practical."
+            if same_sample_blocked
             else None
         ),
         "sensitivity_coverage": sensitivity_coverage,
@@ -1449,8 +1510,11 @@ def run_analysis(config: RunConfig) -> RunResult:
         "execution_delay": "one trading day after signal/rebalance schedule",
         "portfolio_construction": (
             f"Backtests: long-only top-{config.top_n} factor portfolios at each rebalance, max weight "
-            f"{config.max_weight:.2%}. Current recommendations: {config.recommendation_weighting_method} "
-            "weights using selected-factor score plus market-cap/ADV liquidity evidence."
+            f"{config.max_weight:.2%}. Practical output rows are enabled only when the tradability gate passes "
+            f"with a predeclared factor-selection policy; otherwise research-signal rows force "
+            "tradable/proposed weights to zero. "
+            f"When enabled, output weighting uses {config.recommendation_weighting_method} with selected-factor "
+            "score plus market-cap/ADV liquidity evidence."
         ),
         "recommendation_weighting_method": config.recommendation_weighting_method,
         "recommendation_weight_sum": float(recommendations["weight"].sum()) if "weight" in recommendations else 0.0,
@@ -1465,6 +1529,10 @@ def run_analysis(config: RunConfig) -> RunResult:
             "rank_floor": config.recommendation_rank_floor,
             "market_cap_lookup": config.recommendation_market_cap_lookup,
         },
+        "research_signal_weight_policy": (
+            "If any tradability requirement fails, all tradable/proposed weight fields are forced to zero and "
+            "rows are exported under research_signals, even when diagnostic factor scores are displayed."
+        ),
         "recommendation_market_cap_source_counts": recommendations["market_cap_source"].value_counts().to_dict()
         if "market_cap_source" in recommendations
         else {},
@@ -1518,8 +1586,9 @@ def run_analysis(config: RunConfig) -> RunResult:
         "recommendation_capacity_warning": "; ".join(sorted(set(recommendations["capacity_warning"].dropna()))),
         "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
         "multiple_testing_warning": (
-            "Many explainable momentum factors are compared; validation, predeclared/walk-forward selection, "
-            "and multiple-testing/data-snooping warnings are required before treating outputs as investable."
+            "Many explainable momentum factors are compared; validation and walk-forward diagnostics remain "
+            "research-only unless the selected factor was predeclared before the run. Multiple-testing/"
+            "data-snooping warnings are required before treating any output as investable."
         ),
         "factor_library_scope": "price_momentum_only",
         "factor_rank_ic_horizon_days": 21,

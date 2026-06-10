@@ -564,14 +564,29 @@ function humanOutputLabel(value) {
   const text = textValue(value);
   const labels = {
     'Research signals (not tradable)': '연구용 신호(매매 권고 아님)',
-    'Practical recommendations': '실행 가능성 검토를 통과한 추천 후보',
+    'Reference research signals (not current)': '참고용 연구 신호(현재 매매 권고 아님)',
+    'Practical recommendations': '사전 고정 팩터와 실행 가능성 검토를 통과한 후보',
     'No current recommendation': '현재 추천 후보 없음',
   };
   return labels[text] || text;
 }
 
-function humanStatus(status, outputLabel) {
+function humanStatus(status, outputLabel, summary = {}) {
   const text = textValue(status);
+  if (summary.same_run_factor_selection_blocked_for_tradable === true
+      || summary.same_sample_selection_blocked_for_tradable === true) {
+    return '같은 실행에서 고른 팩터 · 연구용 신호 · 매매 권고 아님';
+  }
+  if (
+    summary.research_only === true
+    || summary.recommendation_output_key === 'research_signals'
+    || summary.current_recommendations_available === false
+    || summary.tradable_recommendations_available === false
+  ) {
+    return text.includes('sample')
+      ? '오프라인/참고 실행 · 현재 매매 권고 아님'
+      : '연구용 신호 · 매매 권고 아님';
+  }
   if (text === '-') return humanOutputLabel(outputLabel);
   if (text === 'sample_offline_not_current') {
     return '오프라인 샘플 · 현재 추천 아님';
@@ -598,12 +613,6 @@ function humanStatus(status, outputLabel) {
     return '제한 조건 때문에 추천 보류';
   }
   return text;
-}
-
-function isPracticalRun(run = currentRun()) {
-  const summary = run.summary || {};
-  return String(summary.recommendation_output_label || '').includes('Practical')
-    || String(summary.recommendation_status || '') === 'current_live';
 }
 
 function humanFactorCategory(value) {
@@ -1046,7 +1055,7 @@ function renderSummary() {
       ? `${selectedStats.window_label} 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)} · ${factorDescription(factor, run)}`
       : `자료 없음 · ${factorDescription(factor, run)}`,
   );
-  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
+  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label, summary));
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
   setText('#latest-run-at', latestRunAt);
   setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
@@ -1060,6 +1069,16 @@ function renderSummary() {
   appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
   appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
   appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
+  appendStatusLine(
+    statusCard,
+    '같은 실행 선택 차단',
+      summary.same_sample_selection_blocked_for_tradable === true
+      ? '차단됨 · 실전 추천으로 사용하지 않음'
+      : '해당 없음 또는 사전 고정 정책',
+  );
+  if (summary.factor_selection_warning) {
+    appendStatusLine(statusCard, '팩터 선택 경고', summary.factor_selection_warning);
+  }
 
   setText('#generated-at', `사이트 빌드 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
 }
@@ -1208,7 +1227,7 @@ function renderHoldingsTable() {
     maxWeight,
     missingReason,
   } = currentWeightedHoldings();
-  const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
+  const weightLabel = '브라우저 표시용 연구 시나리오 배분(매매 권고 아님)';
   setText(
     '#weight-summary',
     `시나리오 배분 ${formatPercent(portfolioTotal)} · 화면 표시 ${formatPercent(displayedTotal)} · 현금/미사용 ${formatPercent(cashTotal)}`,
@@ -1384,11 +1403,10 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
-  const run = currentRun();
   const { weighted, cashTotal, topN, maxWeight, unusedCandidateCount } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 시나리오' : '연구 시나리오'} · 상위 ${topN}개 · 브라우저 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `연구 시나리오(매매 권고 아님) · 상위 ${topN}개 · 브라우저 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
     appendEmpty('#weight-chart', '선택한 기준일과 팩터에 표시할 상위 종목 점수 스냅샷이 없습니다.');
     return;
@@ -1672,12 +1690,13 @@ def build_dashboard_payload(
             "factor_diagnostics": _factor_diagnostics_payload(result),
             "notes_ko": [
                 "웹사이트 입력값은 브라우저 표시용이며 다음 자동 실행 설정을 저장하지 않습니다.",
+                "브라우저에서 고른 선택 팩터와 비중은 연구 시나리오 표시이며 매매 권고로 승격되지 않습니다.",
                 "자동 실행 입력값은 .github/momentum-dashboard-config.json에서 관리합니다.",
                 "모든 결과는 연구/의사결정 보조용이며 투자 조언이 아닙니다.",
             ],
         }
     )
-    return _fit_dashboard_payload(payload, max_bytes=DASHBOARD_PAYLOAD_MAX_BYTES)
+    return _fit_dashboard_payload(_sanitize_dashboard_payload_safety(payload), max_bytes=DASHBOARD_PAYLOAD_MAX_BYTES)
 
 
 def write_dashboard_site(
@@ -1740,7 +1759,7 @@ def write_dashboard_site(
 
 
 def _dashboard_summary(result: RunResult) -> dict[str, Any]:
-    return {
+    summary = {
         "run_timestamp_utc": result.metadata.get("run_timestamp_utc"),
         "data_as_of": result.metadata.get("data_as_of"),
         "provider": result.metadata.get("provider"),
@@ -1750,6 +1769,18 @@ def _dashboard_summary(result: RunResult) -> dict[str, Any]:
         "recommendation_output_label": result.metadata.get("recommendation_output_label"),
         "fresh_live_data_available": result.metadata.get("fresh_live_data_available"),
         "decision_support_tier": result.metadata.get("decision_support_tier"),
+        "recommendation_output_available": result.metadata.get("recommendation_output_available"),
+        "current_recommendations_available": result.metadata.get("current_recommendations_available"),
+        "tradable_output_available": result.metadata.get("tradable_output_available"),
+        "tradable_recommendations_available": result.metadata.get("tradable_recommendations_available"),
+        "research_only": result.metadata.get("research_only"),
+        "recommendation_output_key": result.metadata.get("recommendation_output_key"),
+        "same_run_factor_selection_blocked_for_tradable": result.metadata.get(
+            "same_run_factor_selection_blocked_for_tradable"
+        ),
+        "same_sample_selection_blocked_for_tradable": result.metadata.get(
+            "same_sample_selection_blocked_for_tradable"
+        ),
         "execution_limitations": result.metadata.get("execution_limitations", []),
         "tradability_blockers": result.metadata.get("tradability_blockers", []),
         "default_top_n": result.config.top_n,
@@ -1765,11 +1796,218 @@ def _dashboard_summary(result: RunResult) -> dict[str, Any]:
         "factor_rank_ic_horizon_days": result.metadata.get("factor_rank_ic_horizon_days"),
         "factor_high_redundancy_count": result.metadata.get("factor_high_redundancy_count"),
     }
+    return _copy_summary_safety_fields(summary, result.metadata)
+
+
+DASHBOARD_SUMMARY_SAFETY_KEYS: tuple[str, ...] = (
+    "recommendation_output_key",
+    "recommendation_output_label",
+    "recommendation_output_sheet",
+    "recommendation_output_available",
+    "tradable_output_available",
+    "current_recommendations_available",
+    "tradable_recommendations_available",
+    "fresh_live_data_available",
+    "research_only",
+    "decision_support_tier",
+    "fail_closed",
+    "fail_closed_reasons",
+    "tradability_blockers",
+    "execution_limitations",
+    "tradability_requirements",
+    "validation_selected_factor",
+    "selected_factor_selection_source",
+    "same_run_factor_selection_blocked_for_tradable",
+    "same_sample_selection_blocked_for_tradable",
+    "factor_selection_warning",
+    "selection_policy_frozen_for_live",
+    "recommendation_weighting_method",
+    "recommendation_weight_sum",
+    "recommendation_cash_weight",
+)
+
+
+def _copy_summary_safety_fields(summary: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """Keep dashboard summaries self-describing about research vs practical output.
+
+    Older run-result JSON files may already contain a `dashboard` object whose
+    compact summary predates the stricter same-run-selection guard.  Copying
+    these fields from top-level metadata makes the static site fail closed even
+    when it rebuilds from older artifacts.
+    """
+
+    for key in DASHBOARD_SUMMARY_SAFETY_KEYS:
+        if key in metadata:
+            summary[key] = metadata.get(key)
+    return summary
+
+
+DASHBOARD_RESEARCH_ONLY_SELECTION_SOURCES = frozenset(
+    {"research_validation", "walk_forward", "walk_forward_insufficient_history"}
+)
+DASHBOARD_RESEARCH_ONLY_ZERO_FIELDS = (
+    "weight",
+    "proposed_weight",
+    "pre_cap_weight",
+    "weight_cap_excess",
+    "target_notional",
+    "adv_participation",
+    "capacity_utilization",
+    "capacity_aum_limit",
+)
+
+
+def _first_output_row_value(rows: list[Any], key: str) -> Any:
+    for row in rows:
+        if isinstance(row, dict) and row.get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def _append_unique(values: Any, *items: str) -> list[str]:
+    result: list[str] = []
+    if isinstance(values, list):
+        result.extend(str(value) for value in values)
+    for item in items:
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _dashboard_rows_are_research_only(summary: dict[str, Any], rows: list[Any]) -> bool:
+    if any(
+        isinstance(row, dict)
+        and (
+            row.get("recommendation_output") == "research_signals"
+            or row.get("selected_factor_selection_source") in DASHBOARD_RESEARCH_ONLY_SELECTION_SOURCES
+        )
+        for row in rows
+    ):
+        return True
+    return not _dashboard_has_affirmative_practical_proof(summary)
+
+
+def _dashboard_has_affirmative_practical_proof(summary: dict[str, Any]) -> bool:
+    return (
+        summary.get("recommendation_output_key") == "recommendations"
+        and summary.get("research_only") is False
+        and summary.get("recommendation_output_available") is True
+        and summary.get("tradable_output_available") is True
+        and summary.get("current_recommendations_available") is True
+        and summary.get("tradable_recommendations_available") is True
+        and summary.get("same_run_factor_selection_blocked_for_tradable") is False
+        and summary.get("same_sample_selection_blocked_for_tradable") is False
+        and summary.get("selected_factor_selection_source") == "predeclared"
+    )
+
+
+def _sanitize_research_only_output_rows(rows: list[Any], summary: dict[str, Any]) -> list[Any]:
+    if not _dashboard_rows_are_research_only(summary, rows):
+        return rows
+    reason = "; ".join(summary.get("tradability_blockers") or summary.get("fail_closed_reasons") or [])
+    if not reason:
+        reason = "research_only_or_non_tradable_output"
+    sanitized: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            sanitized.append(row)
+            continue
+        clean = dict(row)
+        for key in DASHBOARD_RESEARCH_ONLY_ZERO_FIELDS:
+            if key in clean:
+                clean[key] = 0.0
+        if "capacity_pass" in clean:
+            clean["capacity_pass"] = False
+        if clean.get("capacity_status") == "pass":
+            clean["capacity_status"] = "research_only_gate_failed"
+            if "capacity_warning" in clean:
+                clean["capacity_warning"] = (
+                    "연구용 fail-closed 출력입니다. 용량 점검 통과 여부와 무관하게 매매 권고가 아니며 "
+                    f"미충족 요건은 {reason}입니다."
+                )
+        clean["tradable_weight_enabled"] = False
+        clean.setdefault("research_only_reason", reason)
+        sanitized.append(clean)
+    return sanitized
+
+
+def _sanitize_dashboard_payload_safety(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = payload.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        payload["summary"] = summary
+    rows = payload.get("latest_output_rows", [])
+    if not isinstance(rows, list):
+        rows = []
+    research_only = _dashboard_rows_are_research_only(summary, rows)
+    selection_source = summary.get("selected_factor_selection_source") or _first_output_row_value(
+        rows,
+        "selected_factor_selection_source",
+    )
+    if selection_source is not None:
+        summary.setdefault("selected_factor_selection_source", selection_source)
+    if research_only:
+        summary["recommendation_output_key"] = "research_signals"
+        summary["recommendation_output_label"] = "Research signals (not tradable)"
+        summary["recommendation_output_available"] = False
+        summary["tradable_output_available"] = False
+        summary["current_recommendations_available"] = False
+        summary["tradable_recommendations_available"] = False
+        summary["research_only"] = True
+        summary["decision_support_tier"] = "research_signals"
+        summary["fail_closed"] = True
+        if selection_source is None:
+            summary.setdefault("selected_factor_selection_source", "unverified_legacy_or_missing_metadata")
+        summary["same_run_factor_selection_blocked_for_tradable"] = True
+        summary["same_sample_selection_blocked_for_tradable"] = True
+        summary["factor_selection_warning"] = (
+            "실전 출력임을 입증하는 안전 메타데이터가 없거나 같은 실행에서 고른 연구용 팩터입니다. "
+            "대시보드는 보수적으로 매매 권고가 아닌 연구용 신호로 처리합니다."
+        )
+        if isinstance(summary.get("selected_reason"), str):
+            summary["selected_reason"] = (
+                summary["selected_reason"]
+                .replace(
+                    "use a predeclared selected factor or walk-forward selection for practical labels",
+                    "use a predeclared selected factor frozen before the run for practical labels",
+                )
+                .replace(
+                    "predeclare a selected factor or use walk-forward selection for practical labels",
+                    "predeclare/freeze the selected factor before the run for practical labels",
+                )
+            )
+        summary["tradability_blockers"] = _append_unique(
+            summary.get("tradability_blockers") or summary.get("fail_closed_reasons"),
+            "factor_selection_policy_available",
+            "no_same_sample_factor_selection",
+        )
+        summary["execution_limitations"] = _append_unique(
+            summary.get("execution_limitations"),
+            "factor_selection_policy_available",
+            "no_same_sample_factor_selection",
+        )
+        summary["fail_closed_reasons"] = _append_unique(
+            summary.get("fail_closed_reasons") or summary.get("tradability_blockers"),
+            "factor_selection_policy_available",
+            "no_same_sample_factor_selection",
+        )
+        requirements = summary.setdefault("tradability_requirements", {})
+        if isinstance(requirements, dict):
+            requirements["factor_selection_policy_available"] = False
+            requirements["no_same_sample_factor_selection"] = False
+        payload["latest_output_rows"] = _sanitize_research_only_output_rows(rows, summary)
+        data_quality = payload.get("data_quality_summary")
+        if isinstance(data_quality, dict):
+            row_count = len(payload["latest_output_rows"])
+            if row_count:
+                data_quality["capacity_status_counts"] = {"research_only_gate_failed": row_count}
+    return payload
 
 
 GATE_LABELS_KO: dict[str, tuple[str, str]] = {
     "fresh_live_data": ("최신 실데이터", "전일/최근 미국 종가 데이터가 충분히 최신인지 확인합니다."),
-    "factor_selection_policy_available": ("사전 정의된 팩터 선택 정책", "같은 실행에서 고른 팩터를 매매 권고로 쓰지 않도록 막습니다."),
+    "factor_selection_policy_available": ("사전 고정된 팩터 선택 정책", "같은 실행의 검증/연구 순위로 고른 팩터를 매매 권고로 쓰지 않도록 막습니다."),
+    "no_same_sample_factor_selection": ("동일 표본 팩터 선택 차단", "같은 실행·같은 표본에서 고른 연구용 팩터가 실전 추천으로 승격되지 않았는지 확인합니다."),
     "no_explicit_price_symbol_cap": ("가격 수집 범위 제한 없음", "디버그용 종목 수 제한이 걸린 실행인지 확인합니다."),
     "complete_requested_price_coverage": ("요청 종목 가격 커버리지", "요청한 후보 종목이 가격/이력 조건을 충분히 통과했는지 확인합니다."),
     "broad_or_approved_tradable_universe": ("거래 가능 유니버스 근거", "충분히 넓거나 사용자가 승인한 거래 가능 후보군인지 확인합니다."),
@@ -2135,6 +2373,15 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload.get("dashboard"), dict):
         dashboard = payload["dashboard"]
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        config = payload.get("config", {}) if isinstance(payload.get("config"), dict) else {}
+        summary = dashboard.setdefault("summary", {})
+        if isinstance(summary, dict):
+            if payload.get("selected_factor") is not None:
+                summary.setdefault("selected_factor", payload.get("selected_factor"))
+            summary.setdefault("default_top_n", config.get("top_n", 20))
+            summary.setdefault("default_max_weight", config.get("max_weight", 0.1))
+            _copy_summary_safety_fields(summary, metadata)
         dashboard.setdefault("source_json", str(path))
         dashboard.setdefault(
             "scenario_available_dates",
@@ -2157,7 +2404,7 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
                 ]
             ),
         )
-        return dashboard
+        return _sanitize_dashboard_payload_safety(dashboard)
     return _fallback_dashboard_payload(payload, path)
 
 
@@ -2178,6 +2425,8 @@ def _fallback_dashboard_payload(payload: dict[str, Any], path: Path) -> dict[str
         "default_top_n": config.get("top_n", 20),
         "default_max_weight": config.get("max_weight", 0.1),
     }
+    summary = _copy_summary_safety_fields(summary, metadata)
+    rows = _sanitize_research_only_output_rows(rows, summary)
     data_as_of = str(metadata.get("data_as_of") or metadata.get("run_timestamp_utc") or "unknown")[:10]
     holdings = []
     for rank, row in enumerate(rows[:50], start=1):
@@ -2208,69 +2457,68 @@ def _fallback_dashboard_payload(payload: dict[str, Any], path: Path) -> dict[str
             "factor_count": 1 if selected_factor else 0,
         }
     ] if holdings else []
-    return _json_safe(
-        {
-            "schema_version": 1,
-            "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-            "source_json": str(path),
-            "summary": summary,
-            "periods": [{"key": "latest", "label": "최신", "trading_days": None}],
-            "factor_options": [
-                {
-                    "factor": selected_factor,
-                    "category": "unknown",
-                    "description_ko": "legacy JSON에서 읽은 선택 팩터입니다.",
-                    "selected_by_run": True,
-                }
-            ] if selected_factor else [],
-            "factor_leaders": factor_leaders,
-            "factor_period_rankings": [],
-            "factor_period_matrix": [
-                {
-                    "date": data_as_of,
-                    "window": "latest",
-                    "window_label": "최신",
-                    "factors": [selected_factor] if selected_factor else [],
-                    "returns": [None] if selected_factor else [],
-                    "factor_count": 1 if selected_factor else 0,
-                    "exported_factor_count": 1 if selected_factor else 0,
-                }
-            ] if selected_factor else [],
-            "holdings": holdings,
-            "factor_score_snapshots": [
-                {
-                    "date": data_as_of,
-                    "factor": selected_factor,
-                    "score_date": data_as_of,
-                    "available_count": len(holdings),
-                    "rows": [[row["symbol"], _rounded_float(row["score"])] for row in holdings if row.get("symbol")],
-                }
-            ] if selected_factor and holdings else [],
-            "scenario_available_dates": [data_as_of] if selected_factor and holdings else [],
-            "scenario_available_dates_by_factor": {selected_factor: [data_as_of]}
-            if selected_factor and holdings
-            else {},
-            "factor_backtest_series": [],
-            "latest_output_rows": rows[:50],
-            "data_quality_summary": {
-                "candidate_universe_size": metadata.get("candidate_universe_size"),
-                "eligible_price_universe_size": metadata.get("eligible_price_universe_size"),
-                "liquidity_eligible_universe_size": metadata.get("liquidity_eligible_universe_size"),
-                "provider": metadata.get("provider"),
-                "data_as_of": metadata.get("data_as_of"),
-                "data_quality_status_counts": {},
-                "source_counts": {},
-            },
-            "tradability_gate": _tradability_gate_rows(metadata),
-            "factor_diagnostics": {
-                "scope_note_ko": "legacy JSON에는 상세 팩터 진단이 없어 제한된 정보만 표시합니다.",
-                "category_summary": payload.get("factor_category_summary", []) if isinstance(payload.get("factor_category_summary"), list) else [],
-                "rank_ic_top": payload.get("factor_rank_ic", [])[:10] if isinstance(payload.get("factor_rank_ic"), list) else [],
-                "redundancy_top": payload.get("factor_redundancy", [])[:10] if isinstance(payload.get("factor_redundancy"), list) else [],
-            },
-            "notes_ko": ["이 파일은 legacy run-results JSON에서 만든 제한적 대시보드 payload입니다."],
-        }
-    )
+    legacy_payload = {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "source_json": str(path),
+        "summary": summary,
+        "periods": [{"key": "latest", "label": "최신", "trading_days": None}],
+        "factor_options": [
+            {
+                "factor": selected_factor,
+                "category": "unknown",
+                "description_ko": "legacy JSON에서 읽은 선택 팩터입니다.",
+                "selected_by_run": True,
+            }
+        ] if selected_factor else [],
+        "factor_leaders": factor_leaders,
+        "factor_period_rankings": [],
+        "factor_period_matrix": [
+            {
+                "date": data_as_of,
+                "window": "latest",
+                "window_label": "최신",
+                "factors": [selected_factor] if selected_factor else [],
+                "returns": [None] if selected_factor else [],
+                "factor_count": 1 if selected_factor else 0,
+                "exported_factor_count": 1 if selected_factor else 0,
+            }
+        ] if selected_factor else [],
+        "holdings": holdings,
+        "factor_score_snapshots": [
+            {
+                "date": data_as_of,
+                "factor": selected_factor,
+                "score_date": data_as_of,
+                "available_count": len(holdings),
+                "rows": [[row["symbol"], _rounded_float(row["score"])] for row in holdings if row.get("symbol")],
+            }
+        ] if selected_factor and holdings else [],
+        "scenario_available_dates": [data_as_of] if selected_factor and holdings else [],
+        "scenario_available_dates_by_factor": {selected_factor: [data_as_of]}
+        if selected_factor and holdings
+        else {},
+        "factor_backtest_series": [],
+        "latest_output_rows": rows[:50],
+        "data_quality_summary": {
+            "candidate_universe_size": metadata.get("candidate_universe_size"),
+            "eligible_price_universe_size": metadata.get("eligible_price_universe_size"),
+            "liquidity_eligible_universe_size": metadata.get("liquidity_eligible_universe_size"),
+            "provider": metadata.get("provider"),
+            "data_as_of": metadata.get("data_as_of"),
+            "data_quality_status_counts": {},
+            "source_counts": {},
+        },
+        "tradability_gate": _tradability_gate_rows(metadata),
+        "factor_diagnostics": {
+            "scope_note_ko": "legacy JSON에는 상세 팩터 진단이 없어 제한된 정보만 표시합니다.",
+            "category_summary": payload.get("factor_category_summary", []) if isinstance(payload.get("factor_category_summary"), list) else [],
+            "rank_ic_top": payload.get("factor_rank_ic", [])[:10] if isinstance(payload.get("factor_rank_ic"), list) else [],
+            "redundancy_top": payload.get("factor_redundancy", [])[:10] if isinstance(payload.get("factor_redundancy"), list) else [],
+        },
+        "notes_ko": ["이 파일은 legacy run-results JSON에서 만든 제한적 대시보드 payload입니다."],
+    }
+    return _json_safe(_sanitize_dashboard_payload_safety(legacy_payload))
 
 
 def _merge_dashboard_history(
@@ -2288,6 +2536,7 @@ def _merge_dashboard_history(
         if isinstance(existing, dict) and isinstance(existing.get("runs"), list):
             payloads.extend(item for item in existing["runs"] if isinstance(item, dict))
     payloads.extend(new_payloads)
+    payloads = [_sanitize_dashboard_payload_safety(payload) for payload in payloads]
     deduped: dict[str, dict[str, Any]] = {}
     for payload in payloads:
         summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}

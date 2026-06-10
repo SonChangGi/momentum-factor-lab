@@ -14,7 +14,7 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
             config=config,
             selected_factor=config.selected_factor,
             metadata={
-                "recommendation_output_key": "recommendations",
+                "recommendation_output_key": "research_signals",
                 "selected_factor": config.selected_factor,
                 "recommendation_status": "current_live_with_limitations_test",
                 "current_recommendations_available": True,
@@ -29,6 +29,7 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
                 "universe_profile": config.universe_profile,
                 "factor_selection_mode": config.effective_factor_selection_mode,
                 "selected_factor_selection_source": "predeclared",
+                "same_run_factor_selection_blocked_for_tradable": False,
                 "same_sample_selection_blocked_for_tradable": False,
                 "decision_support_tier": "practical_recommendations",
                 "fail_closed": False,
@@ -120,6 +121,7 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
     assert summary["fresh_live_data_available"]
     assert summary["universe_profile"] == "aggressive_stock_only"
     assert summary["factor_selection_mode"] == "predeclared"
+    assert not summary["same_run_factor_selection_blocked_for_tradable"]
     assert not summary["same_sample_selection_blocked_for_tradable"]
     assert summary["decision_support_tier"] == "practical_recommendations"
     assert not summary["fail_closed"]
@@ -174,12 +176,25 @@ def _install_fake_reports(monkeypatch, tmp_path, captured):
                 "universe_profile": config.universe_profile,
                 "factor_selection_mode": config.effective_factor_selection_mode,
                 "selected_factor_selection_source": "research_validation",
-                "same_sample_selection_blocked_for_tradable": False,
-                "decision_support_tier": "non_current_reference",
+                "same_run_factor_selection_blocked_for_tradable": True,
+                "same_sample_selection_blocked_for_tradable": True,
+                "decision_support_tier": "research_signals",
                 "fail_closed": True,
-                "fail_closed_reasons": ["fresh_live_data"],
-                "tradability_blockers": ["fresh_live_data"],
-                "execution_limitations": ["fresh_live_data"],
+                "fail_closed_reasons": [
+                    "fresh_live_data",
+                    "factor_selection_policy_available",
+                    "no_same_sample_factor_selection",
+                ],
+                "tradability_blockers": [
+                    "fresh_live_data",
+                    "factor_selection_policy_available",
+                    "no_same_sample_factor_selection",
+                ],
+                "execution_limitations": [
+                    "fresh_live_data",
+                    "factor_selection_policy_available",
+                    "no_same_sample_factor_selection",
+                ],
                 "data_quality_gate": {"manifest_available": True, "recommendation_rows_pass": True},
                 "data_quality_status_counts": {"pass": 3},
                 "recommendation_data_quality_status_counts": {"pass": 3},

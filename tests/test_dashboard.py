@@ -31,6 +31,12 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert payload["schema_version"] == 1
     assert {period["key"] for period in payload["periods"]} == {"1M", "3M", "6M", "1Y"}
     assert payload["summary"]["selected_factor"] == result.selected_factor
+    assert payload["summary"]["recommendation_output_key"] == "research_signals"
+    assert payload["summary"]["research_only"] is True
+    assert payload["summary"]["same_run_factor_selection_blocked_for_tradable"] is True
+    assert payload["summary"]["same_sample_selection_blocked_for_tradable"] is True
+    assert payload["summary"]["selected_factor_selection_source"] == "research_validation"
+    assert payload["summary"]["current_recommendations_available"] is False
     assert payload["factor_options"]
     assert payload["factor_options"][0]["description_ko"]
     assert payload["factor_leaders"]
@@ -120,7 +126,25 @@ def test_run_results_json_includes_dashboard_payload(tmp_path):
 
 def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     run_payload = {
-        "metadata": {"run_timestamp_utc": "2026-06-09T00:00:00Z", "data_as_of": "2026-06-08"},
+        "metadata": {
+            "run_timestamp_utc": "2026-06-09T00:00:00Z",
+            "data_as_of": "2026-06-08",
+            "recommendation_output_key": "research_signals",
+            "recommendation_output_label": "Research signals (not tradable)",
+            "current_recommendations_available": False,
+            "tradable_recommendations_available": False,
+            "research_only": True,
+            "same_run_factor_selection_blocked_for_tradable": True,
+            "same_sample_selection_blocked_for_tradable": True,
+            "selected_factor_selection_source": "research_validation",
+            "validation_selected_factor": "mom_1m",
+            "factor_selection_warning": (
+                "Validation-selected factor is a same-run research ranking and is blocked from tradable "
+                "recommendation output."
+            ),
+            "tradability_blockers": ["factor_selection_policy_available", "no_same_sample_factor_selection"],
+            "execution_limitations": ["factor_selection_policy_available", "no_same_sample_factor_selection"],
+        },
         "config": {"top_n": 2, "max_weight": 0.1},
         "selected_factor": "mom_1m",
         "dashboard": {
@@ -268,10 +292,20 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "renderWithBusy" in js
     assert "팩터 점수 비례 배분" in js
     assert "종목/비중 가능" in js
+    assert "같은 실행 선택 차단" in js
+    assert "매매 권고 아님" in js
+    assert "표시용 투자 시나리오" not in js
+    assert "투자 시나리오" not in js
     assert "recomputeWeights" not in js
     assert "weighted.slice(0, 15)" not in js
     combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
     assert combined["runs"][0]["summary"]["selected_factor"] == "mom_1m"
+    assert combined["runs"][0]["summary"]["recommendation_output_key"] == "research_signals"
+    assert combined["runs"][0]["summary"]["research_only"] is True
+    assert combined["runs"][0]["summary"]["same_run_factor_selection_blocked_for_tradable"] is True
+    assert combined["runs"][0]["summary"]["same_sample_selection_blocked_for_tradable"] is True
+    assert combined["runs"][0]["summary"]["current_recommendations_available"] is False
+    assert combined["runs"][0]["summary"]["tradable_recommendations_available"] is False
     assert combined["runs"][0]["factor_score_snapshots"]
     assert combined["runs"][0]["scenario_available_dates"] == ["2026-06-08"]
     assert combined["runs"][0]["scenario_available_dates_by_factor"] == {
@@ -579,6 +613,73 @@ def test_legacy_run_results_fallback_has_leader_row(tmp_path):
     assert run["factor_leaders"]
     assert run["factor_leaders"][0]["window"] == "latest"
     assert run["holdings"]
+
+
+def test_dashboard_sanitizes_legacy_research_signal_rows(tmp_path):
+    run_json = tmp_path / "run_results_legacy_research.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-10T00:00:00Z",
+                    "summary": {
+                        "run_timestamp_utc": "2026-06-10T00:00:00Z",
+                        "data_as_of": "2026-06-09",
+                        "selected_factor": "mom_9_1",
+                        "recommendation_output_label": "Practical recommendations",
+                        "decision_support_tier": "practical_recommendations",
+                        "selected_reason": (
+                            "Same-run validation selection is blocked from tradable recommendation output; "
+                            "use a predeclared selected factor or walk-forward selection for practical labels."
+                        ),
+                    },
+                    "periods": [],
+                    "factor_options": [],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                    "factor_score_snapshots": [],
+                    "latest_output_rows": [
+                        {
+                            "rank": 1,
+                            "symbol": "VSCO",
+                            "score": 1.2,
+                            "weight": 0.0,
+                            "proposed_weight": 0.1,
+                            "pre_cap_weight": 0.2,
+                            "target_notional": 10_000,
+                            "capacity_status": "pass",
+                            "capacity_pass": True,
+                            "capacity_warning": "Capacity check passed.",
+                            "recommendation_output": "research_signals",
+                            "selected_factor_selection_source": "research_validation",
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
+    run = combined["runs"][0]
+    summary = run["summary"]
+    row = run["latest_output_rows"][0]
+
+    assert summary["recommendation_output_key"] == "research_signals"
+    assert summary["recommendation_output_label"] == "Research signals (not tradable)"
+    assert summary["decision_support_tier"] == "research_signals"
+    assert summary["research_only"] is True
+    assert summary["same_sample_selection_blocked_for_tradable"] is True
+    assert "no_same_sample_factor_selection" in summary["tradability_blockers"]
+    assert "walk-forward selection for practical labels" not in summary["selected_reason"]
+    assert row["proposed_weight"] == 0.0
+    assert row["pre_cap_weight"] == 0.0
+    assert row["target_notional"] == 0.0
+    assert row["capacity_pass"] is False
+    assert row["capacity_status"] == "research_only_gate_failed"
 
 
 def test_scheduled_dashboard_json_output_is_parseable(monkeypatch, tmp_path, capsys):

@@ -62,6 +62,20 @@ def _assert_research_only_fail_closed(result, *expected_blockers: str) -> None:
     assert result.metadata["research_only"]
     assert result.metadata["recommendation_output_key"] == "research_signals"
     assert result.recommendations["weight"].eq(0.0).all()
+    if "proposed_weight" in result.recommendations:
+        assert result.recommendations["proposed_weight"].eq(0.0).all()
+    if "pre_cap_weight" in result.recommendations:
+        assert result.recommendations["pre_cap_weight"].eq(0.0).all()
+    if "target_notional" in result.recommendations:
+        assert result.recommendations["target_notional"].fillna(0.0).eq(0.0).all()
+    if "tradable_weight_enabled" in result.recommendations:
+        assert not result.recommendations["tradable_weight_enabled"].astype(bool).any()
+    if "capacity_pass" in result.recommendations:
+        assert not result.recommendations["capacity_pass"].astype(bool).any()
+    if "capacity_status" in result.recommendations:
+        assert not result.recommendations["capacity_status"].eq("pass").any()
+    if "research_only_reason" in result.recommendations:
+        assert result.recommendations["research_only_reason"].astype(str).str.len().gt(0).all()
     assert result.metadata["fail_closed"]
     for blocker in expected_blockers:
         assert blocker in result.metadata["tradability_blockers"]
@@ -452,6 +466,7 @@ def test_unstructured_pit_attestation_does_not_satisfy_practical_gate(tmp_path, 
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -469,7 +484,7 @@ def test_unstructured_pit_attestation_does_not_satisfy_practical_gate(tmp_path, 
     _assert_research_only_fail_closed(result, "point_in_time_universe")
 
 
-def test_fresh_live_run_uses_validation_selected_factor_without_false_limitation(tmp_path, monkeypatch):
+def test_fresh_live_run_blocks_same_sample_validation_factor_from_tradable_output(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -488,12 +503,17 @@ def test_fresh_live_run_uses_validation_selected_factor_without_false_limitation
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
     assert result.selected_factor == result.metadata["validation_selected_factor"]
     assert result.metadata["same_sample_selection_blocked_for_tradable"]
-    _assert_research_only_fail_closed(result, "factor_selection_policy_available")
+    assert not result.metadata["tradability_requirements"]["no_same_sample_factor_selection"]
+    _assert_research_only_fail_closed(
+        result,
+        "factor_selection_policy_available",
+        "no_same_sample_factor_selection",
+    )
     assert WEIGHTING_COLUMNS.issubset(result.recommendations.columns)
     assert result.recommendations["weighting_method"].eq("score_size_liquidity").all()
 
 
-def test_validation_ranked_factor_exports_recommendations_without_same_sample_limitation(tmp_path, monkeypatch):
+def test_validation_ranked_factor_exports_research_signals_with_same_sample_blocker(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
         report_dir=tmp_path / "reports",
@@ -512,8 +532,13 @@ def test_validation_ranked_factor_exports_recommendations_without_same_sample_li
     result = write_reports(run_analysis(config))
 
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
-    _assert_research_only_fail_closed(result, "factor_selection_policy_available")
     assert result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert not result.metadata["tradability_requirements"]["no_same_sample_factor_selection"]
+    _assert_research_only_fail_closed(
+        result,
+        "factor_selection_policy_available",
+        "no_same_sample_factor_selection",
+    )
     assert WEIGHTING_COLUMNS.issubset(result.recommendations.columns)
 
     payload = json.loads(Path(result.output_paths["json"]).read_text(encoding="utf-8"))
@@ -539,6 +564,7 @@ def test_market_cap_enrichment_does_not_change_price_universe_or_coverage(tmp_pa
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -569,6 +595,7 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -590,6 +617,7 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
     assert result.selected_factor == "mom_1m"
     assert result.metadata["factor_selection_mode"] == "predeclared"
     assert result.metadata["selected_factor_selection_source"] == "predeclared"
+    assert not result.metadata["same_run_factor_selection_blocked_for_tradable"]
     assert not result.metadata["same_sample_selection_blocked_for_tradable"]
     assert result.metadata["recommendation_status"] == "current_live"
     assert result.metadata["current_recommendations_available"]
@@ -631,10 +659,15 @@ def test_walk_forward_factor_selection_records_limitation_without_frozen_policy(
 
     assert result.metadata["selected_factor_selection_source"] == "walk_forward"
     assert not result.metadata["selection_policy_frozen_for_live"]
-    assert "factor_selection_policy_available" not in result.metadata["execution_limitations"]
-    assert result.metadata["current_recommendations_available"]
-    assert result.metadata["tradable_recommendations_available"]
-    assert result.recommendations["weight"].gt(0.0).any()
+    assert result.metadata["same_run_factor_selection_blocked_for_tradable"]
+    assert result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert not result.metadata["tradability_requirements"]["factor_selection_policy_available"]
+    assert not result.metadata["tradability_requirements"]["no_same_sample_factor_selection"]
+    _assert_research_only_fail_closed(
+        result,
+        "factor_selection_policy_available",
+        "no_same_sample_factor_selection",
+    )
 
 
 def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
@@ -646,6 +679,7 @@ def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -694,6 +728,7 @@ def test_stale_live_data_zeroes_recommendation_weights(tmp_path, monkeypatch):
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
     )
     market_data = _live_fixture_market_data(config, subset_run=False, point_in_time=True)
     market_data.as_of = pd.Timestamp("2020-01-01")
@@ -719,6 +754,7 @@ def test_missing_volume_data_has_explicit_liquidity_capacity_warning(tmp_path, m
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -746,6 +782,7 @@ def test_data_quality_anomaly_blocks_live_tradable_output(tmp_path, monkeypatch)
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -775,6 +812,7 @@ def test_close_price_fallback_provider_blocks_live_tradable_output(tmp_path, mon
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -805,6 +843,7 @@ def test_sparse_liquidity_observations_record_advisory_limitation(tmp_path, monk
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -831,6 +870,7 @@ def test_live_recommendations_record_missing_capacity_inputs_as_limitation(tmp_p
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
     )
     monkeypatch.setattr(
         "momentum_factor_lab.workflow.load_market_data",
@@ -853,6 +893,7 @@ def test_capacity_adv_participation_limit_records_advisory_limitation(tmp_path, 
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=10_000_000_000,
         max_adv_participation=0.0001,
     )
@@ -878,6 +919,7 @@ def test_small_user_universe_records_limitations_unless_approved_with_provenance
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
         universe=["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN"],
@@ -903,6 +945,7 @@ def test_current_source_approval_cannot_label_small_universe_tradable(tmp_path, 
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
         universe=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"],
@@ -937,6 +980,7 @@ def test_small_user_universe_with_approved_provenance_can_use_tradable_labels(tm
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
         universe=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"],
@@ -969,6 +1013,7 @@ def test_incomplete_requested_price_coverage_records_subset_limitation(tmp_path,
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -1091,7 +1136,7 @@ def test_non_current_pdf_labels_output_as_reference_recommendations(tmp_path, mo
     executive_lines = "\n".join(text_pages[0][1])
     assert "Output type: Reference research signals (not current)" in executive_lines
     assert "Execution limitations:" in executive_lines
-    assert "Recommendation weighting: score_size_liquidity" in executive_lines
+    assert "Output-row weighting policy: score_size_liquidity" in executive_lines
     assert "cash remainder:" in executive_lines
     assert "Liquidity/capacity:" in executive_lines
     assert "Reference research signals (not current)" in table_titles
@@ -1109,7 +1154,7 @@ def test_pdf_summary_lines_include_weighting_method_and_cash_remainder(tmp_path)
 
     lines = "\n".join(_executive_summary_lines(result))
 
-    assert "Recommendation weighting: score_size_liquidity" in lines
+    assert "Output-row weighting policy: score_size_liquidity" in lines
     assert "cash remainder:" in lines
 
 
@@ -1122,6 +1167,7 @@ def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monke
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -1148,7 +1194,7 @@ def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monke
     output_title = "Practical recommendations"
     assert f"Output type: {output_title}" in executive_lines
     assert "Execution limitations: none" in executive_lines
-    assert "Recommendation weighting: score_size_liquidity" in executive_lines
+    assert "Output-row weighting policy: score_size_liquidity" in executive_lines
     assert "cash remainder:" in executive_lines
     assert output_title in table_pages
     assert "Reference research signals (not current)" not in table_pages
@@ -1245,10 +1291,16 @@ def test_research_validation_mode_records_audit_warning_not_blocker(tmp_path, mo
 
     assert result.metadata["factor_selection_mode"] == "research_validation"
     assert result.metadata["selected_factor_selection_source"] == "research_validation"
+    assert result.metadata["same_run_factor_selection_blocked_for_tradable"]
     assert result.metadata["same_sample_selection_blocked_for_tradable"]
     assert result.metadata["factor_selection_warning"]
     assert not result.metadata["tradability_requirements"]["factor_selection_policy_available"]
-    _assert_research_only_fail_closed(result, "factor_selection_policy_available")
+    assert not result.metadata["tradability_requirements"]["no_same_sample_factor_selection"]
+    _assert_research_only_fail_closed(
+        result,
+        "factor_selection_policy_available",
+        "no_same_sample_factor_selection",
+    )
 
 
 def test_walk_forward_mode_records_prior_window_selection_history(tmp_path):
@@ -1264,7 +1316,9 @@ def test_walk_forward_mode_records_prior_window_selection_history(tmp_path):
 
     assert result.metadata["factor_selection_mode"] == "walk_forward"
     assert result.metadata["selected_factor_selection_source"] == "walk_forward"
-    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert not result.metadata["tradability_requirements"]["no_same_sample_factor_selection"]
+    assert result.metadata["same_run_factor_selection_blocked_for_tradable"]
     assert not result.metadata["selection_policy_frozen_for_live"]
     assert not result.selection_history.empty
     assert result.selection_history["selection_source"].eq("walk_forward").all()

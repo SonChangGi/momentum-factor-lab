@@ -109,6 +109,7 @@ def _status_panel_frame(result: RunResult) -> pd.DataFrame:
         "selected_factor",
         "validation_selected_factor",
         "selected_factor_selection_source",
+        "same_run_factor_selection_blocked_for_tradable",
         "same_sample_selection_blocked_for_tradable",
         "factor_selection_warning",
         "recommendation_weighting_method",
@@ -230,6 +231,8 @@ def _liquidity_capacity_frame(result: RunResult) -> pd.DataFrame:
         "pre_cap_weight",
         "weight_cap",
         "weight_cap_excess",
+        "tradable_weight_enabled",
+        "research_only_reason",
         "score_component",
         "market_cap",
         "market_cap_source",
@@ -388,9 +391,10 @@ def _executive_summary_lines(result: RunResult) -> list[str]:
         f"Output type: {result.metadata.get('recommendation_output_label', 'Model-portfolio output rows')}",
         f"Execution limitations: {limitation_text}",
         (
-            "Recommendation weighting: "
+            "Output-row weighting policy: "
             f"{result.metadata.get('recommendation_weighting_method', 'unavailable')} | "
-            f"cash remainder: {cash_text}"
+            f"cash remainder: {cash_text} | "
+            f"{result.metadata.get('research_signal_weight_policy', 'research-only rows are not tradable')}"
         ),
         f"Liquidity/capacity: {result.metadata.get('recommendation_capacity_warning', 'not reported')}",
         f"Data quality: {result.metadata.get('data_quality_status_counts', {})}",
@@ -418,7 +422,7 @@ def write_pdf(result: RunResult, path: Path) -> None:
         _table_page(pdf, "Data Sources and Coverage", result.data_sources)
         _table_page(pdf, "Symbol-level Price Sources", result.market_data.price_sources, max_rows=24)
         _table_page(pdf, "Data Quality Diagnostics", result.data_quality, max_rows=32)
-        _table_page(pdf, "Practical Execution Checklist", _tradability_gate_frame(result))
+        _table_page(pdf, "Practical Output Gate Checklist", _tradability_gate_frame(result))
         _table_page(pdf, "Universe Source / Provenance Dashboard", result.data_sources)
         _table_page(pdf, "Factor Family Leaderboard", _factor_family_leaderboard_frame(result))
         _table_page(pdf, "Factor Overlap / Top-20 Consensus", _factor_overlap_top20_frame(result))

@@ -104,6 +104,10 @@ class RunConfig:
             raise ValueError("sec_user_agent must be non-empty when provided")
         if self.selected_factor is not None and not self.selected_factor.strip():
             raise ValueError("selected_factor must be a non-empty factor name when provided")
+        if self.factor_selection_mode == "predeclared" and self.selected_factor is None:
+            raise ValueError("factor_selection_mode='predeclared' requires selected_factor")
+        if self.selected_factor is not None and self.factor_selection_mode != "predeclared":
+            raise ValueError("selected_factor requires factor_selection_mode='predeclared'")
         if self.recommendation_weighting_method not in {"equal", "score_size_liquidity"}:
             raise ValueError("recommendation_weighting_method must be equal or score_size_liquidity")
         weighting_values = (
@@ -147,8 +151,6 @@ class RunConfig:
 
     @property
     def effective_factor_selection_mode(self) -> str:
-        if self.factor_selection_mode == "research_validation" and self.selected_factor is not None:
-            return "predeclared"
         return self.factor_selection_mode
 
     @property

@@ -167,7 +167,10 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--selected-factor",
         default=RUN_DEFAULTS["selected_factor"],
-        help="Frozen/predeclared factor override; omitted values let validation-composite backtests choose the recommendation factor.",
+        help=(
+            "Frozen/predeclared factor override for practical output. Must be paired with "
+            "--factor-selection-mode predeclared; otherwise validation/walk-forward selections stay research-only."
+        ),
     )
     run.add_argument(
         "--factor-selection-mode",
@@ -293,7 +296,9 @@ def _print_summary(summary: dict[str, object], result: object, output_key: str) 
     print(f"Liquidity/capacity: {summary['recommendation_capacity_warning']}")
     cash_weight = summary["recommendation_cash_weight"]
     cash_text = f"{cash_weight:.2%}" if isinstance(cash_weight, int | float) else "unavailable"
-    print(f"Recommendation weighting: {summary['recommendation_weighting_method']} (cash remainder {cash_text})")
+    print(f"Output-row weighting policy: {summary['recommendation_weighting_method']} (cash remainder {cash_text})")
+    if summary.get("fail_closed"):
+        print("Research-only fail-closed: tradable/proposed weights are forced to zero.")
     print(f"Data as of: {summary['data_as_of']} via {summary['provider']}")
     print(
         "Universe: "
@@ -327,6 +332,10 @@ def execute_config(config: RunConfig, *, emit_json: bool = False) -> dict[str, o
         "factor_selection_mode": result.metadata["factor_selection_mode"],
         "selected_factor_selection_source": result.metadata["selected_factor_selection_source"],
         "same_sample_selection_blocked_for_tradable": result.metadata["same_sample_selection_blocked_for_tradable"],
+        "same_run_factor_selection_blocked_for_tradable": result.metadata.get(
+            "same_run_factor_selection_blocked_for_tradable",
+            result.metadata["same_sample_selection_blocked_for_tradable"],
+        ),
         "decision_support_tier": result.metadata["decision_support_tier"],
         "fail_closed": result.metadata["fail_closed"],
         "fail_closed_reasons": result.metadata.get("fail_closed_reasons", []),
@@ -506,7 +515,7 @@ def _wizard_namespace() -> argparse.Namespace:
     )
     values["top_n"] = _ask_value(
         "Top-N holdings",
-        "Number of highest-scoring stocks held/recommended per rebalance.",
+        "Number of highest-scoring stocks shown per rebalance; practical recommendations require tradability gates.",
         values["top_n"],
         int,
         lambda value: value >= 1,
@@ -615,16 +624,16 @@ def _wizard_namespace() -> argparse.Namespace:
 
     if _ask_bool("Advanced settings", "Adjust factor-selection, fallback, retry, and data-quality controls?", False):
         values["recommendation_weighting_method"] = _ask_choice(
-            "Recommendation weighting method",
-            "Current recommendation weighting; backtests remain comparable capped top-N portfolios.",
+            "Output-row weighting method",
+            "Practical output weighting when all gates pass; backtests remain comparable capped top-N portfolios.",
             values["recommendation_weighting_method"],
             ["equal", "score_size_liquidity"],
         )
         for field, label, description in [
-            ("recommendation_score_weight", "Recommendation score weight", "Weight assigned to selected-factor rank score."),
-            ("recommendation_market_cap_weight", "Recommendation market-cap weight", "Weight assigned to market-cap size evidence."),
-            ("recommendation_liquidity_weight", "Recommendation liquidity weight", "Weight assigned to ADV liquidity evidence."),
-            ("recommendation_rank_floor", "Recommendation rank floor", "Minimum rank component used before normalization."),
+            ("recommendation_score_weight", "Output score weight", "Weight assigned to selected-factor rank score when practical output is enabled."),
+            ("recommendation_market_cap_weight", "Output market-cap weight", "Weight assigned to market-cap size evidence when practical output is enabled."),
+            ("recommendation_liquidity_weight", "Output liquidity weight", "Weight assigned to ADV liquidity evidence when practical output is enabled."),
+            ("recommendation_rank_floor", "Output rank floor", "Minimum rank component used before normalization when practical output is enabled."),
         ]:
             values[field] = _ask_value(label, description, values[field], float, lambda value: value >= 0, "enter a non-negative number")
         values["disable_recommendation_market_cap_lookup"] = _ask_bool(
@@ -645,8 +654,16 @@ def _wizard_namespace() -> argparse.Namespace:
         values["max_price_missing_ratio"] = _ask_value("Max price missing ratio", "Hard recent missing-price threshold.", values["max_price_missing_ratio"], float, lambda value: 0 <= value <= 1, "enter a decimal in [0, 1]")
         values["max_volume_missing_ratio"] = _ask_value("Max volume missing ratio", "Hard recent missing-volume threshold.", values["max_volume_missing_ratio"], float, lambda value: 0 <= value <= 1, "enter a decimal in [0, 1]")
         values["max_extreme_daily_return"] = _ask_value("Max extreme daily return", "Absolute adjusted daily-return anomaly threshold.", values["max_extreme_daily_return"], float, lambda value: value > 0, "enter a positive number")
-        values["selected_factor"] = _ask_optional("Selected factor override", "Optional frozen factor name; blank lets validation select.", values["selected_factor"], str, lambda value: bool(value.strip()), "enter a factor name or blank/none")
-        values["factor_selection_mode"] = _ask_choice("Factor selection mode", "Controls anti-overfit gating for selected factor.", values["factor_selection_mode"], ["research_validation", "predeclared", "walk_forward"])
+        values["selected_factor"] = _ask_optional("Selected factor override", "Optional frozen factor name; blank lets validation select a research-only factor.", values["selected_factor"], str, lambda value: bool(value.strip()), "enter a factor name or blank/none")
+        values["factor_selection_mode"] = _ask_choice(
+            "Factor selection mode",
+            (
+                "research_validation and in-run walk-forward stay research-only; only an explicit "
+                "predeclared/frozen selected factor can enable practical rows when every tradability gate passes."
+            ),
+            values["factor_selection_mode"],
+            ["research_validation", "predeclared", "walk_forward"],
+        )
         values["selection_window"] = _ask_value("Selection window label", "Audit label for factor selection policy/window.", values["selection_window"], str, lambda value: bool(value.strip()), "enter a non-empty label")
         values["frozen_policy_path"] = _ask_optional("Frozen policy path", "Optional path to a frozen/predeclared factor policy artifact.", values["frozen_policy_path"], str, lambda value: bool(value.strip()), "enter a path or blank/none")
         values["point_in_time_universe_provenance"] = _ask_optional("Point-in-time universe provenance", "Optional structured PIT universe evidence string.", values["point_in_time_universe_provenance"], str, lambda value: bool(value.strip()), "enter provenance or blank/none")
