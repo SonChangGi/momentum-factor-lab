@@ -546,19 +546,23 @@ tbody tr:hover { background: #f8fbff; }
 .performance-metrics-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: end; flex-wrap: wrap; }
 .performance-metrics-heading h4 { margin: 0; font-size: 1rem; }
 .performance-metrics-heading p { margin: .25rem 0 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
-.performance-period-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: .85rem; align-items: start; }
+.performance-period-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); gap: .85rem; align-items: start; }
 .performance-period-card { border: 1px solid var(--line); border-radius: 18px; background: #fff; overflow: hidden; box-shadow: 0 10px 24px rgba(15, 23, 42, .04); }
 .performance-period-card h5 { margin: 0; padding: .8rem .95rem; font-size: .95rem; background: #f8fafc; border-bottom: 1px solid var(--line); }
 .performance-table-wrap { overflow-x: auto; }
-.performance-table { min-width: 420px; }
-.performance-table th, .performance-table td { white-space: nowrap; padding: .58rem .7rem; }
-.performance-table th:not(:first-child), .performance-table td:not(:first-child) { text-align: right; }
-.performance-table th:first-child, .performance-table td:first-child { min-width: 116px; }
+.performance-table { width: 100%; min-width: 0; table-layout: fixed; }
+.performance-table th, .performance-table td { padding: .58rem .7rem; vertical-align: middle; }
+.performance-table th:first-child, .performance-table td:first-child { width: 34%; min-width: 0; white-space: normal; }
+.performance-table th:not(:first-child), .performance-table td:not(:first-child) { width: 22%; text-align: right; white-space: nowrap; }
 .metric-name { font-weight: 900; color: #0f172a; }
-.series-name { color: var(--muted); font-size: .78rem; font-weight: 800; }
+.series-name { color: var(--muted); display: inline-block; font-size: .78rem; font-weight: 800; line-height: 1.2; white-space: normal; }
 .series-name.selected { color: var(--accent); }
 .series-name.best { color: var(--good); }
 .series-name.benchmark { color: #7c3aed; }
+@media (max-width: 720px) {
+  .performance-period-grid { grid-template-columns: 1fr; }
+  .performance-table th, .performance-table td { padding: .52rem .55rem; }
+}
 .scenario-note { margin-top: .75rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .75rem; line-height: 1.55; font-size: .9rem; }
 .empty-state { color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; padding: 1rem; background: #fff; line-height: 1.6; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
