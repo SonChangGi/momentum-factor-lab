@@ -1,7 +1,45 @@
+const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
+const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
+
 const state = {
   data: null,
   activeRunIndex: 0,
 };
+
+function bindManualUpdateControls() {
+  const button = document.querySelector('#manual-update-button');
+  if (button) {
+    button.setAttribute('href', MANUAL_UPDATE_WORKFLOW_URL);
+    button.setAttribute('target', '_blank');
+    button.setAttribute('rel', 'noopener');
+    if (typeof button.addEventListener === 'function') {
+      button.addEventListener('click', () => {
+        const status = document.querySelector('#manual-update-status');
+        if (status) {
+          status.textContent = '저장소 쓰기 권한이 있는 GitHub 계정으로 Run workflow를 눌러 최신 데이터 재실행을 시작하세요.';
+        }
+      });
+    }
+  }
+
+  const command = document.querySelector('#manual-update-command');
+  if (command) command.textContent = MANUAL_UPDATE_COMMAND;
+
+  const copyButton = document.querySelector('#copy-update-command');
+  if (!copyButton || typeof copyButton.addEventListener !== 'function') return;
+  copyButton.addEventListener('click', async () => {
+    const status = document.querySelector('#manual-update-status');
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || !window.isSecureContext) {
+        throw new Error('clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(MANUAL_UPDATE_COMMAND);
+      if (status) status.textContent = 'CLI 실행 명령을 복사했습니다. 터미널에서 붙여넣어 수동 실행할 수 있습니다.';
+    } catch (_) {
+      if (status) status.textContent = `복사가 제한되었습니다. 아래 명령을 직접 복사하세요: ${MANUAL_UPDATE_COMMAND}`;
+    }
+  });
+}
 
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -1063,6 +1101,8 @@ function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
     renderAll();
   }, 160);
 }
+
+bindManualUpdateControls();
 
 fetch('data/dashboard.json')
   .then((response) => response.json())

@@ -68,11 +68,36 @@ python -m momentum_factor_lab.cli scheduled-dashboard \
   --site-dir docs
 ```
 
-The committed workflow `.github/workflows/daily-dashboard.yml` runs at
-`0 23 * * *` UTC, which is 08:00 Korea time. It rebuilds `docs/` so GitHub
-Pages can serve the latest dashboard. Website controls such as recent period,
-Top-N, and max position weight are client-side viewing controls; the next
-scheduled run inputs are stored in `.github/momentum-dashboard-config.json`.
+The committed workflow `.github/workflows/daily-dashboard.yml` supports manual
+`workflow_dispatch` runs and scheduled runs at `23:17 UTC`, `23:47 UTC`, and
+`00:17 UTC` (08:17, 08:47, and 09:17 Korea time). The fallback windows skip
+automatically when the Korean calendar day already has a dashboard execution
+after 08:00 KST. Each executed run rebuilds `docs/` so GitHub Pages can serve
+the latest dashboard. Website controls such as recent period, Top-N, and max
+position weight are client-side viewing controls; the next scheduled run inputs
+are stored in `.github/momentum-dashboard-config.json`.
+
+The daily config keeps `--universe-source-mode packaged` for scheduled-site
+reliability while live price collection still refreshes to the latest provider
+trading date. Optional public SEC/Nasdaq universe refresh remains supported with
+`--universe-source-mode refresh`, but it can materially increase provider calls
+and timeout/rate-limit risk; refreshed universe rows are current-universe inputs,
+not survivorship-free point-in-time evidence, and the same liquidity, capacity,
+and data-quality gates remain fail-closed.
+
+The published page includes a **GitHub Actions에서 최신 데이터 업데이트 실행**
+button. Because the site is static and public, it does not embed a GitHub token
+or call the Actions API directly; the button opens the authenticated GitHub
+Actions workflow page. After signing in with a GitHub account that has repository
+write access, choose **Run workflow** to rerun live price data collection, factor
+backtests, holdings/weights generation, `docs/data/dashboard.json` refresh, and
+Pages deployment. If the rerun produces no `docs/` diff, the workflow can finish
+without a new commit; verify the Actions status and the dashboard `data_as_of` /
+기준일 shown on the page. The same manual run can also be started from a terminal:
+
+```bash
+gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main
+```
 
 By default, live runs do **not** impose an absolute `--max-price-symbols` cap: the requested price universe is the full candidate universe for the selected profile, plus the benchmark comparator. `--max-price-symbols` is still available for explicit smoke/debug runs; when used, reports mark the subset coverage as an execution limitation rather than silently treating it as full-universe evidence.
 

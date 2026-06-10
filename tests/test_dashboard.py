@@ -226,6 +226,17 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "최근 실행 시각" in html
     assert "08:17을 기본 실행 시각" in html
     assert "이미 실행된 경우" in html
+    assert "최신 데이터 업데이트 실행" in html
+    assert "GitHub Actions에서 최신 데이터 업데이트 실행" in html
+    assert "GitHub Actions 수동 실행 화면" in html
+    assert "저장소 쓰기 권한" in html
+    assert "workflow_dispatch" in html
+    assert "Run workflow" in html
+    assert 'id="manual-update-button"' in html
+    assert 'role="status" aria-live="polite"' in html
+    assert "변경사항이 있으면 새 JSON이 커밋" in html
+    assert "Actions 상태와 대시보드 기준일" in html
+    assert "gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main" in html
     assert "시각화 대시보드" in html
     assert "선택 팩터 시나리오" in html
     assert "브라우저 시나리오 종목당 최대 비중" in html
@@ -259,6 +270,11 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "가격 적격 종목" in js
     assert "유동성 적격 종목" in js
     assert "formatKoreanDateTime" in js
+    assert "bindManualUpdateControls" in js
+    assert "MANUAL_UPDATE_WORKFLOW_URL" in js
+    assert "MANUAL_UPDATE_COMMAND" in js
+    assert "typeof navigator === 'undefined'" in js
+    assert "저장소 쓰기 권한" in js
     assert "latest-run-at" in js
     assert "appendStatusLine" in js
     assert "최근 실행 시각" in js
@@ -270,6 +286,8 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "종목/비중 가능" in js
     assert "recomputeWeights" not in js
     assert "weighted.slice(0, 15)" not in js
+    assert "GITHUB_TOKEN" not in html + js
+    assert "ghp_" not in html + js
     combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
     assert combined["runs"][0]["summary"]["selected_factor"] == "mom_1m"
     assert combined["runs"][0]["factor_score_snapshots"]
@@ -684,8 +702,10 @@ def test_dashboard_history_preserves_dedupes_sorts_and_caps(tmp_path):
 
 def test_daily_dashboard_workflow_documents_kst_schedule():
     workflow = Path(".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
     config = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
 
+    assert "workflow_dispatch:" in workflow
     assert "cron: '17 23 * * *'" in workflow
     assert "cron: '47 23 * * *'" in workflow
     assert "cron: '17 0 * * *'" in workflow
@@ -697,5 +717,16 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "dashboard_freshness" in workflow
     assert "continue-on-error: true" in workflow
     assert "Remote branch already has a dashboard execution after 08:00 KST" in workflow
+    assert "23:17 UTC" in readme
+    assert "workflow_dispatch" in readme
+    assert "최신 데이터 업데이트 실행" in readme
+    assert "--universe-source-mode packaged" in readme
+    assert "--universe-source-mode refresh" in readme
+    assert "write access" in readme
+    assert "no `docs/` diff" in readme
+    assert "gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main" in readme
+    assert "does not embed a GitHub token" in readme
     assert config["site_dir"] == "docs"
     assert "--live" in config["run_args"]
+    assert "--universe-source-mode" in config["run_args"]
+    assert config["run_args"][config["run_args"].index("--universe-source-mode") + 1] == "packaged"
