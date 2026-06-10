@@ -68,17 +68,40 @@ python -m momentum_factor_lab.cli scheduled-dashboard \
   --site-dir docs
 ```
 
-The committed workflow `.github/workflows/daily-dashboard.yml` runs at
-`0 23 * * *` UTC, which is 08:00 Korea time. It rebuilds `docs/` so GitHub
-Pages can serve the latest dashboard. Website controls such as recent period,
-Top-N, and max position weight are client-side viewing controls; the next
-scheduled run inputs are stored in `.github/momentum-dashboard-config.json`.
+The committed workflow `.github/workflows/daily-dashboard.yml` has both
+`workflow_dispatch` and scheduled runs. The primary schedule is 23:17 UTC
+(08:17 KST), with 08:47 and 09:17 KST fallback windows that skip automatically
+when the dashboard already executed after 08:00 KST for that Korean calendar
+day. It rebuilds `docs/` so GitHub Pages can serve the latest dashboard.
+Website controls such as recent period, Top-N, selected factor, and max
+position weight are client-side viewing controls; the next scheduled run inputs
+are stored in `.github/momentum-dashboard-config.json`.
+
+If the scheduled automation fails or GitHub Actions is delayed, use the
+dashboard's **최신 데이터 업데이트 실행** button. The public static page does
+not embed a GitHub token; it opens the authenticated GitHub Actions manual-run
+screen instead. Sign in with a GitHub account that has repository write access
+(저장소 쓰기 권한), press **Run workflow**, and the same pipeline will rerun
+from the current branch using the most recent U.S. daily close data available
+from the free providers at that moment (그 시점의 가장 최근 데이터):
+price collection, factor backtest, stock/weight calculation,
+`docs/data/dashboard.json` rebuild, and Pages deployment. The equivalent CLI is:
+
+```bash
+gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main
+```
+
+Manual runs never skip because of the 08:00 KST freshness guard, but they can
+still finish with no `docs/` diff when providers have not published a newer
+close or the regenerated dashboard is identical. In that case the workflow exits
+without a new commit; confirm the Actions status plus the dashboard 기준일 and
+최근 실행 시각 on the page.
 
 By default, live runs do **not** impose an absolute `--max-price-symbols` cap: the requested price universe is the full candidate universe for the selected profile, plus the benchmark comparator. `--max-price-symbols` is still available for explicit smoke/debug runs; when used, reports mark the subset coverage as an execution limitation rather than silently treating it as full-universe evidence.
 
-Live runs emit the primary `recommendations` output only when every tradability requirement passes: fresh live data, a predeclared (`--selected-factor`) or walk-forward factor-selection policy, no explicit price-symbol cap, complete requested coverage, structured point-in-time universe evidence such as `source=... as_of=YYYY-MM-DD symbol_count=... hash=...`, broad or explicitly approved tradable-universe provenance, row-level data-quality pass, row-level liquidity pass, and configured capacity pass. Otherwise the run fails closed into a zero-weight `research_signals` output and lists the unmet requirements in `execution_limitations` / `tradability_blockers`.
+Live runs emit the primary `recommendations` output only when every tradability requirement passes: fresh live data, an explicitly predeclared factor-selection policy (`--factor-selection-mode predeclared --selected-factor ...`) fixed before the run, no explicit price-symbol cap, complete requested coverage, structured point-in-time universe evidence such as `source=... as_of=YYYY-MM-DD symbol_count=... hash=...`, broad or explicitly approved tradable-universe provenance, row-level data-quality pass, row-level liquidity pass, and configured capacity pass. Otherwise the run fails closed into a zero-weight `research_signals` output and lists the unmet requirements in `execution_limitations` / `tradability_blockers`.
 
-By default, `factor_selection_mode=research_validation` ranks factors for research but is not a tradable policy; use `--selected-factor` or `factor_selection_mode=walk_forward` for practical labels. Recommendation weights default to `score_size_liquidity`, blending selected-factor score with best-effort market cap when available and 63-day ADV/liquidity proxy otherwise. Hard blockers include:
+By default, `factor_selection_mode=research_validation` ranks factors for research but is not a tradable policy. Passing `--selected-factor` alone does not silently promote the run to practical recommendations; the mode must also be `predeclared` so the factor choice is explicitly treated as a frozen policy. In-run `walk_forward` remains a research diagnostic unless a future version adds independently frozen policy artifacts. Recommendation weights default to `score_size_liquidity`, blending selected-factor score with best-effort market cap when available and 63-day ADV/liquidity proxy otherwise. Hard blockers include:
 
 - missing structured point-in-time universe evidence/provenance;
 - subset caps, missing symbols, or partial provider coverage;

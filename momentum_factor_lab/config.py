@@ -23,6 +23,7 @@ class RunConfig:
     min_price: float = 5.0
     stale_after_days: int = 7
     benchmark: str = "SPY"
+    chart_benchmark: str = "^IXIC"
     offline_sample: bool = True
     output_dir: Path = Path("outputs")
     report_dir: Path = Path("reports")
@@ -137,6 +138,8 @@ class RunConfig:
             raise ValueError("max_extreme_daily_return must be positive")
         if not self.benchmark.strip():
             raise ValueError("benchmark must be a non-empty symbol")
+        if not self.chart_benchmark.strip():
+            raise ValueError("chart_benchmark must be a non-empty symbol")
         try:
             start = datetime.fromisoformat(self.start_date).date()
             end = datetime.fromisoformat(self.effective_end_date).date()
@@ -147,8 +150,6 @@ class RunConfig:
 
     @property
     def effective_factor_selection_mode(self) -> str:
-        if self.factor_selection_mode == "research_validation" and self.selected_factor is not None:
-            return "predeclared"
         return self.factor_selection_mode
 
     @property

@@ -26,6 +26,8 @@ RUN_DEFAULTS: dict[str, Any] = {
     "universe_profile": "large_liquid",
     "top_n": 20,
     "max_weight": 0.10,
+    "benchmark": "SPY",
+    "chart_benchmark": "^IXIC",
     "recommendation_weighting_method": "score_size_liquidity",
     "recommendation_score_weight": 0.60,
     "recommendation_market_cap_weight": 0.25,
@@ -84,6 +86,8 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
         help="Candidate-universe profile; missing PIT evidence is reported as an execution limitation.",
     )
     run.add_argument("--top-n", type=int, default=RUN_DEFAULTS["top_n"])
+    run.add_argument("--benchmark", default=RUN_DEFAULTS["benchmark"], help="Primary benchmark comparator symbol, e.g. SPY")
+    run.add_argument("--chart-benchmark", default=RUN_DEFAULTS["chart_benchmark"], help="Dashboard cumulative-return benchmark comparator; ^IXIC Nasdaq Composite is used by default")
     run.add_argument("--max-weight", type=float, default=RUN_DEFAULTS["max_weight"])
     run.add_argument(
         "--recommendation-weighting-method",
@@ -248,6 +252,8 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         universe_profile=args.universe_profile,
         top_n=args.top_n,
         max_weight=args.max_weight,
+        benchmark=args.benchmark,
+        chart_benchmark=args.chart_benchmark,
         recommendation_weighting_method=args.recommendation_weighting_method,
         recommendation_score_weight=args.recommendation_score_weight,
         recommendation_market_cap_weight=args.recommendation_market_cap_weight,

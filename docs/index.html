@@ -34,6 +34,31 @@
       08:47·09:17 보강 실행은 당일 08:00 이후 이미 실행된 경우 자동으로 건너뜁니다.
     </section>
 
+    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
+      <div>
+        <p class="eyebrow">수동 업데이트</p>
+        <h2>자동화 실패 시 그 시점의 최신 데이터로 다시 실행</h2>
+        <p>
+          자동 예약 실행이 실패했거나 지연되면 이 버튼으로 같은 GitHub Actions
+          <code>workflow_dispatch</code> 파이프라인을 수동 실행할 수 있습니다.
+          저장소 쓰기 권한이 있는 GitHub 계정으로 로그인한 뒤 <strong>Run workflow</strong>를 누르면
+          실행 시점에 무료 제공자가 제공하는 가장 최근 미국 일별 종가까지 다시 수집하고, 팩터 백테스트,
+          종목/비중 산출, <code>docs/data/dashboard.json</code> 갱신, GitHub Pages 배포를 진행합니다.
+        </p>
+        <p class="manual-update-note">
+          보안상 공개 정적 페이지에는 GitHub 토큰을 저장하지 않습니다. 브라우저 버튼은 인증된
+          GitHub 수동 실행 화면으로 연결하며, provider가 아직 새 종가를 공개하지 않았거나 변경사항이 없으면
+          새 커밋 없이 종료될 수 있습니다. 실행 후 Actions 상태와 대시보드 기준일·최근 실행 시각을 확인하세요.
+        </p>
+      </div>
+      <div class="manual-update-actions">
+        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
+        <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
+        <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
+        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
+      </div>
+    </section>
+
     <section class="controls" aria-label="대시보드 입력값">
       <label>실행 결과
         <select id="run-select"></select>

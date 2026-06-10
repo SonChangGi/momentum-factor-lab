@@ -62,6 +62,14 @@ def _assert_research_only_fail_closed(result, *expected_blockers: str) -> None:
     assert result.metadata["research_only"]
     assert result.metadata["recommendation_output_key"] == "research_signals"
     assert result.recommendations["weight"].eq(0.0).all()
+    if "proposed_weight" in result.recommendations:
+        assert result.recommendations["proposed_weight"].eq(0.0).all()
+    if "target_notional" in result.recommendations:
+        assert result.recommendations["target_notional"].fillna(0.0).eq(0.0).all()
+    if "capacity_pass" in result.recommendations:
+        assert not result.recommendations["capacity_pass"].fillna(False).any()
+    if "capacity_status" in result.recommendations:
+        assert not result.recommendations["capacity_status"].eq("pass").any()
     assert result.metadata["fail_closed"]
     for blocker in expected_blockers:
         assert blocker in result.metadata["tradability_blockers"]
@@ -452,6 +460,7 @@ def test_unstructured_pit_attestation_does_not_satisfy_practical_gate(tmp_path, 
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -539,6 +548,7 @@ def test_market_cap_enrichment_does_not_change_price_universe_or_coverage(tmp_pa
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -569,6 +579,7 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -631,10 +642,13 @@ def test_walk_forward_factor_selection_records_limitation_without_frozen_policy(
 
     assert result.metadata["selected_factor_selection_source"] == "walk_forward"
     assert not result.metadata["selection_policy_frozen_for_live"]
-    assert "factor_selection_policy_available" not in result.metadata["execution_limitations"]
-    assert result.metadata["current_recommendations_available"]
-    assert result.metadata["tradable_recommendations_available"]
-    assert result.recommendations["weight"].gt(0.0).any()
+    assert result.metadata["same_sample_selection_blocked_for_tradable"]
+    _assert_research_only_fail_closed(
+        result,
+        "factor_selection_policy_available",
+        "no_same_sample_factor_selection",
+    )
+    assert result.recommendations["weight"].eq(0.0).all()
 
 
 def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
@@ -646,6 +660,7 @@ def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -937,6 +952,7 @@ def test_small_user_universe_with_approved_provenance_can_use_tradable_labels(tm
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
         universe=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"],
@@ -1122,6 +1138,7 @@ def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monke
         top_n=5,
         max_weight=0.2,
         selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -1264,7 +1281,7 @@ def test_walk_forward_mode_records_prior_window_selection_history(tmp_path):
 
     assert result.metadata["factor_selection_mode"] == "walk_forward"
     assert result.metadata["selected_factor_selection_source"] == "walk_forward"
-    assert not result.metadata["same_sample_selection_blocked_for_tradable"]
+    assert result.metadata["same_sample_selection_blocked_for_tradable"]
     assert not result.metadata["selection_policy_frozen_for_live"]
     assert not result.selection_history.empty
     assert result.selection_history["selection_source"].eq("walk_forward").all()

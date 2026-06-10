@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from .universe import normalize_symbol
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .workflow import RunResult
 
@@ -73,6 +75,31 @@ HTML_TEMPLATE = """<!doctype html>
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
       자동 실행은 GitHub Actions 예약 지연을 줄이기 위해 한국시간 08:17을 기본 실행 시각으로 두고,
       08:47·09:17 보강 실행은 당일 08:00 이후 이미 실행된 경우 자동으로 건너뜁니다.
+    </section>
+
+    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
+      <div>
+        <p class="eyebrow">수동 업데이트</p>
+        <h2>자동화 실패 시 그 시점의 최신 데이터로 다시 실행</h2>
+        <p>
+          자동 예약 실행이 실패했거나 지연되면 이 버튼으로 같은 GitHub Actions
+          <code>workflow_dispatch</code> 파이프라인을 수동 실행할 수 있습니다.
+          저장소 쓰기 권한이 있는 GitHub 계정으로 로그인한 뒤 <strong>Run workflow</strong>를 누르면
+          실행 시점에 무료 제공자가 제공하는 가장 최근 미국 일별 종가까지 다시 수집하고, 팩터 백테스트,
+          종목/비중 산출, <code>docs/data/dashboard.json</code> 갱신, GitHub Pages 배포를 진행합니다.
+        </p>
+        <p class="manual-update-note">
+          보안상 공개 정적 페이지에는 GitHub 토큰을 저장하지 않습니다. 브라우저 버튼은 인증된
+          GitHub 수동 실행 화면으로 연결하며, provider가 아직 새 종가를 공개하지 않았거나 변경사항이 없으면
+          새 커밋 없이 종료될 수 있습니다. 실행 후 Actions 상태와 대시보드 기준일·최근 실행 시각을 확인하세요.
+        </p>
+      </div>
+      <div class="manual-update-actions">
+        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
+        <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
+        <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
+        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
+      </div>
     </section>
 
     <section class="controls" aria-label="대시보드 입력값">
@@ -405,6 +432,26 @@ body {
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
+.manual-update {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); gap: 1rem; align-items: center;
+  padding: 1.25rem; border-radius: 22px; margin-bottom: 1.25rem;
+  background: linear-gradient(135deg, #ffffff 0%, #eef5ff 100%); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06);
+}
+.manual-update h2 { margin: 0 0 .65rem; }
+.manual-update p { margin: 0; color: #334155; line-height: 1.7; }
+.manual-update p + p { margin-top: .55rem; }
+.manual-update-note { font-size: .92rem; color: var(--muted); }
+.manual-update-actions { display: grid; gap: .65rem; justify-items: stretch; }
+.button {
+  display: inline-flex; justify-content: center; align-items: center; min-height: 2.75rem;
+  border-radius: 14px; border: 1px solid transparent; padding: .7rem 1rem; font: inherit; font-weight: 900; cursor: pointer; text-decoration: none;
+}
+.button.primary { color: #fff; background: var(--accent); box-shadow: 0 12px 22px rgba(36, 87, 214, .24); }
+.button.primary:hover { background: #1d4ed8; }
+.button.secondary { color: var(--accent); background: #fff; border-color: #bfd0ff; }
+.button.secondary:hover { background: #f8fbff; }
+.code-pill { display: block; padding: .75rem .85rem; border-radius: 14px; background: #132033; color: #e8efff; font-size: .82rem; line-height: 1.45; overflow-wrap: anywhere; }
+#manual-update-status { color: var(--muted); line-height: 1.5; }
 .noscript-warning { margin: 1rem clamp(1rem, 4vw, 4rem); padding: 1rem 1.25rem; border-radius: 18px; background: #fff4e6; color: #8a4b00; border: 1px solid #ffd8a8; font-weight: 800; line-height: 1.6; }
 .controls { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
@@ -481,20 +528,25 @@ tbody tr:hover { background: #f8fbff; }
 .trend-fill.negative { background: linear-gradient(180deg, #ff8787, #f03e3e); }
 .trend-label { color: var(--muted); font-size: .68rem; writing-mode: vertical-rl; max-height: 46px; overflow: hidden; }
 .line-chart { min-height: 260px; border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: .85rem; }
-.line-chart svg { display: block; width: 100%; height: 220px; overflow: visible; }
+.line-chart svg { display: block; width: 100%; height: 260px; overflow: visible; }
 .line-grid { stroke: #e2e8f0; stroke-width: 1; }
+.axis-line { stroke: #94a3b8; stroke-width: 1.2; }
+.axis-label { fill: #64748b; font-size: 10px; font-weight: 700; }
+.axis-title { fill: #475569; font-size: 11px; font-weight: 900; }
 .line-path { fill: none; stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; }
 .line-path.selected { stroke: var(--accent); }
 .line-path.best { stroke: var(--good); stroke-dasharray: 5 5; }
+.line-path.benchmark { stroke: #7c3aed; stroke-dasharray: 2 4; }
 .line-legend { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: .75rem; color: #334155; font-size: .84rem; line-height: 1.45; }
 .legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .35rem; vertical-align: -.05rem; background: var(--accent); }
 .legend-dot.best { background: var(--good); }
+.legend-dot.benchmark { background: #7c3aed; }
 .scenario-note { margin-top: .75rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .75rem; line-height: 1.55; font-size: .9rem; }
 .empty-state { color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; padding: 1rem; background: #fff; line-height: 1.6; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
 @media (max-width: 980px) {
   .hero, .panel-heading, footer { flex-direction: column; }
-  .controls, .cards, .two-col, .viz-grid, .window-chart, .diagnostic-grid, .diagnostic-grid.three { grid-template-columns: 1fr; }
+  .controls, .manual-update, .cards, .two-col, .viz-grid, .window-chart, .diagnostic-grid, .diagnostic-grid.three { grid-template-columns: 1fr; }
   .bar-row, .compact-bars .bar-row { grid-template-columns: 1fr; gap: .35rem; }
   .bar-value { text-align: left; }
   .status-card { width: 100%; }
@@ -502,10 +554,48 @@ footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--
 """
 
 
-JS_CONTENT = """const state = {
+JS_CONTENT = """const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
+const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
+
+const state = {
   data: null,
   activeRunIndex: 0,
 };
+
+function bindManualUpdateControls() {
+  const button = document.querySelector('#manual-update-button');
+  if (button) {
+    button.setAttribute('href', MANUAL_UPDATE_WORKFLOW_URL);
+    button.setAttribute('target', '_blank');
+    button.setAttribute('rel', 'noopener');
+    if (typeof button.addEventListener === 'function') {
+      button.addEventListener('click', () => {
+        const status = document.querySelector('#manual-update-status');
+        if (status) {
+          status.textContent = '저장소 쓰기 권한이 있는 GitHub 계정으로 Run workflow를 눌러 실행 시점의 최신 제공자 데이터 재실행을 시작하세요.';
+        }
+      });
+    }
+  }
+
+  const command = document.querySelector('#manual-update-command');
+  if (command) command.textContent = MANUAL_UPDATE_COMMAND;
+
+  const copyButton = document.querySelector('#copy-update-command');
+  if (!copyButton || typeof copyButton.addEventListener !== 'function') return;
+  copyButton.addEventListener('click', async () => {
+    const status = document.querySelector('#manual-update-status');
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || !window.isSecureContext) {
+        throw new Error('clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(MANUAL_UPDATE_COMMAND);
+      if (status) status.textContent = 'CLI 실행 명령을 복사했습니다. 터미널에서 붙여넣어 수동 실행할 수 있습니다.';
+    } catch (_) {
+      if (status) status.textContent = `복사가 제한되었습니다. 아래 명령을 직접 복사하세요: ${MANUAL_UPDATE_COMMAND}`;
+    }
+  });
+}
 
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -1414,6 +1504,12 @@ function factorBacktestSeries(run, factor) {
   return (run.factor_backtest_series || []).find((series) => series.factor === factor) || null;
 }
 
+function benchmarkBacktestSeries(run) {
+  const series = run.benchmark_backtest_series;
+  if (!series || !Array.isArray(series.dates)) return null;
+  return series;
+}
+
 function seriesPointsThroughDate(series, date, limit = 120) {
   if (!series || !Array.isArray(series.dates)) return [];
   const points = series.dates.map((pointDate, index) => ({
@@ -1431,46 +1527,114 @@ function normalizedLine(points) {
   return points.map((point) => ({ ...point, normalized: base ? point.equity / base : point.equity }));
 }
 
+function formatAxisDate(value) {
+  if (!value) return '-';
+  const parts = String(value).split('-');
+  if (parts.length >= 3) return `${parts[1]}/${parts[2]}`;
+  return String(value);
+}
+
+function appendSvgText(svg, text, x, y, className, anchor = 'middle') {
+  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  label.textContent = text;
+  label.setAttribute('x', String(x));
+  label.setAttribute('y', String(y));
+  label.setAttribute('class', className);
+  label.setAttribute('text-anchor', anchor);
+  svg.appendChild(label);
+  return label;
+}
+
 function renderBacktestChart() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
   const factor = selectedFactor();
   const best = periodBestStats(run, date, windowKey);
+  const benchmark = benchmarkBacktestSeries(run);
   const selectedSeries = normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, factor), date));
   const bestSeries = best?.factor && best.factor !== factor
     ? normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, best.factor), date))
     : [];
+  const benchmarkSeries = normalizedLine(seriesPointsThroughDate(benchmark, date));
+  const benchmarkLabel = benchmark?.label_ko || benchmark?.symbol || run.summary?.chart_benchmark || '나스닥 벤치마크';
   const target = document.querySelector('#backtest-chart');
   target.replaceChildren();
-  setText('#backtest-chart-meta', `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}`);
+  setText(
+    '#backtest-chart-meta',
+    `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}${benchmarkSeries.length ? ` · 벤치마크 ${benchmarkLabel}` : ''}`
+  );
   if (!selectedSeries.length) {
     appendEmpty('#backtest-chart', '선택 팩터의 최근 백테스트 추이 데이터가 없습니다. 기간 최고 팩터 데이터를 대신 표시하지 않습니다.');
     return;
   }
-  const allValues = [...selectedSeries, ...bestSeries].map((point) => point.normalized).filter((value) => Number.isFinite(value));
-  const minValue = Math.min(...allValues, 0.95);
-  const maxValue = Math.max(...allValues, 1.05);
-  const width = 720;
-  const height = 220;
-  const pad = 18;
+  const allPoints = [...selectedSeries, ...bestSeries, ...benchmarkSeries];
+  const allValues = allPoints.map((point) => point.normalized).filter((value) => Number.isFinite(value));
+  let minValue = Math.min(...allValues, 0.95, 1.0);
+  let maxValue = Math.max(...allValues, 1.05, 1.0);
+  const rangePadding = Math.max((maxValue - minValue) * 0.08, 0.01);
+  minValue -= rangePadding;
+  maxValue += rangePadding;
+  const allDates = [...new Set(allPoints.map((point) => point.date).filter(Boolean))].sort();
+  const dateToIndex = new Map(allDates.map((pointDate, index) => [pointDate, index]));
+  const width = 760;
+  const height = 260;
+  const plot = { left: 64, right: 18, top: 18, bottom: 46 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', '선택 팩터와 기간 최고 팩터의 최근 백테스트 누적 성과 비교');
-  [0.25, 0.5, 0.75].forEach((ratio) => {
+  svg.setAttribute('aria-label', '선택 팩터, 기간 최고 팩터, 나스닥 벤치마크의 최근 백테스트 누적 성과 비교');
+  const yFor = (value) => height - plot.bottom - ((value - minValue) / Math.max(0.000001, maxValue - minValue)) * plotHeight;
+  const xFor = (point) => {
+    const index = dateToIndex.get(point.date) ?? 0;
+    return plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+  };
+  const tickValues = Array.from({ length: 5 }, (_, index) => minValue + (maxValue - minValue) * (index / 4));
+  tickValues.forEach((tick) => {
+    const y = yFor(tick);
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    const y = pad + (height - pad * 2) * ratio;
-    line.setAttribute('x1', String(pad));
-    line.setAttribute('x2', String(width - pad));
+    line.setAttribute('x1', String(plot.left));
+    line.setAttribute('x2', String(width - plot.right));
     line.setAttribute('y1', String(y));
     line.setAttribute('y2', String(y));
     line.setAttribute('class', 'line-grid');
     svg.appendChild(line);
+    appendSvgText(svg, formatPercent(tick - 1), plot.left - 9, y + 4, 'axis-label', 'end');
   });
-  const toPolyline = (points) => points.map((point, index) => {
-    const x = pad + (points.length <= 1 ? 0 : index / (points.length - 1) * (width - pad * 2));
-    const y = height - pad - ((point.normalized - minValue) / Math.max(0.000001, maxValue - minValue)) * (height - pad * 2);
+  const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  yAxis.setAttribute('x1', String(plot.left));
+  yAxis.setAttribute('x2', String(plot.left));
+  yAxis.setAttribute('y1', String(plot.top));
+  yAxis.setAttribute('y2', String(height - plot.bottom));
+  yAxis.setAttribute('class', 'axis-line');
+  svg.appendChild(yAxis);
+  const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  xAxis.setAttribute('x1', String(plot.left));
+  xAxis.setAttribute('x2', String(width - plot.right));
+  xAxis.setAttribute('y1', String(height - plot.bottom));
+  xAxis.setAttribute('y2', String(height - plot.bottom));
+  xAxis.setAttribute('class', 'axis-line');
+  svg.appendChild(xAxis);
+  const xTickIndexes = [...new Set([0, Math.floor((allDates.length - 1) / 2), allDates.length - 1])].filter((index) => index >= 0);
+  xTickIndexes.forEach((index) => {
+    const x = plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+    const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    tick.setAttribute('x1', String(x));
+    tick.setAttribute('x2', String(x));
+    tick.setAttribute('y1', String(height - plot.bottom));
+    tick.setAttribute('y2', String(height - plot.bottom + 5));
+    tick.setAttribute('class', 'axis-line');
+    svg.appendChild(tick);
+    appendSvgText(svg, formatAxisDate(allDates[index]), x, height - plot.bottom + 19, 'axis-label');
+  });
+  appendSvgText(svg, 'X축: 날짜', plot.left + plotWidth / 2, height - 5, 'axis-title');
+  const yTitle = appendSvgText(svg, 'Y축: 누적 성과', 13, plot.top + plotHeight / 2, 'axis-title');
+  yTitle.setAttribute('transform', `rotate(-90 13 ${plot.top + plotHeight / 2})`);
+  const toPolyline = (points) => points.map((point) => {
+    const x = xFor(point);
+    const y = yFor(point.normalized);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
   const appendLine = (points, className) => {
@@ -1482,14 +1646,17 @@ function renderBacktestChart() {
   };
   appendLine(selectedSeries, 'selected');
   appendLine(bestSeries, 'best');
+  appendLine(benchmarkSeries, 'benchmark');
   target.appendChild(svg);
 
   const legend = document.createElement('div');
   legend.className = 'line-legend';
   const selectedReturn = selectedSeries.at(-1)?.normalized - 1;
   const bestReturn = bestSeries.length ? bestSeries.at(-1)?.normalized - 1 : null;
+  const benchmarkReturn = benchmarkSeries.length ? benchmarkSeries.at(-1)?.normalized - 1 : null;
   const selectedDrawdown = selectedSeries.at(-1)?.drawdown;
   const bestDrawdown = bestSeries.length ? bestSeries.at(-1)?.drawdown : null;
+  const benchmarkDrawdown = benchmarkSeries.length ? benchmarkSeries.at(-1)?.drawdown : null;
   const selectedLegend = document.createElement('span');
   const selectedDot = document.createElement('span');
   selectedDot.className = 'legend-dot';
@@ -1503,6 +1670,14 @@ function renderBacktestChart() {
     bestLegend.appendChild(bestDot);
     bestLegend.append(`기간 최고 ${best.factor}: 구간 ${formatPercent(bestReturn)} · 낙폭 ${formatPercent(bestDrawdown)}`);
     legend.appendChild(bestLegend);
+  }
+  if (benchmarkSeries.length) {
+    const benchmarkLegend = document.createElement('span');
+    const benchmarkDot = document.createElement('span');
+    benchmarkDot.className = 'legend-dot benchmark';
+    benchmarkLegend.appendChild(benchmarkDot);
+    benchmarkLegend.append(`${benchmarkLabel}: 구간 ${formatPercent(benchmarkReturn)} · 낙폭 ${formatPercent(benchmarkDrawdown)}`);
+    legend.appendChild(benchmarkLegend);
   }
   target.appendChild(legend);
 }
@@ -1567,6 +1742,8 @@ function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
     renderAll();
   }, 160);
 }
+
+bindManualUpdateControls();
 
 fetch('data/dashboard.json')
   .then((response) => response.json())
@@ -1647,6 +1824,10 @@ def build_dashboard_payload(
         result,
         max_points=max_backtest_points,
     )
+    benchmark_series = _benchmark_backtest_series(
+        result,
+        max_points=max_backtest_points,
+    )
     latest_recommendations = result.recommendations.head(result.config.top_n).to_dict(orient="records")
     payload = _json_safe(
         {
@@ -1666,6 +1847,7 @@ def build_dashboard_payload(
             ),
             "scenario_available_dates_by_factor": _scenario_available_dates_by_factor(score_snapshots),
             "factor_backtest_series": backtest_series,
+            "benchmark_backtest_series": benchmark_series,
             "latest_output_rows": latest_recommendations,
             "data_quality_summary": _data_quality_summary(result),
             "tradability_gate": _tradability_gate_rows(result.metadata),
@@ -1740,7 +1922,7 @@ def write_dashboard_site(
 
 
 def _dashboard_summary(result: RunResult) -> dict[str, Any]:
-    return {
+    summary = {
         "run_timestamp_utc": result.metadata.get("run_timestamp_utc"),
         "data_as_of": result.metadata.get("data_as_of"),
         "provider": result.metadata.get("provider"),
@@ -1755,6 +1937,9 @@ def _dashboard_summary(result: RunResult) -> dict[str, Any]:
         "default_top_n": result.config.top_n,
         "default_max_weight": result.config.max_weight,
         "benchmark": result.config.benchmark,
+        "chart_benchmark": result.config.chart_benchmark,
+        "chart_benchmark_symbol": result.metadata.get("chart_benchmark_symbol"),
+        "chart_benchmark_price_available": result.metadata.get("chart_benchmark_price_available"),
         "universe_profile": result.config.universe_profile,
         "factor_selection_mode": result.metadata.get("factor_selection_mode"),
         "candidate_universe_size": result.metadata.get("candidate_universe_size"),
@@ -1765,11 +1950,285 @@ def _dashboard_summary(result: RunResult) -> dict[str, Any]:
         "factor_rank_ic_horizon_days": result.metadata.get("factor_rank_ic_horizon_days"),
         "factor_high_redundancy_count": result.metadata.get("factor_high_redundancy_count"),
     }
+    return _copy_summary_safety_fields(summary, result.metadata)
+
+
+DASHBOARD_SUMMARY_SAFETY_KEYS: tuple[str, ...] = (
+    "recommendation_output_key",
+    "recommendation_output_label",
+    "recommendation_output_sheet",
+    "recommendation_output_available",
+    "tradable_output_available",
+    "current_recommendations_available",
+    "tradable_recommendations_available",
+    "fresh_live_data_available",
+    "research_only",
+    "decision_support_tier",
+    "fail_closed",
+    "fail_closed_reasons",
+    "tradability_blockers",
+    "execution_limitations",
+    "tradability_requirements",
+    "validation_selected_factor",
+    "selected_factor_selection_source",
+    "same_run_factor_selection_blocked_for_tradable",
+    "same_sample_selection_blocked_for_tradable",
+    "factor_selection_warning",
+    "selection_policy_frozen_for_live",
+    "recommendation_weighting_method",
+    "recommendation_weight_sum",
+    "recommendation_cash_weight",
+    "chart_benchmark_symbol",
+    "chart_benchmark_price_available",
+)
+
+
+def _copy_summary_safety_fields(summary: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """Keep dashboard summaries self-describing about research vs practical output."""
+
+    for key in DASHBOARD_SUMMARY_SAFETY_KEYS:
+        if key in metadata:
+            summary[key] = metadata.get(key)
+    return summary
+
+
+DASHBOARD_RESEARCH_ONLY_SELECTION_SOURCES = frozenset(
+    {"research_validation", "walk_forward", "walk_forward_insufficient_history"}
+)
+DASHBOARD_RESEARCH_ONLY_ZERO_FIELDS = (
+    "weight",
+    "proposed_weight",
+    "pre_cap_weight",
+    "weight_cap_excess",
+    "target_notional",
+    "adv_participation",
+    "capacity_utilization",
+    "capacity_aum_limit",
+)
+
+
+def _first_output_row_value(rows: list[Any], key: str) -> Any:
+    for row in rows:
+        if isinstance(row, dict) and row.get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def _append_unique(values: Any, *items: str) -> list[str]:
+    result: list[str] = []
+    if isinstance(values, list):
+        result.extend(str(value) for value in values)
+    for item in items:
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _remove_items(values: Any, *items: str) -> list[str]:
+    blocked = set(items)
+    if not isinstance(values, list):
+        return []
+    return [str(value) for value in values if str(value) not in blocked]
+
+
+def _dashboard_factor_selection_policy_available(
+    summary: dict[str, Any],
+    rows: list[Any],
+    selection_source: Any,
+) -> bool:
+    row_sources = {
+        str(row.get("selected_factor_selection_source"))
+        for row in rows
+        if isinstance(row, dict) and row.get("selected_factor_selection_source") is not None
+    }
+    source = str(selection_source) if selection_source is not None else None
+    if source == "predeclared" or row_sources == {"predeclared"}:
+        return (
+            summary.get("selection_policy_frozen_for_live") is True
+            or summary.get("factor_selection_mode") == "predeclared"
+            or source == "predeclared"
+        ) and summary.get("same_run_factor_selection_blocked_for_tradable") is not True
+    requirements = summary.get("tradability_requirements")
+    return bool(isinstance(requirements, dict) and requirements.get("factor_selection_policy_available") is True)
+
+
+def _dashboard_no_same_sample_factor_selection(
+    summary: dict[str, Any],
+    rows: list[Any],
+    selection_source: Any,
+) -> bool:
+    if summary.get("same_run_factor_selection_blocked_for_tradable") is True:
+        return False
+    if summary.get("same_sample_selection_blocked_for_tradable") is True:
+        return False
+    if _dashboard_factor_selection_policy_available(summary, rows, selection_source):
+        return True
+    requirements = summary.get("tradability_requirements")
+    return bool(isinstance(requirements, dict) and requirements.get("no_same_sample_factor_selection") is True)
+
+
+def _dashboard_rows_are_research_only(summary: dict[str, Any], rows: list[Any]) -> bool:
+    if any(
+        isinstance(row, dict)
+        and (
+            row.get("recommendation_output") == "research_signals"
+            or row.get("selected_factor_selection_source") in DASHBOARD_RESEARCH_ONLY_SELECTION_SOURCES
+        )
+        for row in rows
+    ):
+        return True
+    return not _dashboard_has_affirmative_practical_proof(summary)
+
+
+def _dashboard_has_affirmative_practical_proof(summary: dict[str, Any]) -> bool:
+    return (
+        summary.get("recommendation_output_key") == "recommendations"
+        and summary.get("research_only") is False
+        and summary.get("recommendation_output_available") is True
+        and summary.get("tradable_output_available") is True
+        and summary.get("current_recommendations_available") is True
+        and summary.get("tradable_recommendations_available") is True
+        and summary.get("same_run_factor_selection_blocked_for_tradable") is False
+        and summary.get("same_sample_selection_blocked_for_tradable") is False
+        and summary.get("selected_factor_selection_source") == "predeclared"
+    )
+
+
+def _sanitize_research_only_output_rows(rows: list[Any], summary: dict[str, Any]) -> list[Any]:
+    if not _dashboard_rows_are_research_only(summary, rows):
+        return rows
+    reason = "; ".join(summary.get("tradability_blockers") or summary.get("fail_closed_reasons") or [])
+    if not reason:
+        reason = "research_only_or_non_tradable_output"
+    sanitized: list[Any] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            sanitized.append(row)
+            continue
+        clean = dict(row)
+        for key in DASHBOARD_RESEARCH_ONLY_ZERO_FIELDS:
+            if key in clean:
+                clean[key] = 0.0
+        if "capacity_pass" in clean:
+            clean["capacity_pass"] = False
+        if clean.get("capacity_status") == "pass":
+            clean["capacity_status"] = "research_only_gate_failed"
+            if "capacity_warning" in clean:
+                clean["capacity_warning"] = (
+                    "연구용 fail-closed 출력입니다. 용량 점검 통과 여부와 무관하게 매매 권고가 아니며 "
+                    f"미충족 요건은 {reason}입니다."
+                )
+        clean["tradable_weight_enabled"] = False
+        clean.setdefault("research_only_reason", reason)
+        sanitized.append(clean)
+    return sanitized
+
+
+def _sanitize_dashboard_payload_safety(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = payload.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        payload["summary"] = summary
+    rows = payload.get("latest_output_rows", [])
+    if not isinstance(rows, list):
+        rows = []
+    research_only = _dashboard_rows_are_research_only(summary, rows)
+    selection_source = summary.get("selected_factor_selection_source") or _first_output_row_value(
+        rows,
+        "selected_factor_selection_source",
+    )
+    if selection_source is not None:
+        summary.setdefault("selected_factor_selection_source", selection_source)
+    if research_only:
+        factor_policy_available = _dashboard_factor_selection_policy_available(summary, rows, selection_source)
+        no_same_sample_selection = _dashboard_no_same_sample_factor_selection(summary, rows, selection_source)
+        summary["recommendation_output_key"] = "research_signals"
+        summary["recommendation_output_label"] = "Research signals (not tradable)"
+        summary["recommendation_output_available"] = False
+        summary["tradable_output_available"] = False
+        summary["current_recommendations_available"] = False
+        summary["tradable_recommendations_available"] = False
+        summary["research_only"] = True
+        summary["decision_support_tier"] = "research_signals"
+        summary["fail_closed"] = True
+        if selection_source is None:
+            summary.setdefault("selected_factor_selection_source", "unverified_legacy_or_missing_metadata")
+        if factor_policy_available:
+            summary["selected_factor_selection_source"] = "predeclared"
+            summary["selection_policy_frozen_for_live"] = True
+            summary["same_run_factor_selection_blocked_for_tradable"] = False
+            summary["same_sample_selection_blocked_for_tradable"] = False
+            if isinstance(summary.get("factor_selection_warning"), str):
+                summary["factor_selection_warning"] = None
+            summary["tradability_blockers"] = _remove_items(
+                summary.get("tradability_blockers") or summary.get("fail_closed_reasons"),
+                "factor_selection_policy_available",
+                "no_same_sample_factor_selection",
+            )
+            summary["execution_limitations"] = _remove_items(
+                summary.get("execution_limitations"),
+                "factor_selection_policy_available",
+                "no_same_sample_factor_selection",
+            )
+            summary["fail_closed_reasons"] = _remove_items(
+                summary.get("fail_closed_reasons") or summary.get("tradability_blockers"),
+                "factor_selection_policy_available",
+                "no_same_sample_factor_selection",
+            )
+        else:
+            summary["same_run_factor_selection_blocked_for_tradable"] = True
+            summary["same_sample_selection_blocked_for_tradable"] = True
+            summary["factor_selection_warning"] = (
+                "실전 출력임을 입증하는 안전 메타데이터가 없거나 같은 실행에서 고른 연구용 팩터입니다. "
+                "대시보드는 보수적으로 매매 권고가 아닌 연구용 신호로 처리합니다."
+            )
+            if isinstance(summary.get("selected_reason"), str):
+                summary["selected_reason"] = (
+                    summary["selected_reason"]
+                    .replace(
+                        "use a predeclared selected factor or walk-forward selection for practical labels",
+                        "use a predeclared selected factor frozen before the run for practical labels",
+                    )
+                    .replace(
+                        "predeclare a selected factor or use walk-forward selection for practical labels",
+                        "predeclare/freeze the selected factor before the run for practical labels",
+                    )
+                )
+            summary["tradability_blockers"] = _append_unique(
+                summary.get("tradability_blockers") or summary.get("fail_closed_reasons"),
+                "factor_selection_policy_available",
+                "no_same_sample_factor_selection",
+            )
+            summary["execution_limitations"] = _append_unique(
+                summary.get("execution_limitations"),
+                "factor_selection_policy_available",
+                "no_same_sample_factor_selection",
+            )
+            summary["fail_closed_reasons"] = _append_unique(
+                summary.get("fail_closed_reasons") or summary.get("tradability_blockers"),
+                "factor_selection_policy_available",
+                "no_same_sample_factor_selection",
+            )
+        requirements = summary.setdefault("tradability_requirements", {})
+        if isinstance(requirements, dict):
+            requirements["factor_selection_policy_available"] = bool(factor_policy_available)
+            requirements["no_same_sample_factor_selection"] = bool(no_same_sample_selection)
+        payload["latest_output_rows"] = _sanitize_research_only_output_rows(rows, summary)
+        data_quality = payload.get("data_quality_summary")
+        if isinstance(data_quality, dict):
+            row_count = len(payload["latest_output_rows"])
+            if row_count:
+                data_quality["capacity_status_counts"] = {"research_only_gate_failed": row_count}
+    requirements = summary.get("tradability_requirements")
+    if isinstance(requirements, dict) and requirements:
+        payload["tradability_gate"] = _tradability_gate_rows(summary)
+    return payload
 
 
 GATE_LABELS_KO: dict[str, tuple[str, str]] = {
     "fresh_live_data": ("최신 실데이터", "전일/최근 미국 종가 데이터가 충분히 최신인지 확인합니다."),
-    "factor_selection_policy_available": ("사전 정의된 팩터 선택 정책", "같은 실행에서 고른 팩터를 매매 권고로 쓰지 않도록 막습니다."),
+    "factor_selection_policy_available": ("사전 고정된 팩터 선택 정책", "같은 실행의 검증/연구 순위로 고른 팩터를 매매 권고로 쓰지 않도록 막습니다."),
+    "no_same_sample_factor_selection": ("동일 표본 팩터 선택 차단", "같은 실행·같은 표본에서 고른 연구용 팩터가 실전 추천으로 승격되지 않았는지 확인합니다."),
     "no_explicit_price_symbol_cap": ("가격 수집 범위 제한 없음", "디버그용 종목 수 제한이 걸린 실행인지 확인합니다."),
     "complete_requested_price_coverage": ("요청 종목 가격 커버리지", "요청한 후보 종목이 가격/이력 조건을 충분히 통과했는지 확인합니다."),
     "broad_or_approved_tradable_universe": ("거래 가능 유니버스 근거", "충분히 넓거나 사용자가 승인한 거래 가능 후보군인지 확인합니다."),
@@ -2055,6 +2514,51 @@ def _factor_backtest_series(result: RunResult, *, max_points: int) -> list[dict[
     return rows
 
 
+def _benchmark_backtest_series(result: RunResult, *, max_points: int) -> dict[str, Any]:
+    symbol = normalize_symbol(result.config.chart_benchmark)
+    prices = result.market_data.prices.dropna(axis=1, how="all")
+    column = next((column for column in prices.columns if normalize_symbol(column) == symbol), None)
+    if column is None:
+        return {
+            "symbol": symbol,
+            "label_ko": _benchmark_label_ko(symbol),
+            "dates": [],
+            "equity": [],
+            "drawdown": [],
+        }
+    price_series = pd.to_numeric(prices[column], errors="coerce").dropna().sort_index()
+    if price_series.empty:
+        return {
+            "symbol": symbol,
+            "label_ko": _benchmark_label_ko(symbol),
+            "dates": [],
+            "equity": [],
+            "drawdown": [],
+        }
+    equity = price_series.divide(float(price_series.iloc[0]))
+    drawdown = equity.divide(equity.cummax()).subtract(1.0)
+    if len(equity) > max_points:
+        equity = equity.tail(max_points)
+        drawdown = drawdown.reindex(equity.index)
+    return {
+        "symbol": symbol,
+        "label_ko": _benchmark_label_ko(symbol),
+        "dates": [_date_str(date) for date in equity.index],
+        "equity": [_rounded_float(value) for value in equity.values],
+        "drawdown": [_rounded_float(drawdown.loc[date]) for date in equity.index],
+    }
+
+
+def _benchmark_label_ko(symbol: str) -> str:
+    labels = {
+        "QQQ": "나스닥-100(QQQ)",
+        "IXIC": "나스닥 종합지수",
+        "^IXIC": "나스닥 종합지수",
+        "SPY": "S&P 500(SPY)",
+    }
+    return labels.get(symbol, f"벤치마크 {symbol}")
+
+
 def _holding_rows(
     result: RunResult,
     leader_rows: list[dict[str, Any]],
@@ -2136,6 +2640,12 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
     if isinstance(payload.get("dashboard"), dict):
         dashboard = payload["dashboard"]
         dashboard.setdefault("source_json", str(path))
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        summary = dashboard.setdefault("summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+            dashboard["summary"] = summary
+        _copy_summary_safety_fields(summary, metadata)
         dashboard.setdefault(
             "scenario_available_dates",
             sorted(
@@ -2157,7 +2667,7 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
                 ]
             ),
         )
-        return dashboard
+        return _sanitize_dashboard_payload_safety(dashboard)
     return _fallback_dashboard_payload(payload, path)
 
 
@@ -2208,69 +2718,69 @@ def _fallback_dashboard_payload(payload: dict[str, Any], path: Path) -> dict[str
             "factor_count": 1 if selected_factor else 0,
         }
     ] if holdings else []
-    return _json_safe(
-        {
-            "schema_version": 1,
-            "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-            "source_json": str(path),
-            "summary": summary,
-            "periods": [{"key": "latest", "label": "최신", "trading_days": None}],
-            "factor_options": [
-                {
-                    "factor": selected_factor,
-                    "category": "unknown",
-                    "description_ko": "legacy JSON에서 읽은 선택 팩터입니다.",
-                    "selected_by_run": True,
-                }
-            ] if selected_factor else [],
-            "factor_leaders": factor_leaders,
-            "factor_period_rankings": [],
-            "factor_period_matrix": [
-                {
-                    "date": data_as_of,
-                    "window": "latest",
-                    "window_label": "최신",
-                    "factors": [selected_factor] if selected_factor else [],
-                    "returns": [None] if selected_factor else [],
-                    "factor_count": 1 if selected_factor else 0,
-                    "exported_factor_count": 1 if selected_factor else 0,
-                }
-            ] if selected_factor else [],
-            "holdings": holdings,
-            "factor_score_snapshots": [
-                {
-                    "date": data_as_of,
-                    "factor": selected_factor,
-                    "score_date": data_as_of,
-                    "available_count": len(holdings),
-                    "rows": [[row["symbol"], _rounded_float(row["score"])] for row in holdings if row.get("symbol")],
-                }
-            ] if selected_factor and holdings else [],
-            "scenario_available_dates": [data_as_of] if selected_factor and holdings else [],
-            "scenario_available_dates_by_factor": {selected_factor: [data_as_of]}
-            if selected_factor and holdings
-            else {},
-            "factor_backtest_series": [],
-            "latest_output_rows": rows[:50],
-            "data_quality_summary": {
-                "candidate_universe_size": metadata.get("candidate_universe_size"),
-                "eligible_price_universe_size": metadata.get("eligible_price_universe_size"),
-                "liquidity_eligible_universe_size": metadata.get("liquidity_eligible_universe_size"),
-                "provider": metadata.get("provider"),
-                "data_as_of": metadata.get("data_as_of"),
-                "data_quality_status_counts": {},
-                "source_counts": {},
-            },
-            "tradability_gate": _tradability_gate_rows(metadata),
-            "factor_diagnostics": {
-                "scope_note_ko": "legacy JSON에는 상세 팩터 진단이 없어 제한된 정보만 표시합니다.",
-                "category_summary": payload.get("factor_category_summary", []) if isinstance(payload.get("factor_category_summary"), list) else [],
-                "rank_ic_top": payload.get("factor_rank_ic", [])[:10] if isinstance(payload.get("factor_rank_ic"), list) else [],
-                "redundancy_top": payload.get("factor_redundancy", [])[:10] if isinstance(payload.get("factor_redundancy"), list) else [],
-            },
-            "notes_ko": ["이 파일은 legacy run-results JSON에서 만든 제한적 대시보드 payload입니다."],
-        }
-    )
+    legacy_payload = {
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "source_json": str(path),
+        "summary": summary,
+        "periods": [{"key": "latest", "label": "최신", "trading_days": None}],
+        "factor_options": [
+            {
+                "factor": selected_factor,
+                "category": "unknown",
+                "description_ko": "legacy JSON에서 읽은 선택 팩터입니다.",
+                "selected_by_run": True,
+            }
+        ] if selected_factor else [],
+        "factor_leaders": factor_leaders,
+        "factor_period_rankings": [],
+        "factor_period_matrix": [
+            {
+                "date": data_as_of,
+                "window": "latest",
+                "window_label": "최신",
+                "factors": [selected_factor] if selected_factor else [],
+                "returns": [None] if selected_factor else [],
+                "factor_count": 1 if selected_factor else 0,
+                "exported_factor_count": 1 if selected_factor else 0,
+            }
+        ] if selected_factor else [],
+        "holdings": holdings,
+        "factor_score_snapshots": [
+            {
+                "date": data_as_of,
+                "factor": selected_factor,
+                "score_date": data_as_of,
+                "available_count": len(holdings),
+                "rows": [[row["symbol"], _rounded_float(row["score"])] for row in holdings if row.get("symbol")],
+            }
+        ] if selected_factor and holdings else [],
+        "scenario_available_dates": [data_as_of] if selected_factor and holdings else [],
+        "scenario_available_dates_by_factor": {selected_factor: [data_as_of]}
+        if selected_factor and holdings
+        else {},
+        "factor_backtest_series": [],
+        "benchmark_backtest_series": [],
+        "latest_output_rows": rows[:50],
+        "data_quality_summary": {
+            "candidate_universe_size": metadata.get("candidate_universe_size"),
+            "eligible_price_universe_size": metadata.get("eligible_price_universe_size"),
+            "liquidity_eligible_universe_size": metadata.get("liquidity_eligible_universe_size"),
+            "provider": metadata.get("provider"),
+            "data_as_of": metadata.get("data_as_of"),
+            "data_quality_status_counts": {},
+            "source_counts": {},
+        },
+        "tradability_gate": _tradability_gate_rows(metadata),
+        "factor_diagnostics": {
+            "scope_note_ko": "legacy JSON에는 상세 팩터 진단이 없어 제한된 정보만 표시합니다.",
+            "category_summary": payload.get("factor_category_summary", []) if isinstance(payload.get("factor_category_summary"), list) else [],
+            "rank_ic_top": payload.get("factor_rank_ic", [])[:10] if isinstance(payload.get("factor_rank_ic"), list) else [],
+            "redundancy_top": payload.get("factor_redundancy", [])[:10] if isinstance(payload.get("factor_redundancy"), list) else [],
+        },
+        "notes_ko": ["이 파일은 legacy run-results JSON에서 만든 제한적 대시보드 payload입니다."],
+    }
+    return _json_safe(_sanitize_dashboard_payload_safety(legacy_payload))
 
 
 def _merge_dashboard_history(
@@ -2338,17 +2848,29 @@ def _compact_historical_run(payload: dict[str, Any]) -> dict[str, Any]:
             "scenario_available_dates": [],
             "scenario_available_dates_by_factor": {},
             "factor_backtest_series": [],
+            "benchmark_backtest_series": payload.get("benchmark_backtest_series", []),
             "latest_output_rows": [],
             "data_quality_summary": payload.get("data_quality_summary", {}),
             "tradability_gate": payload.get("tradability_gate", []),
             "factor_diagnostics": payload.get("factor_diagnostics", {}),
-            "notes_ko": [
-                *(payload.get("notes_ko", []) if isinstance(payload.get("notes_ko"), list) else []),
+            "notes_ko": _unique_text_list(
+                payload.get("notes_ko", []),
                 "과거 실행은 compact 요약으로 보관되어 상세 보유 비중 표시는 최신 실행에 한정됩니다.",
-            ],
+            ),
         }
     )
 
+
+
+
+def _unique_text_list(values: Any, *extra: str) -> list[str]:
+    result: list[str] = []
+    candidates = values if isinstance(values, list) else []
+    for value in [*candidates, *extra]:
+        text = str(value) if value is not None else ""
+        if text and text not in result:
+            result.append(text)
+    return result
 
 def _scenario_available_dates_by_factor(score_snapshots: list[dict[str, Any]]) -> dict[str, list[str]]:
     dates_by_factor: dict[str, set[str]] = {}
@@ -2439,6 +2961,19 @@ def _compact_combined_history_once(payload: dict[str, Any], *, latest_index: int
     return False
 
 
+def _thin_line_series(series: dict[str, Any], *, minimum_points: int = 80) -> bool:
+    dates = series.get("dates") or []
+    if len(dates) <= minimum_points:
+        return False
+    indexes = list(range(len(dates)))[::2]
+    if indexes[-1] != len(dates) - 1:
+        indexes.append(len(dates) - 1)
+    for key in ["dates", "equity", "drawdown"]:
+        values = series.get(key) or []
+        series[key] = [values[index] for index in indexes if index < len(values)]
+    return True
+
+
 def _fit_dashboard_payload(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
     payload.setdefault("payload_limits", {})
     payload["payload_limits"].update(
@@ -2460,16 +2995,10 @@ def _fit_dashboard_payload(payload: dict[str, Any], *, max_bytes: int) -> dict[s
     while _json_payload_size(payload) > max_bytes and payload.get("factor_backtest_series"):
         changed = False
         for series in payload["factor_backtest_series"]:
-            dates = series.get("dates") or []
-            if len(dates) <= 80:
-                continue
-            indexes = list(range(len(dates)))[::2]
-            if indexes[-1] != len(dates) - 1:
-                indexes.append(len(dates) - 1)
-            for key in ["dates", "equity", "drawdown"]:
-                values = series.get(key) or []
-                series[key] = [values[index] for index in indexes if index < len(values)]
-            changed = True
+            changed = _thin_line_series(series) or changed
+        benchmark_series = payload.get("benchmark_backtest_series")
+        if isinstance(benchmark_series, dict):
+            changed = _thin_line_series(benchmark_series) or changed
         if not changed:
             break
     payload["scenario_available_dates"] = sorted(

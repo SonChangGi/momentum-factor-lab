@@ -71,6 +71,8 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         "note",
         "benchmark_symbol",
         "benchmark_price_available",
+        "chart_benchmark_symbol",
+        "chart_benchmark_price_available",
         "requested_download_symbols",
         "requested_symbols",
         "returned_symbols",
@@ -161,14 +163,26 @@ def _point_in_time_provenance_source(config: RunConfig, candidate: pd.DataFrame)
     )
 
 
+
+def _comparator_symbols(config: RunConfig) -> list[str]:
+    """Symbols fetched only for benchmark/comparison charts, never holdings."""
+
+    symbols = [normalize_symbol(config.benchmark), normalize_symbol(config.chart_benchmark)]
+    return list(dict.fromkeys(symbol for symbol in symbols if symbol))
+
 def _requested_symbols(config: RunConfig, candidate: pd.DataFrame) -> tuple[list[str], bool]:
-    benchmark = normalize_symbol(config.benchmark)
-    candidate_symbols = [symbol for symbol in candidate["symbol"].tolist() if symbol != benchmark and not is_known_etf_symbol(symbol)]
-    symbols = list(dict.fromkeys([benchmark, *candidate_symbols]))
+    comparators = _comparator_symbols(config)
+    comparator_set = set(comparators)
+    candidate_symbols = [
+        symbol
+        for symbol in candidate["symbol"].tolist()
+        if symbol not in comparator_set and not is_known_etf_symbol(symbol)
+    ]
+    symbols = list(dict.fromkeys([*comparators, *candidate_symbols]))
     if config.max_price_symbols is not None and len(symbols) > config.max_price_symbols:
-        keep = [benchmark]
-        for symbol in candidate_symbols:
-            if symbol not in keep:
+        keep = [comparators[0]]
+        for symbol in [*comparators[1:], *candidate_symbols]:
+            if symbol not in keep and len(keep) < config.max_price_symbols:
                 keep.append(symbol)
             if len(keep) >= config.max_price_symbols:
                 break
@@ -291,6 +305,7 @@ def build_data_quality_frame(
     prices = prices.sort_index()
     volumes = volumes.reindex(index=prices.index)
     benchmark = normalize_symbol(config.benchmark)
+    comparator_symbols = set(_comparator_symbols(config))
     candidate_symbols = set(candidate["symbol"].map(normalize_symbol)) if "symbol" in candidate else set()
     price_source_frame = price_sources if price_sources is not None else pd.DataFrame()
     source_by_symbol = _price_source_map(price_source_frame)
@@ -363,8 +378,8 @@ def build_data_quality_frame(
         )
         exclusion_reason = exclusions_by_symbol.get(symbol)
         price_source = source_by_symbol.get(symbol, "unavailable" if price_column is None else provider)
-        if symbol == benchmark:
-            role = "benchmark"
+        if symbol in comparator_symbols:
+            role = "benchmark" if symbol == benchmark else "chart_benchmark"
             status = "benchmark_comparator_only" if len(valid_prices) >= 2 else "insufficient_benchmark_history"
         elif price_column is None or valid_prices.empty:
             role = "missing"
@@ -448,7 +463,8 @@ def build_data_quality_frame(
 
 def generate_offline_sample_data(config: RunConfig) -> MarketData:
     candidate, universe_sources = _candidate_universe(config)
-    symbols = list(dict.fromkeys([normalize_symbol(config.benchmark), *SAMPLE_UNIVERSE, *config.universe[:8]]))[:24]
+    comparator_symbols = _comparator_symbols(config)
+    symbols = list(dict.fromkeys([*comparator_symbols, *SAMPLE_UNIVERSE, *config.universe[:8]]))[:24]
     dates = _business_dates(config)
     rng = np.random.default_rng(42)
     common = rng.normal(0.00025, 0.008, len(dates))
@@ -506,6 +522,8 @@ def generate_offline_sample_data(config: RunConfig) -> MarketData:
                         "cache_hit": False,
                         "benchmark_symbol": normalize_symbol(config.benchmark),
                         "benchmark_price_available": normalize_symbol(config.benchmark) in price_df.columns,
+                        "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
+                        "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark) in price_df.columns,
                         "excluded_symbols": 0,
                         "subset_run": True,
                         "point_in_time_universe": False,
@@ -1064,11 +1082,11 @@ def _eligible_filter(
     exclusions: list[dict[str, object]] = []
     keep: list[str] = []
     candidate_symbols = set(candidate["symbol"].map(normalize_symbol)) if "symbol" in candidate else set()
-    benchmark = normalize_symbol(config.benchmark)
+    comparator_symbols = set(_comparator_symbols(config))
     as_of = prices.dropna(how="all").index.max() if not prices.empty else None
     for raw_symbol in prices.columns:
         symbol = normalize_symbol(raw_symbol)
-        is_benchmark = symbol == benchmark
+        is_benchmark = symbol in comparator_symbols
         is_candidate = symbol in candidate_symbols
         if not is_benchmark and not is_candidate:
             exclusions.append({"symbol": symbol, "reason": "not in stock candidate universe", "observed": np.nan})
@@ -1138,10 +1156,11 @@ def _eligible_filter(
     keep = list(dict.fromkeys(keep))
     price_keep = prices[keep].dropna(how="all") if keep else pd.DataFrame(index=prices.index)
     volume_keep = volumes.reindex(index=price_keep.index, columns=keep)
+    comparator_symbols = set(_comparator_symbols(config))
     eligible_symbols = [
         symbol
         for symbol in keep
-        if normalize_symbol(symbol) in candidate_symbols and normalize_symbol(symbol) != benchmark
+        if normalize_symbol(symbol) in candidate_symbols and normalize_symbol(symbol) not in comparator_symbols
     ]
     normalized_eligible = {normalize_symbol(symbol) for symbol in eligible_symbols}
     eligible = stock_only_universe_frame(candidate[candidate["symbol"].map(normalize_symbol).isin(normalized_eligible)])
@@ -1238,7 +1257,8 @@ def download_live_data(config: RunConfig) -> MarketData:
         return sample
 
     benchmark = normalize_symbol(config.benchmark)
-    requested_candidate_symbols = [symbol for symbol in symbols if symbol != benchmark and symbol in set(candidate["symbol"])]
+    comparator_symbols = set(_comparator_symbols(config))
+    requested_candidate_symbols = [symbol for symbol in symbols if symbol not in comparator_symbols and symbol in set(candidate["symbol"])]
     downloaded_prices = prices.copy()
     downloaded_volumes = volumes.copy()
     prices, volumes, eligible, exclusions = _eligible_filter(prices, volumes, candidate[candidate["symbol"].isin(requested_candidate_symbols)], config)
@@ -1315,8 +1335,8 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "liquidity_eligible_symbols": liquidity_eligible_symbols,
                 "requested_download_symbols": len(symbols),
                 "requested_symbols": ",".join(requested_candidate_symbols),
-                "returned_symbols": ",".join(symbol for symbol in returned_symbols if symbol != benchmark),
-                "missing_symbols": ",".join(symbol for symbol in missing_symbols if symbol != benchmark),
+                "returned_symbols": ",".join(symbol for symbol in returned_symbols if symbol not in comparator_symbols),
+                "missing_symbols": ",".join(symbol for symbol in missing_symbols if symbol not in comparator_symbols),
                 "as_of_min": (
                     str(downloaded_prices.dropna(how="all").index.min().date())
                     if not downloaded_prices.empty
@@ -1334,6 +1354,8 @@ def download_live_data(config: RunConfig) -> MarketData:
                 ),
                 "benchmark_symbol": benchmark,
                 "benchmark_price_available": benchmark in prices.columns,
+                "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
+                "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark) in prices.columns,
                 "excluded_symbols": len(exclusions),
                 "subset_run": subset_run,
                 "point_in_time_universe": False,

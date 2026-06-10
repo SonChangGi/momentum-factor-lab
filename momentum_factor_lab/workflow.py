@@ -119,7 +119,7 @@ def _analysis_prices(market_data: MarketData, config: RunConfig) -> pd.DataFrame
     prices = market_data.prices.dropna(axis=1, how="all")
     if prices.empty:
         return prices
-    benchmark = normalize_symbol(config.benchmark)
+    comparator_symbols = {normalize_symbol(config.benchmark), normalize_symbol(config.chart_benchmark)}
     if market_data.eligible_universe.empty or "symbol" not in market_data.eligible_universe:
         return pd.DataFrame(index=prices.index)
     eligible_symbols = set(market_data.eligible_universe["symbol"].map(normalize_symbol))
@@ -129,7 +129,7 @@ def _analysis_prices(market_data: MarketData, config: RunConfig) -> pd.DataFrame
         for column in prices.columns
         if normalize_symbol(column) in eligible_symbols
         and normalize_symbol(column) in candidate_symbols
-        and normalize_symbol(column) != benchmark
+        and normalize_symbol(column) not in comparator_symbols
         and not is_known_etf_symbol(column)
     ]
     return prices.reindex(columns=allowed).dropna(axis=1, how="all")
@@ -791,9 +791,10 @@ def _resolve_selected_factor(
             "walk_forward",
             (
                 f"{selected_factor} selected by in-run walk-forward diagnostics using only prior windows; "
-                "validation rankings are reported separately for audit. This is not treated as a frozen live policy."
+                "validation rankings are reported separately for audit. Without an independently frozen policy "
+                "artifact this remains research-only and is not treated as a live trading policy."
             ),
-            False,
+            True,
         )
     return (
         validation_selected_factor,
@@ -803,7 +804,7 @@ def _resolve_selected_factor(
             "research ranking after comparing validation Sharpe, Sortino, Calmar, max drawdown, "
             "CAGR, turnover, and train/validation stability across the full momentum factor library. "
             "Same-run validation selection is blocked from tradable recommendation output; use a "
-            "predeclared selected factor or walk-forward selection for practical labels."
+            "predeclared selected factor frozen before the run for practical labels."
         ),
         True,
     )
@@ -1278,6 +1279,45 @@ def _row_level_capacity_pass(recommendations: pd.DataFrame) -> bool:
     return bool(not recommendations.empty and recommendations["capacity_status"].eq("pass").all())
 
 
+RESEARCH_ONLY_ZERO_COLUMNS = (
+    "weight",
+    "proposed_weight",
+    "pre_cap_weight",
+    "weight_cap_excess",
+    "target_notional",
+    "adv_participation",
+    "capacity_utilization",
+    "capacity_aum_limit",
+)
+
+
+def _sanitize_research_signal_rows(recommendations: pd.DataFrame, *, reason: str) -> pd.DataFrame:
+    """Remove tradable sizing cues from fail-closed research-only rows."""
+
+    frame = recommendations.copy()
+    for column in RESEARCH_ONLY_ZERO_COLUMNS:
+        if column in frame:
+            frame[column] = 0.0
+    if "capacity_pass" in frame:
+        frame["capacity_pass"] = False
+    if "capacity_status" in frame:
+        pass_mask = frame["capacity_status"].eq("pass")
+        frame.loc[pass_mask, "capacity_status"] = "research_only_gate_failed"
+    if "capacity_warning" in frame:
+        research_only_warning = (
+            "연구용 fail-closed 출력입니다. 종목/점수는 참고용이며 매매 권고 비중으로 사용하지 않습니다. "
+            f"미충족 요건: {reason or 'research_only_gate_failed'}"
+        )
+        if "capacity_status" in frame:
+            warning_mask = frame["capacity_status"].eq("research_only_gate_failed")
+            frame.loc[warning_mask, "capacity_warning"] = research_only_warning
+        else:
+            frame["capacity_warning"] = research_only_warning
+    frame["tradable_weight_enabled"] = False
+    frame["research_only_reason"] = reason or "research_only_gate_failed"
+    return frame
+
+
 def _apply_tradability_gate(
     config: RunConfig,
     market_data: MarketData,
@@ -1286,10 +1326,12 @@ def _apply_tradability_gate(
     current_available: bool,
     subset_run: bool,
     selection_source: str,
+    same_sample_blocked: bool,
 ) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "factor_selection_policy_available": selection_source in {"predeclared", "walk_forward"},
+        "factor_selection_policy_available": selection_source == "predeclared",
+        "no_same_sample_factor_selection": not same_sample_blocked,
         "no_explicit_price_symbol_cap": _has_no_explicit_price_symbol_cap(config, subset_run),
         "complete_requested_price_coverage": _has_complete_requested_price_coverage(market_data),
         "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
@@ -1390,10 +1432,14 @@ def run_analysis(config: RunConfig) -> RunResult:
         fresh_live_data_available,
         subset_run,
         selection_source,
+        same_sample_blocked,
     )
     status = tradability_assessment.status
     if not tradability_assessment.recommendation_output_available:
-        recommendations["weight"] = 0.0
+        recommendations = _sanitize_research_signal_rows(
+            recommendations,
+            reason="; ".join(tradability_assessment.limitations),
+        )
     recommendations["recommendation_status"] = status
     recommendations["recommendation_output"] = tradability_assessment.output_key
     recommendations["signal_date"] = str(analysis_prices.index.max().date()) if not analysis_prices.empty else "unavailable"
@@ -1437,7 +1483,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         "same_sample_selection_blocked_for_tradable": same_sample_blocked,
         "factor_selection_warning": (
             "Validation-selected factor is a same-run research ranking and is blocked from tradable "
-            "recommendation output; predeclare a selected factor or use walk-forward selection for practical labels."
+            "recommendation output; explicitly predeclare a selected factor before the run for practical labels."
             if selection_source == "research_validation"
             else None
         ),
@@ -1480,6 +1526,8 @@ def run_analysis(config: RunConfig) -> RunResult:
         "fetched_price_symbol_count": len(prices.columns),
         "benchmark_symbol": normalize_symbol(config.benchmark),
         "benchmark_price_available": normalize_symbol(config.benchmark) in prices.columns,
+        "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
+        "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark) in prices.columns,
         "excluded_symbols": len(market_data.exclusions),
         "subset_run": subset_run,
         "factor_count": len(factor_definitions),
@@ -1488,6 +1536,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         "slippage_bps": config.slippage_bps,
         "cost_stress_high_bps": config.cost_stress_high_bps,
         "benchmark": normalize_symbol(config.benchmark),
+        "chart_benchmark": normalize_symbol(config.chart_benchmark),
         "selected_factor_avg_turnover": float(selected_metrics.get("full_avg_turnover", 0.0)),
         "selected_factor_total_turnover": float(selected_metrics.get("full_total_turnover", 0.0)),
         "selected_factor_annualized_turnover": float(selected_metrics.get("full_annualized_turnover", 0.0)),
@@ -1518,7 +1567,8 @@ def run_analysis(config: RunConfig) -> RunResult:
         "recommendation_capacity_warning": "; ".join(sorted(set(recommendations["capacity_warning"].dropna()))),
         "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
         "multiple_testing_warning": (
-            "Many explainable momentum factors are compared; validation, predeclared/walk-forward selection, "
+            "Many explainable momentum factors are compared; validation diagnostics and an explicitly "
+            "predeclared factor policy "
             "and multiple-testing/data-snooping warnings are required before treating outputs as investable."
         ),
         "factor_library_scope": "price_momentum_only",

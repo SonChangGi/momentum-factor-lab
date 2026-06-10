@@ -54,7 +54,7 @@ def test_eligible_filter_excludes_uninvestable_symbols():
         index=dates,
     )
     candidate = _candidate_frame(["GOOD", "LOWP", "SHORT", "ILLIQ", "MISS"])
-    config = RunConfig(min_history_days=252, min_price=5, min_avg_dollar_volume=1_000_000)
+    config = RunConfig(min_history_days=252, min_price=5, min_avg_dollar_volume=1_000_000, chart_benchmark="QQQ")
     filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
     assert list(filtered.columns) == ["GOOD", "ILLIQ"]
     assert list(eligible["symbol"]) == ["GOOD", "ILLIQ"]
@@ -194,19 +194,57 @@ def test_eligible_filter_retains_benchmark_price_without_candidate_liquidity():
     prices = pd.DataFrame(
         {
             "SPY": np.linspace(400, 430, len(dates)),
+            "QQQ": np.linspace(300, 345, len(dates)),
             "GOOD": np.linspace(20, 30, len(dates)),
         },
         index=dates,
     )
     volumes = pd.DataFrame({"GOOD": 1_000_000}, index=dates)
     candidate = _candidate_frame(["GOOD"])
-    config = RunConfig(min_history_days=252, min_price=5, min_avg_dollar_volume=1_000_000)
+    config = RunConfig(
+        min_history_days=252,
+        min_price=5,
+        min_avg_dollar_volume=1_000_000,
+        chart_benchmark="QQQ",
+    )
 
     filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
 
-    assert list(filtered.columns) == ["SPY", "GOOD"]
+    assert list(filtered.columns) == ["SPY", "QQQ", "GOOD"]
     assert list(eligible["symbol"]) == ["GOOD"]
     assert "SPY" not in set(exclusions["symbol"])
+
+
+def test_eligible_filter_excludes_stock_chart_benchmark_from_holdings():
+    dates = pd.bdate_range("2024-01-01", periods=260)
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(400, 430, len(dates)),
+            "AAPL": np.linspace(175, 220, len(dates)),
+            "GOOD": np.linspace(20, 30, len(dates)),
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame(
+        {
+            "AAPL": 50_000_000,
+            "GOOD": 1_000_000,
+        },
+        index=dates,
+    )
+    candidate = _candidate_frame(["AAPL", "GOOD"])
+    config = RunConfig(
+        min_history_days=252,
+        min_price=5,
+        min_avg_dollar_volume=1_000_000,
+        chart_benchmark="AAPL",
+    )
+
+    filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
+
+    assert list(filtered.columns) == ["SPY", "AAPL", "GOOD"]
+    assert list(eligible["symbol"]) == ["GOOD"]
+    assert "AAPL" not in set(exclusions["symbol"])
 
 
 def test_data_quality_frame_records_symbol_level_statuses():
@@ -214,6 +252,7 @@ def test_data_quality_frame_records_symbol_level_statuses():
     prices = pd.DataFrame(
         {
             "SPY": np.linspace(400, 430, len(dates)),
+            "QQQ": np.linspace(300, 345, len(dates)),
             "GOOD": np.linspace(20, 30, len(dates)),
             "STALE": list(np.linspace(20, 25, 254)) + [np.nan] * 6,
             "SHORT": [np.nan] * 220 + list(np.linspace(10, 12, 40)),
@@ -238,6 +277,7 @@ def test_data_quality_frame_records_symbol_level_statuses():
         min_price=5,
         min_avg_dollar_volume=1_000_000,
         stale_after_days=5,
+        chart_benchmark="QQQ",
     )
     _, _, _, exclusions = _eligible_filter(prices, volumes, candidate, config)
     price_sources = pd.DataFrame(
@@ -247,7 +287,7 @@ def test_data_quality_frame_records_symbol_level_statuses():
     quality = build_data_quality_frame(
         prices,
         volumes,
-        ["SPY", "GOOD", "STALE", "SHORT", "ILLIQ", "NOVOL", "MISS"],
+        ["SPY", "QQQ", "GOOD", "STALE", "SHORT", "ILLIQ", "NOVOL", "MISS"],
         candidate,
         config,
         provider="fixture-provider",
@@ -259,7 +299,9 @@ def test_data_quality_frame_records_symbol_level_statuses():
     roles = quality.set_index("symbol")["role"].to_dict()
 
     assert roles["SPY"] == "benchmark"
+    assert roles["QQQ"] == "chart_benchmark"
     assert statuses["SPY"] == "benchmark_comparator_only"
+    assert statuses["QQQ"] == "benchmark_comparator_only"
     assert statuses["GOOD"] == "pass"
     assert statuses["STALE"] == "stale_price"
     assert statuses["SHORT"] == "insufficient_history"

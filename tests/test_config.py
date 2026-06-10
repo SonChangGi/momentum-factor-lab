@@ -69,7 +69,7 @@ def test_selected_factor_defaults_to_predeclared_effective_mode():
     config = RunConfig(selected_factor="mom_1m")
 
     assert config.factor_selection_mode == "research_validation"
-    assert config.effective_factor_selection_mode == "predeclared"
+    assert config.effective_factor_selection_mode == "research_validation"
 
 
 def test_recommendation_weighting_defaults_are_score_size_liquidity():

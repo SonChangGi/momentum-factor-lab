@@ -1,7 +1,45 @@
+const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
+const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
+
 const state = {
   data: null,
   activeRunIndex: 0,
 };
+
+function bindManualUpdateControls() {
+  const button = document.querySelector('#manual-update-button');
+  if (button) {
+    button.setAttribute('href', MANUAL_UPDATE_WORKFLOW_URL);
+    button.setAttribute('target', '_blank');
+    button.setAttribute('rel', 'noopener');
+    if (typeof button.addEventListener === 'function') {
+      button.addEventListener('click', () => {
+        const status = document.querySelector('#manual-update-status');
+        if (status) {
+          status.textContent = '저장소 쓰기 권한이 있는 GitHub 계정으로 Run workflow를 눌러 실행 시점의 최신 제공자 데이터 재실행을 시작하세요.';
+        }
+      });
+    }
+  }
+
+  const command = document.querySelector('#manual-update-command');
+  if (command) command.textContent = MANUAL_UPDATE_COMMAND;
+
+  const copyButton = document.querySelector('#copy-update-command');
+  if (!copyButton || typeof copyButton.addEventListener !== 'function') return;
+  copyButton.addEventListener('click', async () => {
+    const status = document.querySelector('#manual-update-status');
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || !window.isSecureContext) {
+        throw new Error('clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(MANUAL_UPDATE_COMMAND);
+      if (status) status.textContent = 'CLI 실행 명령을 복사했습니다. 터미널에서 붙여넣어 수동 실행할 수 있습니다.';
+    } catch (_) {
+      if (status) status.textContent = `복사가 제한되었습니다. 아래 명령을 직접 복사하세요: ${MANUAL_UPDATE_COMMAND}`;
+    }
+  });
+}
 
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
@@ -910,6 +948,12 @@ function factorBacktestSeries(run, factor) {
   return (run.factor_backtest_series || []).find((series) => series.factor === factor) || null;
 }
 
+function benchmarkBacktestSeries(run) {
+  const series = run.benchmark_backtest_series;
+  if (!series || !Array.isArray(series.dates)) return null;
+  return series;
+}
+
 function seriesPointsThroughDate(series, date, limit = 120) {
   if (!series || !Array.isArray(series.dates)) return [];
   const points = series.dates.map((pointDate, index) => ({
@@ -927,46 +971,114 @@ function normalizedLine(points) {
   return points.map((point) => ({ ...point, normalized: base ? point.equity / base : point.equity }));
 }
 
+function formatAxisDate(value) {
+  if (!value) return '-';
+  const parts = String(value).split('-');
+  if (parts.length >= 3) return `${parts[1]}/${parts[2]}`;
+  return String(value);
+}
+
+function appendSvgText(svg, text, x, y, className, anchor = 'middle') {
+  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  label.textContent = text;
+  label.setAttribute('x', String(x));
+  label.setAttribute('y', String(y));
+  label.setAttribute('class', className);
+  label.setAttribute('text-anchor', anchor);
+  svg.appendChild(label);
+  return label;
+}
+
 function renderBacktestChart() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
   const factor = selectedFactor();
   const best = periodBestStats(run, date, windowKey);
+  const benchmark = benchmarkBacktestSeries(run);
   const selectedSeries = normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, factor), date));
   const bestSeries = best?.factor && best.factor !== factor
     ? normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, best.factor), date))
     : [];
+  const benchmarkSeries = normalizedLine(seriesPointsThroughDate(benchmark, date));
+  const benchmarkLabel = benchmark?.label_ko || benchmark?.symbol || run.summary?.chart_benchmark || '나스닥 벤치마크';
   const target = document.querySelector('#backtest-chart');
   target.replaceChildren();
-  setText('#backtest-chart-meta', `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}`);
+  setText(
+    '#backtest-chart-meta',
+    `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}${benchmarkSeries.length ? ` · 벤치마크 ${benchmarkLabel}` : ''}`
+  );
   if (!selectedSeries.length) {
     appendEmpty('#backtest-chart', '선택 팩터의 최근 백테스트 추이 데이터가 없습니다. 기간 최고 팩터 데이터를 대신 표시하지 않습니다.');
     return;
   }
-  const allValues = [...selectedSeries, ...bestSeries].map((point) => point.normalized).filter((value) => Number.isFinite(value));
-  const minValue = Math.min(...allValues, 0.95);
-  const maxValue = Math.max(...allValues, 1.05);
-  const width = 720;
-  const height = 220;
-  const pad = 18;
+  const allPoints = [...selectedSeries, ...bestSeries, ...benchmarkSeries];
+  const allValues = allPoints.map((point) => point.normalized).filter((value) => Number.isFinite(value));
+  let minValue = Math.min(...allValues, 0.95, 1.0);
+  let maxValue = Math.max(...allValues, 1.05, 1.0);
+  const rangePadding = Math.max((maxValue - minValue) * 0.08, 0.01);
+  minValue -= rangePadding;
+  maxValue += rangePadding;
+  const allDates = [...new Set(allPoints.map((point) => point.date).filter(Boolean))].sort();
+  const dateToIndex = new Map(allDates.map((pointDate, index) => [pointDate, index]));
+  const width = 760;
+  const height = 260;
+  const plot = { left: 64, right: 18, top: 18, bottom: 46 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.setAttribute('role', 'img');
-  svg.setAttribute('aria-label', '선택 팩터와 기간 최고 팩터의 최근 백테스트 누적 성과 비교');
-  [0.25, 0.5, 0.75].forEach((ratio) => {
+  svg.setAttribute('aria-label', '선택 팩터, 기간 최고 팩터, 나스닥 벤치마크의 최근 백테스트 누적 성과 비교');
+  const yFor = (value) => height - plot.bottom - ((value - minValue) / Math.max(0.000001, maxValue - minValue)) * plotHeight;
+  const xFor = (point) => {
+    const index = dateToIndex.get(point.date) ?? 0;
+    return plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+  };
+  const tickValues = Array.from({ length: 5 }, (_, index) => minValue + (maxValue - minValue) * (index / 4));
+  tickValues.forEach((tick) => {
+    const y = yFor(tick);
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    const y = pad + (height - pad * 2) * ratio;
-    line.setAttribute('x1', String(pad));
-    line.setAttribute('x2', String(width - pad));
+    line.setAttribute('x1', String(plot.left));
+    line.setAttribute('x2', String(width - plot.right));
     line.setAttribute('y1', String(y));
     line.setAttribute('y2', String(y));
     line.setAttribute('class', 'line-grid');
     svg.appendChild(line);
+    appendSvgText(svg, formatPercent(tick - 1), plot.left - 9, y + 4, 'axis-label', 'end');
   });
-  const toPolyline = (points) => points.map((point, index) => {
-    const x = pad + (points.length <= 1 ? 0 : index / (points.length - 1) * (width - pad * 2));
-    const y = height - pad - ((point.normalized - minValue) / Math.max(0.000001, maxValue - minValue)) * (height - pad * 2);
+  const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  yAxis.setAttribute('x1', String(plot.left));
+  yAxis.setAttribute('x2', String(plot.left));
+  yAxis.setAttribute('y1', String(plot.top));
+  yAxis.setAttribute('y2', String(height - plot.bottom));
+  yAxis.setAttribute('class', 'axis-line');
+  svg.appendChild(yAxis);
+  const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  xAxis.setAttribute('x1', String(plot.left));
+  xAxis.setAttribute('x2', String(width - plot.right));
+  xAxis.setAttribute('y1', String(height - plot.bottom));
+  xAxis.setAttribute('y2', String(height - plot.bottom));
+  xAxis.setAttribute('class', 'axis-line');
+  svg.appendChild(xAxis);
+  const xTickIndexes = [...new Set([0, Math.floor((allDates.length - 1) / 2), allDates.length - 1])].filter((index) => index >= 0);
+  xTickIndexes.forEach((index) => {
+    const x = plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+    const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    tick.setAttribute('x1', String(x));
+    tick.setAttribute('x2', String(x));
+    tick.setAttribute('y1', String(height - plot.bottom));
+    tick.setAttribute('y2', String(height - plot.bottom + 5));
+    tick.setAttribute('class', 'axis-line');
+    svg.appendChild(tick);
+    appendSvgText(svg, formatAxisDate(allDates[index]), x, height - plot.bottom + 19, 'axis-label');
+  });
+  appendSvgText(svg, 'X축: 날짜', plot.left + plotWidth / 2, height - 5, 'axis-title');
+  const yTitle = appendSvgText(svg, 'Y축: 누적 성과', 13, plot.top + plotHeight / 2, 'axis-title');
+  yTitle.setAttribute('transform', `rotate(-90 13 ${plot.top + plotHeight / 2})`);
+  const toPolyline = (points) => points.map((point) => {
+    const x = xFor(point);
+    const y = yFor(point.normalized);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
   const appendLine = (points, className) => {
@@ -978,14 +1090,17 @@ function renderBacktestChart() {
   };
   appendLine(selectedSeries, 'selected');
   appendLine(bestSeries, 'best');
+  appendLine(benchmarkSeries, 'benchmark');
   target.appendChild(svg);
 
   const legend = document.createElement('div');
   legend.className = 'line-legend';
   const selectedReturn = selectedSeries.at(-1)?.normalized - 1;
   const bestReturn = bestSeries.length ? bestSeries.at(-1)?.normalized - 1 : null;
+  const benchmarkReturn = benchmarkSeries.length ? benchmarkSeries.at(-1)?.normalized - 1 : null;
   const selectedDrawdown = selectedSeries.at(-1)?.drawdown;
   const bestDrawdown = bestSeries.length ? bestSeries.at(-1)?.drawdown : null;
+  const benchmarkDrawdown = benchmarkSeries.length ? benchmarkSeries.at(-1)?.drawdown : null;
   const selectedLegend = document.createElement('span');
   const selectedDot = document.createElement('span');
   selectedDot.className = 'legend-dot';
@@ -999,6 +1114,14 @@ function renderBacktestChart() {
     bestLegend.appendChild(bestDot);
     bestLegend.append(`기간 최고 ${best.factor}: 구간 ${formatPercent(bestReturn)} · 낙폭 ${formatPercent(bestDrawdown)}`);
     legend.appendChild(bestLegend);
+  }
+  if (benchmarkSeries.length) {
+    const benchmarkLegend = document.createElement('span');
+    const benchmarkDot = document.createElement('span');
+    benchmarkDot.className = 'legend-dot benchmark';
+    benchmarkLegend.appendChild(benchmarkDot);
+    benchmarkLegend.append(`${benchmarkLabel}: 구간 ${formatPercent(benchmarkReturn)} · 낙폭 ${formatPercent(benchmarkDrawdown)}`);
+    legend.appendChild(benchmarkLegend);
   }
   target.appendChild(legend);
 }
@@ -1063,6 +1186,8 @@ function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
     renderAll();
   }, 160);
 }
+
+bindManualUpdateControls();
 
 fetch('data/dashboard.json')
   .then((response) => response.json())

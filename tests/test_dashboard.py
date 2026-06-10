@@ -41,6 +41,9 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert {"date", "factor", "score_date", "rows"}.issubset(payload["factor_score_snapshots"][0])
     assert payload["factor_backtest_series"]
     assert {"factor", "dates", "equity", "drawdown"}.issubset(payload["factor_backtest_series"][0])
+    assert payload["benchmark_backtest_series"]["symbol"] == "^IXIC"
+    assert payload["benchmark_backtest_series"]["label_ko"] == "나스닥 종합지수"
+    assert payload["benchmark_backtest_series"]["dates"]
     assert payload["holdings"]
     assert {"symbol", "score", "default_weight", "window", "weight_source"}.issubset(payload["holdings"][0])
     assert payload["holdings"][0]["weight_source"] == "백테스트 일별 보유 비중"
@@ -224,8 +227,22 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "모멘텀 팩터 데일리 대시보드" in html
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
     assert "최근 실행 시각" in html
+    assert "X축: 날짜" in js
+    assert "Y축: 누적 성과" in js
+    assert "나스닥 벤치마크" in js
     assert "08:17을 기본 실행 시각" in html
     assert "이미 실행된 경우" in html
+    assert "최신 데이터 업데이트 실행" in html
+    assert "자동화 실패 시 그 시점의 최신 데이터" in html
+    assert "GitHub Actions에서 최신 데이터 업데이트 실행" in html
+    assert "저장소 쓰기 권한" in html
+    assert "workflow_dispatch" in html
+    assert "Run workflow" in html
+    assert 'id="manual-update-button"' in html
+    assert 'role="status" aria-live="polite"' in html
+    assert "변경사항이 있으면 새 JSON이 커밋" in html
+    assert "Actions 상태와 대시보드 기준일" in html
+    assert "gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main" in html
     assert "시각화 대시보드" in html
     assert "선택 팩터 시나리오" in html
     assert "브라우저 시나리오 종목당 최대 비중" in html
@@ -259,6 +276,11 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "가격 적격 종목" in js
     assert "유동성 적격 종목" in js
     assert "formatKoreanDateTime" in js
+    assert "bindManualUpdateControls" in js
+    assert "MANUAL_UPDATE_WORKFLOW_URL" in js
+    assert "MANUAL_UPDATE_COMMAND" in js
+    assert "typeof navigator === 'undefined'" in js
+    assert "저장소 쓰기 권한" in js
     assert "latest-run-at" in js
     assert "appendStatusLine" in js
     assert "최근 실행 시각" in js
@@ -581,6 +603,173 @@ def test_legacy_run_results_fallback_has_leader_row(tmp_path):
     assert run["holdings"]
 
 
+
+
+def test_dashboard_sanitizes_legacy_research_signal_rows(tmp_path):
+    run_json = tmp_path / "run_results_legacy_research.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-10T00:00:00Z",
+                    "summary": {
+                        "run_timestamp_utc": "2026-06-10T00:00:00Z",
+                        "data_as_of": "2026-06-09",
+                        "selected_factor": "mom_9_1",
+                        "recommendation_output_label": "Practical recommendations",
+                        "decision_support_tier": "practical_recommendations",
+                        "selected_reason": (
+                            "Same-run validation selection is blocked from tradable recommendation output; "
+                            "use a predeclared selected factor or walk-forward selection for practical labels."
+                        ),
+                    },
+                    "periods": [],
+                    "factor_options": [],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                    "factor_score_snapshots": [],
+                    "latest_output_rows": [
+                        {
+                            "rank": 1,
+                            "symbol": "VSCO",
+                            "score": 1.2,
+                            "weight": 0.0,
+                            "proposed_weight": 0.1,
+                            "pre_cap_weight": 0.2,
+                            "target_notional": 10_000,
+                            "capacity_status": "pass",
+                            "capacity_pass": True,
+                            "capacity_warning": "Capacity check passed.",
+                            "recommendation_output": "research_signals",
+                            "selected_factor_selection_source": "research_validation",
+                        }
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
+    run = combined["runs"][0]
+    summary = run["summary"]
+    row = run["latest_output_rows"][0]
+
+    assert summary["recommendation_output_key"] == "research_signals"
+    assert summary["recommendation_output_label"] == "Research signals (not tradable)"
+    assert summary["decision_support_tier"] == "research_signals"
+    assert summary["research_only"] is True
+    assert summary["same_sample_selection_blocked_for_tradable"] is True
+    assert "no_same_sample_factor_selection" in summary["tradability_blockers"]
+    assert "walk-forward selection for practical labels" not in summary["selected_reason"]
+    assert row["proposed_weight"] == 0.0
+    assert row["pre_cap_weight"] == 0.0
+    assert row["target_notional"] == 0.0
+    assert row["capacity_pass"] is False
+    assert row["capacity_status"] == "research_only_gate_failed"
+
+
+
+def test_dashboard_preserves_predeclared_factor_policy_when_other_gate_fails(tmp_path):
+    run_json = tmp_path / "run_results_predeclared_research.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "run_timestamp_utc": "2026-06-10T00:00:00Z",
+                    "data_as_of": "2026-06-09",
+                    "recommendation_output_key": "research_signals",
+                    "recommendation_output_label": "Research signals (not tradable)",
+                    "recommendation_output_available": False,
+                    "tradable_output_available": False,
+                    "current_recommendations_available": False,
+                    "tradable_recommendations_available": False,
+                    "research_only": True,
+                    "decision_support_tier": "research_signals",
+                    "selected_factor_selection_source": "predeclared",
+                    "factor_selection_mode": "predeclared",
+                    "selection_policy_frozen_for_live": True,
+                    "same_run_factor_selection_blocked_for_tradable": False,
+                    "same_sample_selection_blocked_for_tradable": False,
+                    "factor_selection_warning": None,
+                    "tradability_requirements": {
+                        "fresh_live_data": True,
+                        "factor_selection_policy_available": True,
+                        "no_same_sample_factor_selection": True,
+                        "complete_requested_price_coverage": False,
+                    },
+                    "tradability_blockers": ["complete_requested_price_coverage"],
+                    "execution_limitations": ["complete_requested_price_coverage"],
+                    "fail_closed_reasons": ["complete_requested_price_coverage"],
+                },
+                "config": {
+                    "top_n": 1,
+                    "max_weight": 0.1,
+                    "factor_selection_mode": "predeclared",
+                    "selected_factor": "mom_9_1",
+                    "chart_benchmark": "^IXIC",
+                },
+                "selected_factor": "mom_9_1",
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-10T00:00:00Z",
+                    "summary": {
+                        "run_timestamp_utc": "2026-06-10T00:00:00Z",
+                        "data_as_of": "2026-06-09",
+                        "selected_factor": "mom_9_1",
+                    },
+                    "periods": [],
+                    "factor_options": [],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                    "factor_score_snapshots": [],
+                    "latest_output_rows": [
+                        {
+                            "rank": 1,
+                            "symbol": "AAPL",
+                            "score": 1.2,
+                            "weight": 0.1,
+                            "proposed_weight": 0.1,
+                            "capacity_status": "pass",
+                            "capacity_pass": True,
+                            "recommendation_output": "research_signals",
+                            "selected_factor_selection_source": "predeclared",
+                        }
+                    ],
+                    "factor_backtest_series": [],
+                    "benchmark_backtest_series": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
+    run = combined["runs"][0]
+    summary = run["summary"]
+    gates = {gate["key"]: gate for gate in run["tradability_gate"]}
+    row = run["latest_output_rows"][0]
+
+    assert summary["research_only"] is True
+    assert summary["selected_factor_selection_source"] == "predeclared"
+    assert summary["same_run_factor_selection_blocked_for_tradable"] is False
+    assert summary["same_sample_selection_blocked_for_tradable"] is False
+    assert summary["factor_selection_warning"] is None
+    assert summary["tradability_requirements"]["factor_selection_policy_available"] is True
+    assert summary["tradability_requirements"]["no_same_sample_factor_selection"] is True
+    assert "factor_selection_policy_available" not in summary["tradability_blockers"]
+    assert "no_same_sample_factor_selection" not in summary["fail_closed_reasons"]
+    assert gates["factor_selection_policy_available"]["passed"] is True
+    assert gates["no_same_sample_factor_selection"]["passed"] is True
+    assert row["weight"] == 0.0
+    assert row["capacity_status"] == "research_only_gate_failed"
+
+
 def test_scheduled_dashboard_json_output_is_parseable(monkeypatch, tmp_path, capsys):
     run_json = tmp_path / "outputs" / "run_results_test.json"
     run_json.parent.mkdir()
@@ -684,6 +873,7 @@ def test_dashboard_history_preserves_dedupes_sorts_and_caps(tmp_path):
 
 def test_daily_dashboard_workflow_documents_kst_schedule():
     workflow = Path(".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
     config = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
 
     assert "cron: '17 23 * * *'" in workflow
@@ -697,5 +887,20 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "dashboard_freshness" in workflow
     assert "continue-on-error: true" in workflow
     assert "Remote branch already has a dashboard execution after 08:00 KST" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "23:17 UTC" in readme
+    assert "workflow_dispatch" in readme
+    assert "최신 데이터 업데이트 실행" in readme
+    assert "저장소 쓰기 권한" in readme
+    assert "그 시점의 가장 최근" in readme
+    assert "no `docs/` diff" in readme
+    assert "gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main" in readme
+    assert "GitHub token" in readme
     assert config["site_dir"] == "docs"
     assert "--live" in config["run_args"]
+    assert "--selected-factor" in config["run_args"]
+    assert "mom_9_1" in config["run_args"]
+    assert "--chart-benchmark" in config["run_args"]
+    assert "^IXIC" in config["run_args"]
+    mode_index = config["run_args"].index("--factor-selection-mode")
+    assert config["run_args"][mode_index + 1] == "predeclared"
