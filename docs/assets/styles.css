@@ -37,11 +37,12 @@ main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
 .noscript-warning { margin: 1rem clamp(1rem, 4vw, 4rem); padding: 1rem 1.25rem; border-radius: 18px; background: #fff4e6; color: #8a4b00; border: 1px solid #ffd8a8; font-weight: 800; line-height: 1.6; }
-.controls { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
+.controls { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
 select, input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .8rem; color: var(--ink); background: #fff; font: inherit; }
 input[readonly] { background: #f8fafc; color: var(--muted); }
-.unit { position: absolute; right: .8rem; bottom: .75rem; color: var(--muted); }
+.unit { position: absolute; right: .8rem; top: 2.25rem; color: var(--muted); }
+.control-hint { color: var(--muted); font-size: .72rem; line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
 .card { border-radius: 22px; padding: 1.1rem; }
 .card span { color: var(--muted); font-weight: 700; font-size: .85rem; }
@@ -91,6 +92,8 @@ tbody tr:hover { background: #f8fbff; }
 .chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; }
 .bar-chart { display: grid; gap: .62rem; }
 .bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; }
+.bar-row.is-selected { padding: .35rem; border: 1px solid #b7c9ff; border-radius: 14px; background: #f2f6ff; }
+.bar-row.is-best:not(.is-selected) { padding: .35rem; border: 1px solid #b7ebd5; border-radius: 14px; background: #effcf7; }
 .bar-label { font-weight: 800; overflow-wrap: anywhere; line-height: 1.35; }
 .bar-track { height: 12px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
 .bar-fill { height: 100%; width: var(--bar-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--accent), #44b3ff); }
@@ -108,6 +111,16 @@ tbody tr:hover { background: #f8fbff; }
 .trend-fill { width: 18px; height: var(--bar-height, 0%); min-height: 3px; border-radius: 999px 999px 4px 4px; background: linear-gradient(180deg, #44b3ff, var(--accent)); }
 .trend-fill.negative { background: linear-gradient(180deg, #ff8787, #f03e3e); }
 .trend-label { color: var(--muted); font-size: .68rem; writing-mode: vertical-rl; max-height: 46px; overflow: hidden; }
+.line-chart { min-height: 260px; border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: .85rem; }
+.line-chart svg { display: block; width: 100%; height: 220px; overflow: visible; }
+.line-grid { stroke: #e2e8f0; stroke-width: 1; }
+.line-path { fill: none; stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; }
+.line-path.selected { stroke: var(--accent); }
+.line-path.best { stroke: var(--good); stroke-dasharray: 5 5; }
+.line-legend { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: .75rem; color: #334155; font-size: .84rem; line-height: 1.45; }
+.legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .35rem; vertical-align: -.05rem; background: var(--accent); }
+.legend-dot.best { background: var(--good); }
+.scenario-note { margin-top: .75rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .75rem; line-height: 1.55; font-size: .9rem; }
 .empty-state { color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; padding: 1rem; background: #fff; line-height: 1.6; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
 @media (max-width: 980px) {

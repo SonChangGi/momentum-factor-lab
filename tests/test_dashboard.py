@@ -1,8 +1,11 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from momentum_factor_lab import cli
 from momentum_factor_lab.config import RunConfig
@@ -28,8 +31,16 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert payload["schema_version"] == 1
     assert {period["key"] for period in payload["periods"]} == {"1M", "3M", "6M", "1Y"}
     assert payload["summary"]["selected_factor"] == result.selected_factor
+    assert payload["factor_options"]
+    assert payload["factor_options"][0]["description_ko"]
     assert payload["factor_leaders"]
     assert {"date", "window", "best_factor", "best_return"}.issubset(payload["factor_leaders"][0])
+    assert payload["factor_period_matrix"]
+    assert {"date", "window", "factors", "returns"}.issubset(payload["factor_period_matrix"][0])
+    assert payload["factor_score_snapshots"]
+    assert {"date", "factor", "score_date", "rows"}.issubset(payload["factor_score_snapshots"][0])
+    assert payload["factor_backtest_series"]
+    assert {"factor", "dates", "equity", "drawdown"}.issubset(payload["factor_backtest_series"][0])
     assert payload["holdings"]
     assert {"symbol", "score", "default_weight", "window", "weight_source"}.issubset(payload["holdings"][0])
     assert payload["holdings"][0]["weight_source"] == "백테스트 일별 보유 비중"
@@ -40,6 +51,7 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert payload["factor_diagnostics"]["rank_ic_top"]
     assert payload["factor_diagnostics"]["redundancy_top"]
     assert payload["notes_ko"][0].startswith("웹사이트 입력값")
+    assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) < 5_000_000
 
 
 def test_holding_rows_use_active_backtest_weights_and_signal_date():
@@ -101,7 +113,9 @@ def test_run_results_json_includes_dashboard_payload(tmp_path):
     assert "dashboard" in payload
     assert payload["dashboard"]["summary"]["selected_factor"] == result.selected_factor
     assert payload["dashboard"]["factor_leaders"]
-    assert len(json.dumps(payload["dashboard"], ensure_ascii=False)) < 2_500_000
+    assert payload["dashboard"]["factor_score_snapshots"]
+    assert payload["dashboard"]["factor_backtest_series"]
+    assert len(json.dumps(payload["dashboard"], ensure_ascii=False).encode("utf-8")) < 5_000_000
 
 
 def test_write_dashboard_site_writes_korean_static_files(tmp_path):
@@ -119,6 +133,20 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
                 "default_max_weight": 0.1,
             },
             "periods": [{"key": "1M", "label": "최근 1개월", "trading_days": 21}],
+            "factor_options": [
+                {
+                    "factor": "mom_1m",
+                    "category": "recent",
+                    "description_ko": "최근 가격 상승 강도를 비교합니다.",
+                    "selected_by_run": True,
+                },
+                {
+                    "factor": "mom_6m",
+                    "category": "traditional",
+                    "description_ko": "중기 모멘텀을 비교합니다.",
+                    "selected_by_run": False,
+                },
+            ],
             "factor_leaders": [
                 {
                     "date": "2026-06-08",
@@ -129,6 +157,17 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
                 }
             ],
             "factor_period_rankings": [],
+            "factor_period_matrix": [
+                {
+                    "date": "2026-06-08",
+                    "window": "1M",
+                    "window_label": "최근 1개월",
+                    "factors": ["mom_1m", "mom_6m"],
+                    "returns": [0.12, 0.05],
+                    "factor_count": 2,
+                    "exported_factor_count": 2,
+                }
+            ],
             "holdings": [
                 {
                     "date": "2026-06-08",
@@ -140,6 +179,36 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
                     "score": 1.23,
                     "default_weight": 0.1,
                 }
+            ],
+            "factor_score_snapshots": [
+                {
+                    "date": "2026-06-08",
+                    "factor": "mom_1m",
+                    "score_date": "2026-06-07",
+                    "available_count": 2,
+                    "rows": [["AAPL", 1.23], ["MSFT", 0.8]],
+                },
+                {
+                    "date": "2026-06-08",
+                    "factor": "mom_6m",
+                    "score_date": "2026-06-07",
+                    "available_count": 2,
+                    "rows": [["MSFT", 2.0], ["AAPL", 0.5]],
+                },
+            ],
+            "factor_backtest_series": [
+                {
+                    "factor": "mom_1m",
+                    "dates": ["2026-06-06", "2026-06-07", "2026-06-08"],
+                    "equity": [1.0, 1.03, 1.12],
+                    "drawdown": [0.0, 0.0, 0.0],
+                },
+                {
+                    "factor": "mom_6m",
+                    "dates": ["2026-06-06", "2026-06-07", "2026-06-08"],
+                    "equity": [1.0, 0.98, 1.05],
+                    "drawdown": [0.0, -0.02, 0.0],
+                },
             ],
         },
     }
@@ -158,7 +227,12 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "08:17을 기본 실행 시각" in html
     assert "이미 실행된 경우" in html
     assert "시각화 대시보드" in html
+    assert "선택 팩터 시나리오" in html
+    assert "브라우저 시나리오 종목당 최대 비중" in html
+    assert "표시용 가정" in html
+    assert "사후 비교 분석" in html
     assert "팩터 수익률 막대 차트" in html
+    assert "선택 팩터와 기간 최고 팩터 누적 성과 비교" in html
     assert "상위 N개 모형 비중 시각화" in html
     assert "데이터 품질 · 유동성 · 매매 가능성 게이트" in html
     assert "경제적 의미 · 중복도 · Forward Rank-IC" in html
@@ -167,12 +241,19 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "산출 비중" in html
     assert "최신 출력" in html
     assert "매일 실행 입력값" in html
+    assert "팩터 점수가 높은 종목에 더 큰 비중" in html
     assert "동일가중" not in html
     assert "Top-N" not in html
+    assert 'id="factor-select"' in html
+    assert 'id="max-weight-input"' in html
+    assert 'id="max-weight-input" type="number" min="1" max="50"' in html
+    assert "readonly" not in html
     assert "Generated by" not in html
     assert "매일 실행 input" not in html
     assert "renderFactorReturnChart" in js
     assert "renderWeightChart" in js
+    assert "renderBacktestChart" in js
+    assert "computeScenarioAllocation" in js
     assert "renderDiagnostics" in js
     assert "후보 종목" in js
     assert "가격 적격 종목" in js
@@ -185,14 +266,155 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "사이트 빌드 시각" in js
     assert "renderCurrentOutputTable" in js
     assert "renderWithBusy" in js
+    assert "팩터 점수 비례 배분" in js
+    assert "종목/비중 가능" in js
     assert "recomputeWeights" not in js
     assert "weighted.slice(0, 15)" not in js
     combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
     assert combined["runs"][0]["summary"]["selected_factor"] == "mom_1m"
+    assert combined["runs"][0]["factor_score_snapshots"]
+    assert combined["runs"][0]["scenario_available_dates"] == ["2026-06-08"]
+    assert combined["runs"][0]["scenario_available_dates_by_factor"] == {
+        "mom_1m": ["2026-06-08"],
+        "mom_6m": ["2026-06-08"],
+    }
+    assert combined["runs"][0]["factor_backtest_series"]
     assert combined["runs"][0]["history_payload_type"] == "full"
     assert combined["latest_run_index"] == 0
     assert "latest" not in combined
-    assert Path(paths["data"]).stat().st_size < 20_000
+    assert Path(paths["data"]).stat().st_size < 40_000
+
+
+def test_dashboard_js_scenario_allocation_changes_with_factor_and_cap(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node is required for dashboard JavaScript behavior smoke test")
+
+    run_json = tmp_path / "run_results_test.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "summary": {"run_timestamp_utc": "2026-06-09T00:00:00Z", "selected_factor": "factor_a"},
+                    "periods": [{"key": "1M", "label": "최근 1개월", "trading_days": 21}],
+                    "factor_options": [
+                        {"factor": "factor_a", "category": "recent", "description_ko": "단기 모멘텀"},
+                        {"factor": "factor_b", "category": "trend", "description_ko": "추세 모멘텀"},
+                    ],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "factor_period_matrix": [],
+                    "holdings": [],
+                    "factor_score_snapshots": [],
+                    "factor_backtest_series": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    js_path = Path(paths["js"])
+    node_script = tmp_path / "scenario-test.mjs"
+    node_script.write_text(
+        f"""
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source = fs.readFileSync({str(js_path)!r}, 'utf8').replace(/fetch\\('data\\/dashboard\\.json'\\)[\\s\\S]*$/u, '');
+const sandbox = {{
+  console,
+  window: {{ setTimeout: (fn) => fn() }},
+  document: {{ querySelector: () => ({{ value: '10', textContent: '', replaceChildren() {{}}, appendChild() {{}}, setAttribute() {{}}, removeAttribute() {{}}, classList: {{ add() {{}}, remove() {{}} }} }}) }},
+}};
+vm.runInNewContext(source + `
+const a = computeScenarioAllocation([['AAA', 3], ['BBB', 2], ['CCC', 1]], 3, 0.10);
+const b = computeScenarioAllocation([['ZZZ', 9], ['YYY', 8]], 2, 0.40);
+const c = computeScenarioAllocation([['AAA', 5], ['BBB', 4], ['CCC', 3], ['DDD', 2], ['EEE', 1]], 5, 0.50);
+const d = computeScenarioAllocation([['HIGH', 0.01], ['ZERO', 0], ['NEG', -10]], 3, 0.90);
+if (a.weighted[0].symbol !== 'AAA') throw new Error('factor A ranking failed');
+if (b.weighted[0].symbol !== 'ZZZ') throw new Error('factor B ranking failed');
+if (Math.abs(a.weighted[0].display_weight - 0.10) > 1e-12) throw new Error('max cap was not applied');
+if (Math.abs(a.cashTotal - 0.70) > 1e-12) throw new Error('cash remainder from cap missing');
+if (Math.abs(b.weighted[0].display_weight - 0.40) > 1e-12) throw new Error('factor B cap failed');
+if (Math.abs(b.cashTotal - 0.20) > 1e-12) throw new Error('factor B cash failed');
+if (!(c.weighted[0].display_weight > 0.39 && c.weighted[0].display_weight < 0.41)) throw new Error('score-proportional weight failed');
+if (!(c.weighted[0].display_weight > c.weighted[1].display_weight && c.weighted[1].display_weight > c.weighted[2].display_weight)) throw new Error('score ordering was not reflected in weights');
+if (!(d.weighted[0].display_weight > d.weighted[1].display_weight && d.weighted[1].display_weight > d.weighted[2].display_weight)) throw new Error('mixed sign score ordering was not reflected in weights');
+`, sandbox);
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(["node", str(node_script)], check=False, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_dashboard_combined_payload_enforces_hard_size_cap(tmp_path):
+    site_dir = tmp_path / "site"
+    data_dir = site_dir / "data"
+    data_dir.mkdir(parents=True)
+    bulky_run = {
+        "schema_version": 1,
+        "generated_at_utc": "2026-06-07T00:00:00Z",
+        "summary": {"run_timestamp_utc": "2026-06-07T00:00:00Z", "selected_factor": "old"},
+        "periods": [{"key": "1M", "label": "최근 1개월", "trading_days": 21}],
+        "factor_options": [{"factor": f"factor_{i}", "description_ko": "x" * 500} for i in range(30)],
+        "factor_leaders": [
+            {"date": f"2026-01-{(i % 28) + 1:02d}", "window": "1M", "best_factor": "old", "best_return": i / 1000}
+            for i in range(200)
+        ],
+        "factor_period_rankings": [
+            {"date": f"2026-01-{(i % 28) + 1:02d}", "window": "1M", "factor": f"factor_{i}", "period_return": i}
+            for i in range(600)
+        ],
+        "factor_period_matrix": [
+            {
+                "date": f"2026-01-{(i % 28) + 1:02d}",
+                "window": "1M",
+                "factors": [f"factor_{j}" for j in range(80)],
+                "returns": [j / 1000 for j in range(80)],
+            }
+            for i in range(250)
+        ],
+        "holdings": [{"symbol": "AAA"}],
+    }
+    (data_dir / "dashboard.json").write_text(
+        json.dumps({"schema_version": 1, "runs": [bulky_run], "latest_run_index": 0}),
+        encoding="utf-8",
+    )
+    latest = {
+        "dashboard": {
+            "schema_version": 1,
+            "generated_at_utc": "2026-06-08T00:00:00Z",
+            "summary": {"run_timestamp_utc": "2026-06-08T00:00:00Z", "selected_factor": "latest"},
+            "periods": [],
+            "factor_options": [{"factor": "latest", "description_ko": "최신"}],
+            "factor_leaders": [],
+            "factor_period_rankings": [],
+            "factor_period_matrix": [],
+            "holdings": [],
+            "factor_score_snapshots": [
+                {
+                    "date": "2026-06-08",
+                    "factor": "latest",
+                    "score_date": "2026-06-07",
+                    "rows": [["AAA", 3], ["BBB", 2]],
+                }
+            ],
+        }
+    }
+    run_json = tmp_path / "run_results_latest.json"
+    run_json.write_text(json.dumps(latest), encoding="utf-8")
+
+    paths = write_dashboard_site([run_json], site_dir, history_limit=2)
+    combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
+
+    assert Path(paths["data"]).stat().st_size <= 5_000_000
+    assert combined["payload_limits"]["actual_json_bytes"] <= combined["payload_limits"]["max_json_bytes"]
+    assert combined["payload_limits"]["actual_json_bytes"] == Path(paths["data"]).stat().st_size
+    assert combined["runs"][-1]["summary"]["selected_factor"] == "latest"
+    assert combined["runs"][-1]["factor_score_snapshots"]
+    assert combined["runs"][0].get("factor_period_matrix") == []
 
 
 def test_dashboard_cli_generates_site_from_glob(tmp_path):

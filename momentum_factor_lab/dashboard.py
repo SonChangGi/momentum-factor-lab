@@ -22,6 +22,13 @@ DASHBOARD_PERIODS: dict[str, int] = {
     "1Y": 252,
 }
 
+DASHBOARD_MAX_JSON_BYTES = 5_000_000
+DASHBOARD_PAYLOAD_MAX_BYTES = 4_500_000
+MAX_FACTOR_RANKINGS_PER_PERIOD = 100
+MAX_SCORE_SNAPSHOT_DATES = 35
+MAX_SCORE_SNAPSHOT_SYMBOLS = 50
+MAX_BACKTEST_POINTS = 260
+
 PERIOD_LABELS: dict[str, str] = {
     "1M": "최근 1개월",
     "3M": "최근 3개월",
@@ -78,12 +85,17 @@ HTML_TEMPLATE = """<!doctype html>
       <label>최근 기간
         <select id="window-select"></select>
       </label>
+      <label>선택 팩터 시나리오
+        <select id="factor-select"></select>
+        <span class="control-hint">기간 최고 팩터와 별도로 비교할 표시용 팩터입니다.</span>
+      </label>
       <label>상위 N개 표시
         <input id="topn-input" type="number" min="1" max="50" value="20" />
       </label>
-      <label>실행 시 종목당 최대 비중
-        <input id="max-weight-input" type="number" min="1" max="100" step="1" value="10" readonly />
+      <label>브라우저 시나리오 종목당 최대 비중
+        <input id="max-weight-input" type="number" min="1" max="50" step="1" value="10" />
         <span class="unit">%</span>
+        <span class="control-hint">표시용 가정이며 자동 실행 설정을 저장하지 않습니다.</span>
       </label>
     </section>
 
@@ -94,7 +106,7 @@ HTML_TEMPLATE = """<!doctype html>
         <small id="best-factor-detail">-</small>
       </article>
       <article class="card">
-        <span>기존 선택 팩터</span>
+        <span>선택 팩터 시나리오</span>
         <strong id="selected-factor">-</strong>
         <small id="selected-factor-detail">-</small>
       </article>
@@ -109,9 +121,9 @@ HTML_TEMPLATE = """<!doctype html>
         <small id="latest-run-detail">-</small>
       </article>
       <article class="card">
-        <span>산출 비중 합계</span>
+        <span>시나리오 비중 합계</span>
         <strong id="weight-summary">-</strong>
-        <small>기존 분석 코드가 산출한 비중을 그대로 합산합니다.</small>
+        <small>브라우저에서 선택 팩터 점수와 최대 비중 가정으로 다시 계산한 표시용 목표 비중입니다.</small>
       </article>
     </section>
 
@@ -170,11 +182,12 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="panel-heading">
         <div>
           <p class="eyebrow">시각화 대시보드</p>
-          <h2>팩터별 비교 · 기간별 리더 · 상위 N개 비중</h2>
+          <h2>팩터별 비교 · 백테스트 추이 · 상위 N개 비중</h2>
         </div>
         <p>
           위 입력값을 바꾸면 아래 차트가 즉시 갱신됩니다. 표보다 먼저 팩터별 상대 강도와
-          상위 종목의 실제 산출 비중을 빠르게 파악하도록 구성했습니다.
+          선택 팩터 시나리오와 기간 최고 팩터를 분리해 빠르게 파악하도록 구성했습니다.
+          임의 팩터/날짜 선택은 사후 비교 분석이며 새로 검증된 투자전략을 뜻하지 않습니다.
         </p>
       </div>
       <div class="viz-grid">
@@ -187,6 +200,16 @@ HTML_TEMPLATE = """<!doctype html>
             <span id="factor-chart-meta" class="chart-meta">-</span>
           </div>
           <div id="factor-return-chart" class="bar-chart" aria-live="polite"></div>
+        </article>
+        <article class="viz-card wide">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">백테스트 추이</p>
+              <h3>선택 팩터와 기간 최고 팩터 누적 성과 비교</h3>
+            </div>
+            <span id="backtest-chart-meta" class="chart-meta">-</span>
+          </div>
+          <div id="backtest-chart" class="line-chart" aria-live="polite"></div>
         </article>
         <article class="viz-card">
           <div class="viz-card-heading">
@@ -226,8 +249,9 @@ HTML_TEMPLATE = """<!doctype html>
           <h2>기존 결과물 기준 최신 추천/연구 신호</h2>
         </div>
         <p>
-          현재 실행에서 선택된 팩터의 최신 추천 또는 연구 신호 행입니다.
+          현재 실행에서 생성된 최신 추천 또는 연구 신호 행입니다.
           최종 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
+          이 표는 브라우저 시나리오 비중과 별개로 기존 분석 코드가 생성한 최신 출력입니다.
         </p>
       </div>
       <div class="table-wrap">
@@ -264,8 +288,8 @@ HTML_TEMPLATE = """<!doctype html>
               <th>기간</th>
               <th>최고 팩터</th>
               <th>기간 수익률</th>
-              <th>기존 선택 팩터 수익률</th>
-              <th>기존 선택 팩터 순위</th>
+              <th>선택 팩터 수익률</th>
+              <th>선택 팩터 순위</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -276,10 +300,10 @@ HTML_TEMPLATE = """<!doctype html>
     <section class="panel">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">선택 기간 최고 팩터 기준 백테스트 보유</p>
+          <p class="eyebrow">선택 팩터 시나리오</p>
           <h2>일별 상위 종목 · 모멘텀 신호 · 산출 비중</h2>
         </div>
-        <p id="holdings-availability">비중은 브라우저에서 다시 계산하지 않고, 백테스트/출력 코드가 저장한 일별 보유 비중을 그대로 표시합니다.</p>
+        <p id="holdings-availability">브라우저에서 선택 팩터 점수 스냅샷과 종목당 최대 비중 가정으로 표시용 목표 비중을 계산합니다.</p>
       </div>
       <div class="table-wrap">
         <table id="holdings-table">
@@ -288,7 +312,7 @@ HTML_TEMPLATE = """<!doctype html>
               <th>순위</th>
               <th>종목</th>
               <th>모멘텀 신호</th>
-              <th>산출 비중</th>
+              <th>시나리오 목표 비중</th>
               <th>팩터</th>
               <th>신호일</th>
             </tr>
@@ -315,8 +339,10 @@ HTML_TEMPLATE = """<!doctype html>
         <ul>
           <li><strong>최고 팩터</strong>는 선택 기간의 누적 전략 수익률이 가장 높은 팩터입니다.</li>
           <li><strong>모멘텀 신호</strong>는 해당 팩터가 계산한 종목별 점수이며, 높을수록 상위 후보입니다.</li>
-          <li><strong>산출 비중</strong>은 기존 분석 코드가 만든 일별 보유 비중이며, 투자 조언이 아닙니다.</li>
-          <li>일별 보유 비중은 가격 변동 후 비중이므로 실행 시 목표 최대 비중과 조금 다를 수 있습니다.</li>
+          <li><strong>기간 최고 팩터</strong>는 선택 기간의 과거 누적 수익률이 가장 높았던 팩터입니다.</li>
+          <li><strong>선택 팩터 시나리오</strong>는 사용자가 고른 팩터의 점수 스냅샷으로 브라우저가 다시 계산한 표시용 비교입니다.</li>
+          <li><strong>시나리오 목표 비중</strong>은 선택 팩터 점수가 높은 종목에 더 큰 비중을 주되 종목당 최대 비중을 넘지 않도록 계산하며, 상한 때문에 남는 금액은 현금/미사용으로 표시합니다.</li>
+          <li>브라우저 입력값은 자동 실행 설정이나 GitHub Actions 입력값을 바꾸지 않습니다.</li>
           <li>데이터 품질, 유동성, 생존편향, 무료 데이터 한계는 기존 리포트와 동일하게 적용됩니다.</li>
         </ul>
       </div>
@@ -380,11 +406,12 @@ main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
 .noscript-warning { margin: 1rem clamp(1rem, 4vw, 4rem); padding: 1rem 1.25rem; border-radius: 18px; background: #fff4e6; color: #8a4b00; border: 1px solid #ffd8a8; font-weight: 800; line-height: 1.6; }
-.controls { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
+.controls { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 1rem; padding: 1rem; border-radius: 22px; margin-bottom: 1.25rem; }
 label { font-size: .86rem; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: .45rem; position: relative; }
 select, input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: .72rem .8rem; color: var(--ink); background: #fff; font: inherit; }
 input[readonly] { background: #f8fafc; color: var(--muted); }
-.unit { position: absolute; right: .8rem; bottom: .75rem; color: var(--muted); }
+.unit { position: absolute; right: .8rem; top: 2.25rem; color: var(--muted); }
+.control-hint { color: var(--muted); font-size: .72rem; line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin-bottom: 1.25rem; }
 .card { border-radius: 22px; padding: 1.1rem; }
 .card span { color: var(--muted); font-weight: 700; font-size: .85rem; }
@@ -434,6 +461,8 @@ tbody tr:hover { background: #f8fbff; }
 .chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; }
 .bar-chart { display: grid; gap: .62rem; }
 .bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; }
+.bar-row.is-selected { padding: .35rem; border: 1px solid #b7c9ff; border-radius: 14px; background: #f2f6ff; }
+.bar-row.is-best:not(.is-selected) { padding: .35rem; border: 1px solid #b7ebd5; border-radius: 14px; background: #effcf7; }
 .bar-label { font-weight: 800; overflow-wrap: anywhere; line-height: 1.35; }
 .bar-track { height: 12px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
 .bar-fill { height: 100%; width: var(--bar-width, 0%); border-radius: inherit; background: linear-gradient(90deg, var(--accent), #44b3ff); }
@@ -451,6 +480,16 @@ tbody tr:hover { background: #f8fbff; }
 .trend-fill { width: 18px; height: var(--bar-height, 0%); min-height: 3px; border-radius: 999px 999px 4px 4px; background: linear-gradient(180deg, #44b3ff, var(--accent)); }
 .trend-fill.negative { background: linear-gradient(180deg, #ff8787, #f03e3e); }
 .trend-label { color: var(--muted); font-size: .68rem; writing-mode: vertical-rl; max-height: 46px; overflow: hidden; }
+.line-chart { min-height: 260px; border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: .85rem; }
+.line-chart svg { display: block; width: 100%; height: 220px; overflow: visible; }
+.line-grid { stroke: #e2e8f0; stroke-width: 1; }
+.line-path { fill: none; stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; }
+.line-path.selected { stroke: var(--accent); }
+.line-path.best { stroke: var(--good); stroke-dasharray: 5 5; }
+.line-legend { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: .75rem; color: #334155; font-size: .84rem; line-height: 1.45; }
+.legend-dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; margin-right: .35rem; vertical-align: -.05rem; background: var(--accent); }
+.legend-dot.best { background: var(--good); }
+.scenario-note { margin-top: .75rem; color: #334155; background: #f8fafc; border: 1px solid var(--line); border-radius: 16px; padding: .75rem; line-height: 1.55; font-size: .9rem; }
 .empty-state { color: var(--muted); border: 1px dashed var(--line); border-radius: 18px; padding: 1rem; background: #fff; line-height: 1.6; }
 footer { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); padding: 1.5rem clamp(1rem, 4vw, 4rem); }
 @media (max-width: 980px) {
@@ -583,6 +622,7 @@ function humanFactorCategory(value) {
     cross_sectional: '횡단면 상대강도',
     robust: '이상치 완화',
     range: '가격 범위 위치',
+    unknown: '분류 정보 없음',
   };
   return labels[text] || `기타(${text})`;
 }
@@ -616,6 +656,181 @@ function selectedDate() {
 
 function selectedWindow() {
   return document.querySelector('#window-select').value;
+}
+
+function selectedFactor() {
+  const selector = document.querySelector('#factor-select');
+  return selector?.value || currentRun().summary?.selected_factor || '';
+}
+
+function clampNumber(value, minValue, maxValue, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minValue, Math.min(maxValue, parsed));
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampedTopN() {
+  return Math.round(clampNumber(document.querySelector('#topn-input').value, 1, 50, 20));
+}
+
+function clampedMaxWeight() {
+  const percent = clampNumber(document.querySelector('#max-weight-input').value, 1, 50, 10);
+  const input = document.querySelector('#max-weight-input');
+  if (String(input.value) !== String(percent)) input.value = String(percent);
+  return percent / 100;
+}
+
+function factorOptions(run = currentRun()) {
+  const options = run.factor_options || [];
+  if (options.length) return options;
+  const factors = [...new Set([
+    run.summary?.selected_factor,
+    ...(run.factor_leaders || []).map((row) => row.best_factor),
+    ...(run.factor_period_rankings || []).map((row) => row.factor),
+  ].filter(Boolean))].sort();
+  return factors.map((factor) => ({ factor, category: 'unknown', description_ko: '팩터 설명 정보가 없습니다.' }));
+}
+
+function factorDescription(factor, run = currentRun()) {
+  const option = factorOptions(run).find((item) => item.factor === factor);
+  if (!option) return '팩터 설명 정보가 없습니다.';
+  const category = humanFactorCategory(option.category);
+  const description = option.description_ko || option.description || '설명 정보가 없습니다.';
+  return `${category} · ${description}`;
+}
+
+function periodMatrixEntry(run, date, windowKey) {
+  return (run.factor_period_matrix || []).find((row) => row.date === date && row.window === windowKey) || null;
+}
+
+function periodFactorStats(run, date, windowKey, factor) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors)) {
+    const index = matrix.factors.indexOf(factor);
+    if (index >= 0) {
+      return {
+        factor,
+        rank: index + 1,
+        period_return: optionalNumber(matrix.returns?.[index]),
+        factor_count: matrix.factors.length,
+        window_label: matrix.window_label || windowKey,
+      };
+    }
+    return {
+      factor,
+      rank: null,
+      period_return: null,
+      factor_count: matrix.factors.length,
+      window_label: matrix.window_label || windowKey,
+    };
+  }
+  const row = (run.factor_period_rankings || []).find((item) => (
+    item.date === date && item.window === windowKey && item.factor === factor
+  ));
+  if (!row) return null;
+  return { ...row, rank: row.rank, factor_count: row.factor_count || null };
+}
+
+function periodBestStats(run, date, windowKey) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors) && matrix.factors.length) {
+    return {
+      factor: matrix.factors[0],
+      rank: 1,
+      period_return: optionalNumber(matrix.returns?.[0]),
+      factor_count: matrix.factors.length,
+      window_label: matrix.window_label || windowKey,
+    };
+  }
+  const leader = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
+  if (!leader) return null;
+  return {
+    factor: leader.best_factor,
+    rank: 1,
+    period_return: leader.best_return,
+    factor_count: leader.factor_count,
+    window_label: leader.window_label || windowKey,
+  };
+}
+
+function factorScoreSnapshot(run, date, factor) {
+  return (run.factor_score_snapshots || []).find((snapshot) => snapshot.date === date && snapshot.factor === factor) || null;
+}
+
+function normalizeSnapshotRows(snapshot) {
+  const rows = snapshot?.rows || [];
+  return rows
+    .map((row) => {
+      if (Array.isArray(row)) return { symbol: row[0], score: Number(row[1]) };
+      return { symbol: row.symbol, score: Number(row.score) };
+    })
+    .filter((row) => row.symbol && Number.isFinite(row.score))
+    .sort((a, b) => Number(b.score) - Number(a.score) || String(a.symbol).localeCompare(String(b.symbol)));
+}
+
+function computeScenarioAllocation(rows, topN, maxWeight) {
+  const safeRows = normalizeSnapshotRows({ rows });
+  const count = Math.max(1, Math.min(50, Math.round(Number(topN) || 20), safeRows.length || 1));
+  const cap = Math.max(0.01, Math.min(0.5, Number(maxWeight) || 0.1));
+  const selected = safeRows.slice(0, count);
+  const scores = selected.map((row) => Number(row.score) || 0);
+  const minScore = scores.length ? Math.min(...scores) : 0;
+  const maxScore = scores.length ? Math.max(...scores) : 0;
+  const scoreRange = maxScore - minScore;
+  const rawScores = scoreRange > 0
+    ? scores.map((score) => score - minScore + Math.max(scoreRange * 1e-6, 1e-9))
+    : selected.map((_, index) => selected.length - index);
+  const weights = Array(selected.length).fill(0);
+  const remainingIndexes = new Set(selected.map((_, index) => index));
+  let remainingBudget = 1;
+  while (remainingIndexes.size && remainingBudget > 1e-12) {
+    const activeRawTotal = [...remainingIndexes].reduce((sum, index) => sum + rawScores[index], 0);
+    if (activeRawTotal <= 0) break;
+    const cappedThisRound = [];
+    for (const index of remainingIndexes) {
+      const candidateWeight = remainingBudget * (rawScores[index] / activeRawTotal);
+      if (candidateWeight > cap) {
+        weights[index] = cap;
+        cappedThisRound.push(index);
+      }
+    }
+    if (!cappedThisRound.length) {
+      for (const index of remainingIndexes) {
+        weights[index] = remainingBudget * (rawScores[index] / activeRawTotal);
+      }
+      remainingBudget = 0;
+      break;
+    }
+    cappedThisRound.forEach((index) => {
+      remainingIndexes.delete(index);
+      remainingBudget -= weights[index];
+    });
+  }
+  const weighted = selected.map((row, index) => ({
+    ...row,
+    display_rank: index + 1,
+    display_weight: Math.max(0, weights[index] || 0),
+    scenario_weight: Math.max(0, weights[index] || 0),
+  }));
+  const investedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
+  return {
+    weighted,
+    investedTotal,
+    displayedTotal: investedTotal,
+    portfolioTotal: investedTotal,
+    cashTotal: Math.max(0, 1 - investedTotal),
+    unusedCandidateCount: Math.max(0, safeRows.length - weighted.length),
+    weightingMethod: 'score_proportional_capped',
+    topN: count,
+    maxWeight: cap,
+    availableCount: safeRows.length,
+  };
 }
 
 function setText(selector, value) {
@@ -697,39 +912,30 @@ function currentWeightedHoldings() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
-  const maxWeight = Math.max(0.01, Math.min(1, Number(document.querySelector('#max-weight-input').value || 10) / 100));
-  const allRows = (run.holdings || [])
-    .filter((row) => row.date === date && row.window === windowKey)
-    .map((row) => ({ ...row, actual_weight: Number(row.default_weight || 0) }));
-  const weighted = allRows
-    .slice(0, topN)
-    .map((row, index) => ({
-      ...row,
-      display_weight: row.actual_weight,
-      display_rank: index + 1,
-    }));
-  const displayedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
-  const portfolioTotal = allRows.reduce((sum, row) => sum + row.actual_weight, 0);
-  const unshownTotal = Math.max(0, portfolioTotal - displayedTotal);
-  const cashTotal = Math.max(0, 1 - portfolioTotal);
+  const factor = selectedFactor();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const snapshot = factorScoreSnapshot(run, date, factor);
+  const availableDates = run.scenario_available_dates || [];
+  const allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
+  const stats = periodFactorStats(run, date, windowKey, factor);
   return {
-    weighted,
-    displayedTotal,
-    portfolioTotal,
-    unshownTotal,
-    cashTotal,
-    topN,
-    maxWeight,
-    availableCount: allRows.length,
-    selectedFactor: allRows[0]?.factor || '-',
-    windowLabel: allRows[0]?.window_label || windowKey || '-',
+    ...allocation,
+    snapshot,
+    selectedFactor: factor || '-',
+    windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
+    scoreDate: snapshot?.score_date || null,
+    missingReason: snapshot
+      ? null
+      : availableDates.length && !availableDates.includes(date)
+      ? '선택한 기준일은 용량과 로딩 속도 제한 때문에 종목/비중 스냅샷 보관 범위 밖입니다.'
+      : '선택한 기준일에 이 팩터의 점수 스냅샷이 없습니다.',
   };
 }
 
-function appendBarRow(target, label, valueLabel, value, maxAbs) {
+function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
   const row = document.createElement('div');
-  row.className = 'bar-row';
+  row.className = `bar-row ${options.className || ''}`.trim();
 
   const labelNode = document.createElement('div');
   labelNode.className = 'bar-label';
@@ -750,6 +956,28 @@ function appendBarRow(target, label, valueLabel, value, maxAbs) {
   target.appendChild(row);
 }
 
+function factorAvailableDates(run, factor) {
+  const byFactor = run.scenario_available_dates_by_factor || {};
+  const dates = byFactor[factor] || run.scenario_available_dates || [];
+  return new Set(dates);
+}
+
+function fillDateOptions(run, preferredDate = null) {
+  const dates = uniqueDates(run);
+  const availableDates = factorAvailableDates(run, selectedFactor());
+  const dateSelect = document.querySelector('#date-select');
+  dateSelect.replaceChildren();
+  dates.forEach((date) => {
+    const option = document.createElement('option');
+    option.value = date;
+    option.textContent = availableDates.has(date) ? `${date} · 종목/비중 가능` : `${date} · 팩터 수익률만`;
+    dateSelect.appendChild(option);
+  });
+  if (dates.length) {
+    dateSelect.value = preferredDate && dates.includes(preferredDate) ? preferredDate : dates[0];
+  }
+}
+
 function fillControls() {
   const runSelect = document.querySelector('#run-select');
   runSelect.replaceChildren();
@@ -765,6 +993,7 @@ function fillControls() {
   runSelect.disabled = runs.length <= 1;
 
   const run = currentRun();
+  const previousFactor = document.querySelector('#factor-select')?.value || run.summary?.selected_factor || '';
   const windows = run.periods || [];
   const windowSelect = document.querySelector('#window-select');
   windowSelect.replaceChildren();
@@ -776,17 +1005,24 @@ function fillControls() {
   });
   windowSelect.value = windows[1]?.key || windows[0]?.key || '1M';
 
-  const dates = uniqueDates(run);
-  const dateSelect = document.querySelector('#date-select');
-  dateSelect.replaceChildren();
-  dates.forEach((date) => {
+  const factorSelect = document.querySelector('#factor-select');
+  const previousDate = document.querySelector('#date-select')?.value || null;
+  factorSelect.replaceChildren();
+  const options = factorOptions(run);
+  options.forEach((item) => {
     const option = document.createElement('option');
-    option.value = date;
-    option.textContent = date;
-    dateSelect.appendChild(option);
+    option.value = item.factor;
+    option.textContent = item.factor === run.summary?.selected_factor
+      ? `${item.factor} · 현재 실행 선택`
+      : `${item.factor} · ${humanFactorCategory(item.category)}`;
+    factorSelect.appendChild(option);
   });
-  if (dates.length) dateSelect.value = dates[0];
+  const factors = options.map((item) => item.factor);
+  factorSelect.value = factors.includes(previousFactor)
+    ? previousFactor
+    : (factors.includes(run.summary?.selected_factor) ? run.summary.selected_factor : factors[0] || '');
 
+  fillDateOptions(run, previousDate);
   document.querySelector('#topn-input').value = run.summary?.default_top_n || 20;
   document.querySelector('#max-weight-input').value = Math.round((run.summary?.default_max_weight || 0.1) * 100);
 }
@@ -795,14 +1031,21 @@ function renderSummary() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const row = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
+  const best = periodBestStats(run, date, windowKey);
+  const factor = selectedFactor();
+  const selectedStats = periodFactorStats(run, date, windowKey, factor);
   const summary = run.summary || {};
   const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
   const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
-  setText('#best-factor', row?.best_factor || '-');
-  setText('#best-factor-detail', row ? `${row.window_label} 수익률 ${formatPercent(row.best_return)}` : '-');
-  setText('#selected-factor', summary.selected_factor || '-');
-  setText('#selected-factor-detail', row ? `선택 팩터 순위 ${row.selected_factor_rank || '-'} · ${formatPercent(row.selected_factor_return)}` : '-');
+  setText('#best-factor', best?.factor || '-');
+  setText('#best-factor-detail', best ? `${best.window_label} 수익률 ${formatPercent(best.period_return)}` : '-');
+  setText('#selected-factor', factor || '-');
+  setText(
+    '#selected-factor-detail',
+    selectedStats && selectedStats.rank
+      ? `${selectedStats.window_label} 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)} · ${factorDescription(factor, run)}`
+      : `자료 없음 · ${factorDescription(factor, run)}`,
+  );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
   setText('#latest-run-at', latestRunAt);
@@ -932,45 +1175,74 @@ function renderDiagnostics() {
 function renderFactorTable() {
   const run = currentRun();
   const windowKey = selectedWindow();
+  const factor = selectedFactor();
   const rows = (run.factor_leaders || []).filter((row) => row.window === windowKey).slice(-30).reverse();
   const tbody = document.querySelector('#factor-table tbody');
   tbody.replaceChildren();
   rows.forEach((row) => {
+    const selectedStats = periodFactorStats(run, row.date, row.window, factor);
     const tr = document.createElement('tr');
     appendCell(tr, row.date);
     appendCell(tr, row.window_label, { badge: true });
     appendCell(tr, row.best_factor);
     appendCell(tr, formatPercent(row.best_return), { className: classForNumber(row.best_return) });
-    appendCell(tr, formatPercent(row.selected_factor_return), { className: classForNumber(row.selected_factor_return) });
-    appendCell(tr, row.selected_factor_rank || '-');
+    appendCell(tr, selectedStats?.period_return == null ? '자료 없음' : formatPercent(selectedStats.period_return), { className: classForNumber(selectedStats?.period_return) });
+    appendCell(tr, selectedStats?.rank ? `${selectedStats.rank}/${selectedStats.factor_count || '-'}` : '자료 없음');
     tbody.appendChild(tr);
   });
 }
 
 function renderHoldingsTable() {
   const run = currentRun();
-  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, availableCount, selectedFactor, windowLabel } = currentWeightedHoldings();
-  const weightLabel = isPracticalRun(run) ? '투자 비중' : '모형/연구 비중';
+  const {
+    weighted,
+    displayedTotal,
+    portfolioTotal,
+    cashTotal,
+    topN,
+    availableCount,
+    selectedFactor: factor,
+    windowLabel,
+    scoreDate,
+    unusedCandidateCount,
+    maxWeight,
+    missingReason,
+  } = currentWeightedHoldings();
+  const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
   setText(
     '#weight-summary',
-    `전체 ${formatPercent(portfolioTotal)} · 표시 ${formatPercent(displayedTotal)} · 미표시 ${formatPercent(unshownTotal)} · 현금 ${formatPercent(cashTotal)}`,
+    `시나리오 배분 ${formatPercent(portfolioTotal)} · 화면 표시 ${formatPercent(displayedTotal)} · 현금/미사용 ${formatPercent(cashTotal)}`,
   );
+  const capNote = topN * maxWeight < 1
+    ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
+    : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
   setText(
     '#holdings-availability',
-    run.history_payload_type === 'summary'
+    missingReason
+      ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
+      : run.history_payload_type === 'summary'
       ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
-      : `${windowLabel} 최고 팩터 ${selectedFactor} 기준 백테스트 보유입니다. 전체 ${formatInteger(availableCount)}개 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 기존 분석 코드가 저장한 일별 보유 비중을 그대로 사용합니다.`,
+      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. 전체 ${formatInteger(availableCount)}개 후보 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
+  if (!weighted.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.textContent = '선택한 기준일과 팩터에 표시할 점수 스냅샷이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
   weighted.forEach((row) => {
     const tr = document.createElement('tr');
     appendCell(tr, row.display_rank);
     appendCell(tr, row.symbol, { strong: true });
     appendCell(tr, formatNumber(row.score));
     appendCell(tr, formatPercent(row.display_weight));
-    appendCell(tr, row.factor);
-    appendCell(tr, row.score_date || row.date);
+    appendCell(tr, factor);
+    appendCell(tr, scoreDate || selectedDate());
     tbody.appendChild(tr);
   });
 }
@@ -1006,24 +1278,52 @@ function renderFactorReturnChart() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const rows = (run.factor_period_rankings || [])
-    .filter((row) => row.date === date && row.window === windowKey)
-    .slice(0, 10);
+  const factor = selectedFactor();
+  const best = periodBestStats(run, date, windowKey);
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  let rows = [];
+  if (matrix && Array.isArray(matrix.factors)) {
+    rows = matrix.factors.map((name, index) => ({
+      factor: name,
+      rank: index + 1,
+      period_return: optionalNumber(matrix.returns?.[index]),
+      window_label: matrix.window_label,
+    }));
+  } else {
+    rows = (run.factor_period_rankings || []).filter((row) => row.date === date && row.window === windowKey);
+  }
+  const selectedRow = rows.find((row) => row.factor === factor);
+  rows = rows.slice(0, 10);
+  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
   const target = document.querySelector('#factor-return-chart');
   target.replaceChildren();
   const windowLabel = rows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || '-';
-  setText('#factor-chart-meta', `${date || '-'} · ${windowLabel}`);
+  setText('#factor-chart-meta', `${date || '-'} · ${windowLabel} · 선택 ${factor || '-'}`);
   if (!rows.length) {
     appendEmpty('#factor-return-chart', '선택한 기준일과 기간에 표시할 팩터 수익률 데이터가 없습니다.');
     return;
   }
   const maxAbs = Math.max(...rows.map((row) => Math.abs(Number(row.period_return) || 0)), 0.01);
-  rows.forEach((row) => appendBarRow(target, `${row.rank}. ${row.factor}`, formatPercent(row.period_return), row.period_return, maxAbs));
+  rows.forEach((row) => appendBarRow(
+    target,
+    `${row.rank}. ${row.factor}`,
+    formatPercent(row.period_return),
+    row.period_return,
+    maxAbs,
+    { className: `${row.factor === factor ? 'is-selected' : ''} ${row.factor === best?.factor ? 'is-best' : ''}`.trim() },
+  ));
+  if (!selectedRow) {
+    const note = document.createElement('div');
+    note.className = 'scenario-note';
+    note.textContent = '선택 팩터가 이 기준일/기간의 내보낸 순위 데이터에 없습니다. 팩터 비교는 가능한 데이터 범위 안에서만 표시됩니다.';
+    target.appendChild(note);
+  }
 }
 
 function renderWindowComparisonChart() {
   const run = currentRun();
   const date = selectedDate();
+  const selectedFactorName = selectedFactor();
   const periodOrder = (run.periods || []).map((period) => period.key);
   const rows = (run.factor_leaders || [])
     .filter((row) => row.date === date)
@@ -1039,11 +1339,14 @@ function renderWindowComparisonChart() {
     chip.className = 'window-chip';
     const label = document.createElement('span');
     label.textContent = row.window_label || row.window;
-    const factor = document.createElement('strong');
-    factor.textContent = row.best_factor || '-';
+    const factorNode = document.createElement('strong');
+    factorNode.textContent = row.best_factor || '-';
     const detail = document.createElement('small');
-    detail.textContent = `최고 수익률 ${formatPercent(row.best_return)} · 기존 선택 팩터 순위 ${row.selected_factor_rank || '-'}`;
-    chip.append(label, factor, detail);
+    const selectedStats = periodFactorStats(run, row.date, row.window, selectedFactorName);
+    detail.textContent = selectedStats?.rank
+      ? `최고 수익률 ${formatPercent(row.best_return)} · 선택 팩터 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
+      : `최고 수익률 ${formatPercent(row.best_return)} · 선택 팩터 자료 없음`;
+    chip.append(label, factorNode, detail);
     target.appendChild(chip);
   });
 }
@@ -1082,49 +1385,173 @@ function renderLeaderTrendChart() {
 
 function renderWeightChart() {
   const run = currentRun();
-  const { weighted, unshownTotal, cashTotal, topN, maxWeight } = currentWeightedHoldings();
+  const { weighted, cashTotal, topN, maxWeight, unusedCandidateCount } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 비중' : '모형/연구 비중'} · 상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 시나리오' : '연구 시나리오'} · 상위 ${topN}개 · 브라우저 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
-    appendEmpty('#weight-chart', '선택한 기준일과 기간에 표시할 상위 종목 데이터가 없습니다.');
+    appendEmpty('#weight-chart', '선택한 기준일과 팩터에 표시할 상위 종목 점수 스냅샷이 없습니다.');
     return;
   }
   const maxWeightValue = Math.max(
     ...weighted.map((row) => Number(row.display_weight) || 0),
-    Number(unshownTotal) || 0,
     Number(cashTotal) || 0,
     0.01,
   );
   weighted.forEach((row) => appendBarRow(target, row.symbol, formatPercent(row.display_weight), row.display_weight, maxWeightValue));
-  if (unshownTotal > 0.000001) {
-    appendBarRow(target, '미표시 보유분', formatPercent(unshownTotal), unshownTotal, maxWeightValue);
-  }
   if (cashTotal > 0.000001) {
-    appendBarRow(target, '현금/미투자', formatPercent(cashTotal), cashTotal, maxWeightValue);
+    appendBarRow(target, '현금/미사용', formatPercent(cashTotal), cashTotal, maxWeightValue);
   }
+  if (unusedCandidateCount > 0) {
+    const note = document.createElement('div');
+    note.className = 'scenario-note';
+    note.textContent = `상위 N개 제한 때문에 ${formatInteger(unusedCandidateCount)}개 후보는 이번 브라우저 시나리오 목표 비중에서 제외했습니다.`;
+    target.appendChild(note);
+  }
+}
+
+function factorBacktestSeries(run, factor) {
+  return (run.factor_backtest_series || []).find((series) => series.factor === factor) || null;
+}
+
+function seriesPointsThroughDate(series, date, limit = 120) {
+  if (!series || !Array.isArray(series.dates)) return [];
+  const points = series.dates.map((pointDate, index) => ({
+    date: pointDate,
+    equity: Number(series.equity?.[index]),
+    drawdown: Number(series.drawdown?.[index]),
+  })).filter((point) => point.date && Number.isFinite(point.equity));
+  const through = date ? points.filter((point) => String(point.date) <= String(date)) : points;
+  return through.slice(-limit);
+}
+
+function normalizedLine(points) {
+  if (!points.length) return [];
+  const base = points[0].equity || 1;
+  return points.map((point) => ({ ...point, normalized: base ? point.equity / base : point.equity }));
+}
+
+function renderBacktestChart() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const best = periodBestStats(run, date, windowKey);
+  const selectedSeries = normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, factor), date));
+  const bestSeries = best?.factor && best.factor !== factor
+    ? normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, best.factor), date))
+    : [];
+  const target = document.querySelector('#backtest-chart');
+  target.replaceChildren();
+  setText('#backtest-chart-meta', `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}`);
+  if (!selectedSeries.length) {
+    appendEmpty('#backtest-chart', '선택 팩터의 최근 백테스트 추이 데이터가 없습니다. 기간 최고 팩터 데이터를 대신 표시하지 않습니다.');
+    return;
+  }
+  const allValues = [...selectedSeries, ...bestSeries].map((point) => point.normalized).filter((value) => Number.isFinite(value));
+  const minValue = Math.min(...allValues, 0.95);
+  const maxValue = Math.max(...allValues, 1.05);
+  const width = 720;
+  const height = 220;
+  const pad = 18;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', '선택 팩터와 기간 최고 팩터의 최근 백테스트 누적 성과 비교');
+  [0.25, 0.5, 0.75].forEach((ratio) => {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    const y = pad + (height - pad * 2) * ratio;
+    line.setAttribute('x1', String(pad));
+    line.setAttribute('x2', String(width - pad));
+    line.setAttribute('y1', String(y));
+    line.setAttribute('y2', String(y));
+    line.setAttribute('class', 'line-grid');
+    svg.appendChild(line);
+  });
+  const toPolyline = (points) => points.map((point, index) => {
+    const x = pad + (points.length <= 1 ? 0 : index / (points.length - 1) * (width - pad * 2));
+    const y = height - pad - ((point.normalized - minValue) / Math.max(0.000001, maxValue - minValue)) * (height - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const appendLine = (points, className) => {
+    if (!points.length) return;
+    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    polyline.setAttribute('points', toPolyline(points));
+    polyline.setAttribute('class', `line-path ${className}`);
+    svg.appendChild(polyline);
+  };
+  appendLine(selectedSeries, 'selected');
+  appendLine(bestSeries, 'best');
+  target.appendChild(svg);
+
+  const legend = document.createElement('div');
+  legend.className = 'line-legend';
+  const selectedReturn = selectedSeries.at(-1)?.normalized - 1;
+  const bestReturn = bestSeries.length ? bestSeries.at(-1)?.normalized - 1 : null;
+  const selectedDrawdown = selectedSeries.at(-1)?.drawdown;
+  const bestDrawdown = bestSeries.length ? bestSeries.at(-1)?.drawdown : null;
+  const selectedLegend = document.createElement('span');
+  const selectedDot = document.createElement('span');
+  selectedDot.className = 'legend-dot';
+  selectedLegend.appendChild(selectedDot);
+  selectedLegend.append(`선택 팩터 ${factor}: 구간 ${formatPercent(selectedReturn)} · 낙폭 ${formatPercent(selectedDrawdown)}`);
+  legend.appendChild(selectedLegend);
+  if (bestSeries.length) {
+    const bestLegend = document.createElement('span');
+    const bestDot = document.createElement('span');
+    bestDot.className = 'legend-dot best';
+    bestLegend.appendChild(bestDot);
+    bestLegend.append(`기간 최고 ${best.factor}: 구간 ${formatPercent(bestReturn)} · 낙폭 ${formatPercent(bestDrawdown)}`);
+    legend.appendChild(bestLegend);
+  }
+  target.appendChild(legend);
 }
 
 function renderPeriodRankingTable() {
   const run = currentRun();
   const date = selectedDate();
-  const rows = (run.factor_period_rankings || []).filter((row) => row.date === date).slice(0, 40);
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  let rows = [];
+  if (matrix && Array.isArray(matrix.factors)) {
+    rows = matrix.factors.map((name, index) => ({
+      window_label: matrix.window_label || windowKey,
+      factor: name,
+      period_return: optionalNumber(matrix.returns?.[index]),
+      rank: index + 1,
+    }));
+  } else {
+    rows = (run.factor_period_rankings || []).filter((row) => row.date === date && row.window === windowKey);
+  }
+  const selectedRow = rows.find((row) => row.factor === factor);
+  rows = rows.slice(0, 40);
+  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
   const tbody = document.querySelector('#period-ranking-table tbody');
   tbody.replaceChildren();
   rows.forEach((row) => {
     const tr = document.createElement('tr');
     appendCell(tr, row.window_label);
-    appendCell(tr, row.factor);
+    appendCell(tr, row.factor, { strong: row.factor === factor });
     appendCell(tr, formatPercent(row.period_return), { className: classForNumber(row.period_return) });
     appendCell(tr, row.rank);
     tbody.appendChild(tr);
   });
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = '선택한 기준일과 기간에 팩터 랭킹 자료가 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
 }
 
 function renderAll() {
   renderSummary();
   renderDiagnostics();
   renderFactorReturnChart();
+  renderBacktestChart();
   renderWindowComparisonChart();
   renderLeaderTrendChart();
   renderWeightChart();
@@ -1156,7 +1583,11 @@ fetch('data/dashboard.json')
       fillControls();
       renderWithBusy('실행 결과를 전환하는 중입니다...');
     });
-    ['#date-select', '#window-select', '#topn-input'].forEach((selector) => {
+    document.querySelector('#factor-select').addEventListener('change', () => {
+      fillDateOptions(currentRun(), selectedDate());
+      renderWithBusy('선택 팩터를 반영하는 중입니다...');
+    });
+    ['#date-select', '#window-select', '#topn-input', '#max-weight-input'].forEach((selector) => {
       document.querySelector(selector).addEventListener('input', () => renderWithBusy('선택값을 반영하는 중입니다...'));
       document.querySelector(selector).addEventListener('change', () => renderWithBusy('선택값을 반영하는 중입니다...'));
     });
@@ -1172,7 +1603,11 @@ def build_dashboard_payload(
     *,
     max_history_days: int = 90,
     max_holdings_per_period: int = 25,
-    top_factor_count: int = 5,
+    top_factor_count: int = 10,
+    max_factor_rankings_per_period: int = MAX_FACTOR_RANKINGS_PER_PERIOD,
+    max_score_snapshot_dates: int = MAX_SCORE_SNAPSHOT_DATES,
+    max_score_snapshot_symbols: int = MAX_SCORE_SNAPSHOT_SYMBOLS,
+    max_backtest_points: int = MAX_BACKTEST_POINTS,
 ) -> dict[str, Any]:
     """Build the compact JSON object consumed by the static dashboard."""
 
@@ -1192,21 +1627,45 @@ def build_dashboard_payload(
         max_history_days=max_history_days,
         top_factor_count=top_factor_count,
     )
+    period_matrix = _factor_period_matrix_rows(
+        factor_returns,
+        max_history_days=max_history_days,
+        max_factor_rankings_per_period=max_factor_rankings_per_period,
+    )
     holding_rows = _holding_rows(
         result,
         leader_rows,
         max_holdings_per_period=max_holdings_per_period,
     )
+    score_snapshots = _factor_score_snapshots(
+        result,
+        leader_rows,
+        max_snapshot_dates=max_score_snapshot_dates,
+        max_symbols=max_score_snapshot_symbols,
+    )
+    backtest_series = _factor_backtest_series(
+        result,
+        max_points=max_backtest_points,
+    )
     latest_recommendations = result.recommendations.head(result.config.top_n).to_dict(orient="records")
-    return _json_safe(
+    payload = _json_safe(
         {
             "schema_version": 1,
             "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
             "summary": summary,
             "periods": periods,
+            "factor_options": _factor_options_payload(result),
             "factor_leaders": leader_rows,
             "factor_period_rankings": ranking_rows,
+            "factor_period_matrix": period_matrix,
             "holdings": holding_rows,
+            "factor_score_snapshots": score_snapshots,
+            "scenario_available_dates": sorted(
+                {row["date"] for row in score_snapshots if isinstance(row, dict) and row.get("date")},
+                reverse=True,
+            ),
+            "scenario_available_dates_by_factor": _scenario_available_dates_by_factor(score_snapshots),
+            "factor_backtest_series": backtest_series,
             "latest_output_rows": latest_recommendations,
             "data_quality_summary": _data_quality_summary(result),
             "tradability_gate": _tradability_gate_rows(result.metadata),
@@ -1218,6 +1677,7 @@ def build_dashboard_payload(
             ],
         }
     )
+    return _fit_dashboard_payload(payload, max_bytes=DASHBOARD_PAYLOAD_MAX_BYTES)
 
 
 def write_dashboard_site(
@@ -1260,6 +1720,7 @@ def write_dashboard_site(
             "latest_run_index": len(payloads) - 1,
         }
     )
+    combined = _fit_combined_dashboard_payload(combined, max_bytes=DASHBOARD_MAX_JSON_BYTES)
 
     escaped_title = html.escape(title, quote=True)
     index_path.write_text(HTML_TEMPLATE.format(title=escaped_title), encoding="utf-8")
@@ -1381,6 +1842,53 @@ def _factor_diagnostics_payload(result: RunResult) -> dict[str, Any]:
     }
 
 
+FACTOR_CATEGORY_DESCRIPTIONS_KO: dict[str, str] = {
+    "traditional": "장기 수익률에서 최근 과열 구간을 일부 제외해 지속성을 보려는 전통 모멘텀 계열입니다.",
+    "recent": "최근 가격 상승 강도를 직접 비교하는 단기 상대강도 계열입니다.",
+    "composite": "여러 기간의 가격 모멘텀을 합쳐 특정 기간 의존도를 줄이려는 복합 계열입니다.",
+    "risk_adjusted": "수익률을 변동성이나 하방 위험으로 나누어 위험 대비 탄력을 보려는 계열입니다.",
+    "trend": "이동평균과 추세 정렬로 상승 추세의 안정성을 보려는 계열입니다.",
+    "drawdown": "고점 대비 낙폭이나 회복 정도로 추세 훼손 여부를 보려는 계열입니다.",
+    "breakout": "최근 가격이 과거 범위를 돌파했는지 보는 추세 돌파 계열입니다.",
+    "reversal": "단기 과열이나 되돌림 위험을 함께 고려하는 반전 보정 계열입니다.",
+    "acceleration": "모멘텀의 변화 속도가 개선되는지 확인하는 가속도 계열입니다.",
+    "quality": "추세의 일관성과 잡음 정도를 함께 보는 품질 계열입니다.",
+    "cross_sectional": "동일 시점 후보군 안에서 상대 순위를 비교하는 횡단면 상대강도 계열입니다.",
+    "robust": "극단값 영향을 줄여 과도한 한두 종목 효과를 완화하는 견고화 계열입니다.",
+    "range": "최근 가격이 과거 거래 범위 안에서 어디에 위치하는지 보는 범위 위치 계열입니다.",
+}
+
+
+def _factor_options_payload(result: RunResult) -> list[dict[str, Any]]:
+    definitions = result.factor_definitions.copy()
+    if definitions.empty or "factor" not in definitions:
+        definitions = pd.DataFrame({"factor": sorted(result.factor_scores)})
+    score_components = result.score_components.copy()
+    if not score_components.empty:
+        score_components = score_components.reset_index(names="factor")
+    rows = []
+    for _, row in definitions.iterrows():
+        factor = str(row.get("factor"))
+        category = str(row.get("category", "unknown"))
+        option: dict[str, Any] = {
+            "factor": factor,
+            "category": category,
+            "description_ko": FACTOR_CATEGORY_DESCRIPTIONS_KO.get(
+                category,
+                "가격 흐름으로 상대 강도를 비교하는 모멘텀 팩터입니다.",
+            ),
+            "selected_by_run": factor == result.selected_factor,
+        }
+        if not score_components.empty and "factor" in score_components:
+            match = score_components[score_components["factor"].eq(factor)]
+            if not match.empty:
+                for column in ["composite_score", "validation_sharpe", "validation_sortino", "validation_calmar"]:
+                    if column in match:
+                        option[column] = _float_or_none(match.iloc[0].get(column))
+        rows.append(option)
+    return sorted(rows, key=lambda item: (not item["selected_by_run"], item["factor"]))
+
+
 def _factor_period_returns(result: RunResult) -> dict[str, pd.DataFrame]:
     returns_by_factor = {
         name: backtest.returns.dropna().sort_index()
@@ -1457,6 +1965,93 @@ def _factor_period_ranking_rows(
                         "period_return": float(value),
                     }
                 )
+    return rows
+
+
+def _factor_period_matrix_rows(
+    period_returns: dict[str, pd.DataFrame],
+    *,
+    max_history_days: int,
+    max_factor_rankings_per_period: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for window_key, frame in period_returns.items():
+        if frame.empty:
+            continue
+        for date, values in frame.dropna(how="all").tail(max_history_days).iterrows():
+            clean = values.dropna().sort_values(ascending=False).head(max_factor_rankings_per_period)
+            if clean.empty:
+                continue
+            rows.append(
+                {
+                    "date": _date_str(date),
+                    "window": window_key,
+                    "window_label": PERIOD_LABELS[window_key],
+                    "factors": [str(factor) for factor in clean.index],
+                    "returns": [_rounded_float(value) for value in clean.values],
+                    "factor_count": int(values.dropna().size),
+                    "exported_factor_count": int(clean.size),
+                }
+            )
+    return rows
+
+
+def _factor_score_snapshots(
+    result: RunResult,
+    leader_rows: list[dict[str, Any]],
+    *,
+    max_snapshot_dates: int,
+    max_symbols: int,
+) -> list[dict[str, Any]]:
+    if not result.factor_scores or not leader_rows:
+        return []
+    dates = sorted({row["date"] for row in leader_rows if row.get("date")})[-max_snapshot_dates:]
+    snapshots: list[dict[str, Any]] = []
+    for date_text in dates:
+        requested_date = pd.Timestamp(date_text)
+        for factor in sorted(result.factor_scores):
+            scores = result.factor_scores.get(factor)
+            if scores is None or scores.empty:
+                continue
+            score_index = pd.DatetimeIndex(scores.index)
+            score_date = _nearest_score_date(score_index, requested_date)
+            if score_date is None:
+                continue
+            ranked = scores.loc[score_date].dropna().sort_values(ascending=False)
+            if ranked.empty:
+                continue
+            top = ranked.head(max_symbols)
+            snapshots.append(
+                {
+                    "date": date_text,
+                    "factor": str(factor),
+                    "score_date": _date_str(score_date),
+                    "available_count": int(ranked.size),
+                    "rows": [[str(symbol), _rounded_float(score)] for symbol, score in top.items()],
+                }
+            )
+    return snapshots
+
+
+def _factor_backtest_series(result: RunResult, *, max_points: int) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for factor in sorted(result.backtests):
+        backtest = result.backtests[factor]
+        equity = backtest.equity.dropna().sort_index()
+        if equity.empty:
+            continue
+        drawdown = equity.divide(equity.cummax()).subtract(1.0)
+        if len(equity) > max_points:
+            equity = equity.tail(max_points)
+            drawdown = drawdown.reindex(equity.index)
+        rows.append(
+            {
+                "factor": str(factor),
+                "dates": [_date_str(date) for date in equity.index],
+                "equity": [_rounded_float(value) for value in equity.values],
+                "drawdown": [_rounded_float(drawdown.loc[date]) for date in equity.index],
+            }
+        )
     return rows
 
 
@@ -1541,6 +2136,27 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
     if isinstance(payload.get("dashboard"), dict):
         dashboard = payload["dashboard"]
         dashboard.setdefault("source_json", str(path))
+        dashboard.setdefault(
+            "scenario_available_dates",
+            sorted(
+                {
+                    row.get("date")
+                    for row in dashboard.get("factor_score_snapshots", [])
+                    if isinstance(row, dict) and row.get("date")
+                },
+                reverse=True,
+            ),
+        )
+        dashboard.setdefault(
+            "scenario_available_dates_by_factor",
+            _scenario_available_dates_by_factor(
+                [
+                    row
+                    for row in dashboard.get("factor_score_snapshots", [])
+                    if isinstance(row, dict)
+                ]
+            ),
+        )
         return dashboard
     return _fallback_dashboard_payload(payload, path)
 
@@ -1599,9 +2215,42 @@ def _fallback_dashboard_payload(payload: dict[str, Any], path: Path) -> dict[str
             "source_json": str(path),
             "summary": summary,
             "periods": [{"key": "latest", "label": "최신", "trading_days": None}],
+            "factor_options": [
+                {
+                    "factor": selected_factor,
+                    "category": "unknown",
+                    "description_ko": "legacy JSON에서 읽은 선택 팩터입니다.",
+                    "selected_by_run": True,
+                }
+            ] if selected_factor else [],
             "factor_leaders": factor_leaders,
             "factor_period_rankings": [],
+            "factor_period_matrix": [
+                {
+                    "date": data_as_of,
+                    "window": "latest",
+                    "window_label": "최신",
+                    "factors": [selected_factor] if selected_factor else [],
+                    "returns": [None] if selected_factor else [],
+                    "factor_count": 1 if selected_factor else 0,
+                    "exported_factor_count": 1 if selected_factor else 0,
+                }
+            ] if selected_factor else [],
             "holdings": holdings,
+            "factor_score_snapshots": [
+                {
+                    "date": data_as_of,
+                    "factor": selected_factor,
+                    "score_date": data_as_of,
+                    "available_count": len(holdings),
+                    "rows": [[row["symbol"], _rounded_float(row["score"])] for row in holdings if row.get("symbol")],
+                }
+            ] if selected_factor and holdings else [],
+            "scenario_available_dates": [data_as_of] if selected_factor and holdings else [],
+            "scenario_available_dates_by_factor": {selected_factor: [data_as_of]}
+            if selected_factor and holdings
+            else {},
+            "factor_backtest_series": [],
             "latest_output_rows": rows[:50],
             "data_quality_summary": {
                 "candidate_universe_size": metadata.get("candidate_universe_size"),
@@ -1680,9 +2329,15 @@ def _compact_historical_run(payload: dict[str, Any]) -> dict[str, Any]:
             ),
             "summary": payload.get("summary", {}),
             "periods": payload.get("periods", []),
+            "factor_options": payload.get("factor_options", []),
             "factor_leaders": list(payload.get("factor_leaders", []))[-120:],
-            "factor_period_rankings": list(payload.get("factor_period_rankings", []))[-400:],
+            "factor_period_rankings": list(payload.get("factor_period_rankings", []))[-120:],
+            "factor_period_matrix": [],
             "holdings": [],
+            "factor_score_snapshots": [],
+            "scenario_available_dates": [],
+            "scenario_available_dates_by_factor": {},
+            "factor_backtest_series": [],
             "latest_output_rows": [],
             "data_quality_summary": payload.get("data_quality_summary", {}),
             "tradability_gate": payload.get("tradability_gate", []),
@@ -1693,6 +2348,140 @@ def _compact_historical_run(payload: dict[str, Any]) -> dict[str, Any]:
             ],
         }
     )
+
+
+def _scenario_available_dates_by_factor(score_snapshots: list[dict[str, Any]]) -> dict[str, list[str]]:
+    dates_by_factor: dict[str, set[str]] = {}
+    for snapshot in score_snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        factor = snapshot.get("factor")
+        date = snapshot.get("date")
+        if factor and date:
+            dates_by_factor.setdefault(str(factor), set()).add(str(date))
+    return {factor: sorted(dates, reverse=True) for factor, dates in sorted(dates_by_factor.items())}
+
+
+def _json_payload_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _fit_combined_dashboard_payload(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    payload.setdefault("payload_limits", {})["max_json_bytes"] = max_bytes
+    while _stamp_combined_payload_size(payload, max_bytes=max_bytes) > max_bytes and payload.get("runs"):
+        latest_index = int(payload.get("latest_run_index", len(payload["runs"]) - 1))
+        latest_index = max(0, min(latest_index, len(payload["runs"]) - 1))
+        if _compact_combined_history_once(payload, latest_index=latest_index):
+            continue
+        latest = payload["runs"][latest_index]
+        before = _json_payload_size(latest)
+        payload["runs"][latest_index] = _fit_dashboard_payload(latest, max_bytes=max(500_000, before - 250_000))
+        after = _json_payload_size(payload["runs"][latest_index])
+        if after >= before:
+            break
+    while _stamp_combined_payload_size(payload, max_bytes=max_bytes) > max_bytes and payload.get("runs"):
+        latest_index = int(payload.get("latest_run_index", len(payload["runs"]) - 1))
+        latest_index = max(0, min(latest_index, len(payload["runs"]) - 1))
+        if not _compact_combined_history_once(payload, latest_index=latest_index):
+            break
+    actual_size = _stamp_combined_payload_size(payload, max_bytes=max_bytes)
+    if actual_size > max_bytes:
+        raise ValueError(
+            f"dashboard JSON exceeds hard size limit: "
+            f"{actual_size} > {max_bytes} bytes"
+        )
+    return payload
+
+
+def _stamp_combined_payload_size(payload: dict[str, Any], *, max_bytes: int) -> int:
+    payload.setdefault("payload_limits", {})["max_json_bytes"] = max_bytes
+    for _ in range(6):
+        actual_size = _json_payload_size(payload)
+        if payload["payload_limits"].get("actual_json_bytes") == actual_size:
+            return actual_size
+        payload["payload_limits"]["actual_json_bytes"] = actual_size
+    return _json_payload_size(payload)
+
+
+def _compact_combined_history_once(payload: dict[str, Any], *, latest_index: int) -> bool:
+    runs = payload.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return False
+    history_indexes = [index for index in range(len(runs)) if index != latest_index and isinstance(runs[index], dict)]
+    for index in history_indexes:
+        run = runs[index]
+        before = _json_payload_size(run)
+        if run.get("factor_period_matrix"):
+            run["factor_period_matrix"] = []
+        elif len(run.get("factor_period_rankings", [])) > 60:
+            run["factor_period_rankings"] = list(run.get("factor_period_rankings", []))[-60:]
+        elif run.get("factor_period_rankings"):
+            run["factor_period_rankings"] = []
+        elif len(run.get("factor_leaders", [])) > 40:
+            run["factor_leaders"] = list(run.get("factor_leaders", []))[-40:]
+        elif len(run.get("factor_options", [])) > 8:
+            selected_factor = (run.get("summary", {}) if isinstance(run.get("summary"), dict) else {}).get(
+                "selected_factor"
+            )
+            selected_options = [
+                option for option in run.get("factor_options", []) if option.get("factor") == selected_factor
+            ][:1]
+            run["factor_options"] = [*selected_options, *list(run.get("factor_options", []))[:7]][:8]
+        else:
+            continue
+        if _json_payload_size(run) < before:
+            return True
+    if len(runs) > 1:
+        remove_index = 0 if latest_index != 0 else 1
+        runs.pop(remove_index)
+        payload["latest_run_index"] = len(runs) - 1
+        return True
+    return False
+
+
+def _fit_dashboard_payload(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    payload.setdefault("payload_limits", {})
+    payload["payload_limits"].update(
+        {
+            "max_payload_bytes": max_bytes,
+            "max_score_snapshot_symbols": MAX_SCORE_SNAPSHOT_SYMBOLS,
+            "max_backtest_points": MAX_BACKTEST_POINTS,
+            "snapshot_trim_policy": "가장 오래된 점수 스냅샷 날짜부터 줄입니다.",
+        }
+    )
+    while _json_payload_size(payload) > max_bytes and payload.get("factor_score_snapshots"):
+        dates = sorted({row.get("date") for row in payload["factor_score_snapshots"] if row.get("date")})
+        if not dates:
+            break
+        oldest = dates[0]
+        payload["factor_score_snapshots"] = [
+            row for row in payload["factor_score_snapshots"] if row.get("date") != oldest
+        ]
+    while _json_payload_size(payload) > max_bytes and payload.get("factor_backtest_series"):
+        changed = False
+        for series in payload["factor_backtest_series"]:
+            dates = series.get("dates") or []
+            if len(dates) <= 80:
+                continue
+            indexes = list(range(len(dates)))[::2]
+            if indexes[-1] != len(dates) - 1:
+                indexes.append(len(dates) - 1)
+            for key in ["dates", "equity", "drawdown"]:
+                values = series.get(key) or []
+                series[key] = [values[index] for index in indexes if index < len(values)]
+            changed = True
+        if not changed:
+            break
+    payload["scenario_available_dates"] = sorted(
+        {row.get("date") for row in payload.get("factor_score_snapshots", []) if row.get("date")},
+        reverse=True,
+    )
+    payload["scenario_available_dates_by_factor"] = _scenario_available_dates_by_factor(
+        [row for row in payload.get("factor_score_snapshots", []) if isinstance(row, dict)]
+    )
+    payload["payload_limits"]["actual_payload_bytes"] = _json_payload_size(payload)
+    payload["payload_limits"]["score_snapshot_dates_exported"] = len(payload["scenario_available_dates"])
+    return payload
 
 
 def _expand_run_result_paths(patterns: str | Path | Iterable[str | Path]) -> list[Path]:
@@ -1725,6 +2514,13 @@ def _float_or_none(value: Any) -> float | None:
     if not np.isfinite(number):
         return None
     return number
+
+
+def _rounded_float(value: Any, digits: int = 6) -> float | None:
+    number = _float_or_none(value)
+    if number is None:
+        return None
+    return round(number, digits)
 
 
 def _json_safe(value: Any) -> Any:

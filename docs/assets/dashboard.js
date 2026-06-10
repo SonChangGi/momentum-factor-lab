@@ -118,6 +118,7 @@ function humanFactorCategory(value) {
     cross_sectional: '횡단면 상대강도',
     robust: '이상치 완화',
     range: '가격 범위 위치',
+    unknown: '분류 정보 없음',
   };
   return labels[text] || `기타(${text})`;
 }
@@ -151,6 +152,181 @@ function selectedDate() {
 
 function selectedWindow() {
   return document.querySelector('#window-select').value;
+}
+
+function selectedFactor() {
+  const selector = document.querySelector('#factor-select');
+  return selector?.value || currentRun().summary?.selected_factor || '';
+}
+
+function clampNumber(value, minValue, maxValue, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minValue, Math.min(maxValue, parsed));
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampedTopN() {
+  return Math.round(clampNumber(document.querySelector('#topn-input').value, 1, 50, 20));
+}
+
+function clampedMaxWeight() {
+  const percent = clampNumber(document.querySelector('#max-weight-input').value, 1, 50, 10);
+  const input = document.querySelector('#max-weight-input');
+  if (String(input.value) !== String(percent)) input.value = String(percent);
+  return percent / 100;
+}
+
+function factorOptions(run = currentRun()) {
+  const options = run.factor_options || [];
+  if (options.length) return options;
+  const factors = [...new Set([
+    run.summary?.selected_factor,
+    ...(run.factor_leaders || []).map((row) => row.best_factor),
+    ...(run.factor_period_rankings || []).map((row) => row.factor),
+  ].filter(Boolean))].sort();
+  return factors.map((factor) => ({ factor, category: 'unknown', description_ko: '팩터 설명 정보가 없습니다.' }));
+}
+
+function factorDescription(factor, run = currentRun()) {
+  const option = factorOptions(run).find((item) => item.factor === factor);
+  if (!option) return '팩터 설명 정보가 없습니다.';
+  const category = humanFactorCategory(option.category);
+  const description = option.description_ko || option.description || '설명 정보가 없습니다.';
+  return `${category} · ${description}`;
+}
+
+function periodMatrixEntry(run, date, windowKey) {
+  return (run.factor_period_matrix || []).find((row) => row.date === date && row.window === windowKey) || null;
+}
+
+function periodFactorStats(run, date, windowKey, factor) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors)) {
+    const index = matrix.factors.indexOf(factor);
+    if (index >= 0) {
+      return {
+        factor,
+        rank: index + 1,
+        period_return: optionalNumber(matrix.returns?.[index]),
+        factor_count: matrix.factors.length,
+        window_label: matrix.window_label || windowKey,
+      };
+    }
+    return {
+      factor,
+      rank: null,
+      period_return: null,
+      factor_count: matrix.factors.length,
+      window_label: matrix.window_label || windowKey,
+    };
+  }
+  const row = (run.factor_period_rankings || []).find((item) => (
+    item.date === date && item.window === windowKey && item.factor === factor
+  ));
+  if (!row) return null;
+  return { ...row, rank: row.rank, factor_count: row.factor_count || null };
+}
+
+function periodBestStats(run, date, windowKey) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors) && matrix.factors.length) {
+    return {
+      factor: matrix.factors[0],
+      rank: 1,
+      period_return: optionalNumber(matrix.returns?.[0]),
+      factor_count: matrix.factors.length,
+      window_label: matrix.window_label || windowKey,
+    };
+  }
+  const leader = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
+  if (!leader) return null;
+  return {
+    factor: leader.best_factor,
+    rank: 1,
+    period_return: leader.best_return,
+    factor_count: leader.factor_count,
+    window_label: leader.window_label || windowKey,
+  };
+}
+
+function factorScoreSnapshot(run, date, factor) {
+  return (run.factor_score_snapshots || []).find((snapshot) => snapshot.date === date && snapshot.factor === factor) || null;
+}
+
+function normalizeSnapshotRows(snapshot) {
+  const rows = snapshot?.rows || [];
+  return rows
+    .map((row) => {
+      if (Array.isArray(row)) return { symbol: row[0], score: Number(row[1]) };
+      return { symbol: row.symbol, score: Number(row.score) };
+    })
+    .filter((row) => row.symbol && Number.isFinite(row.score))
+    .sort((a, b) => Number(b.score) - Number(a.score) || String(a.symbol).localeCompare(String(b.symbol)));
+}
+
+function computeScenarioAllocation(rows, topN, maxWeight) {
+  const safeRows = normalizeSnapshotRows({ rows });
+  const count = Math.max(1, Math.min(50, Math.round(Number(topN) || 20), safeRows.length || 1));
+  const cap = Math.max(0.01, Math.min(0.5, Number(maxWeight) || 0.1));
+  const selected = safeRows.slice(0, count);
+  const scores = selected.map((row) => Number(row.score) || 0);
+  const minScore = scores.length ? Math.min(...scores) : 0;
+  const maxScore = scores.length ? Math.max(...scores) : 0;
+  const scoreRange = maxScore - minScore;
+  const rawScores = scoreRange > 0
+    ? scores.map((score) => score - minScore + Math.max(scoreRange * 1e-6, 1e-9))
+    : selected.map((_, index) => selected.length - index);
+  const weights = Array(selected.length).fill(0);
+  const remainingIndexes = new Set(selected.map((_, index) => index));
+  let remainingBudget = 1;
+  while (remainingIndexes.size && remainingBudget > 1e-12) {
+    const activeRawTotal = [...remainingIndexes].reduce((sum, index) => sum + rawScores[index], 0);
+    if (activeRawTotal <= 0) break;
+    const cappedThisRound = [];
+    for (const index of remainingIndexes) {
+      const candidateWeight = remainingBudget * (rawScores[index] / activeRawTotal);
+      if (candidateWeight > cap) {
+        weights[index] = cap;
+        cappedThisRound.push(index);
+      }
+    }
+    if (!cappedThisRound.length) {
+      for (const index of remainingIndexes) {
+        weights[index] = remainingBudget * (rawScores[index] / activeRawTotal);
+      }
+      remainingBudget = 0;
+      break;
+    }
+    cappedThisRound.forEach((index) => {
+      remainingIndexes.delete(index);
+      remainingBudget -= weights[index];
+    });
+  }
+  const weighted = selected.map((row, index) => ({
+    ...row,
+    display_rank: index + 1,
+    display_weight: Math.max(0, weights[index] || 0),
+    scenario_weight: Math.max(0, weights[index] || 0),
+  }));
+  const investedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
+  return {
+    weighted,
+    investedTotal,
+    displayedTotal: investedTotal,
+    portfolioTotal: investedTotal,
+    cashTotal: Math.max(0, 1 - investedTotal),
+    unusedCandidateCount: Math.max(0, safeRows.length - weighted.length),
+    weightingMethod: 'score_proportional_capped',
+    topN: count,
+    maxWeight: cap,
+    availableCount: safeRows.length,
+  };
 }
 
 function setText(selector, value) {
@@ -232,39 +408,30 @@ function currentWeightedHoldings() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
-  const maxWeight = Math.max(0.01, Math.min(1, Number(document.querySelector('#max-weight-input').value || 10) / 100));
-  const allRows = (run.holdings || [])
-    .filter((row) => row.date === date && row.window === windowKey)
-    .map((row) => ({ ...row, actual_weight: Number(row.default_weight || 0) }));
-  const weighted = allRows
-    .slice(0, topN)
-    .map((row, index) => ({
-      ...row,
-      display_weight: row.actual_weight,
-      display_rank: index + 1,
-    }));
-  const displayedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
-  const portfolioTotal = allRows.reduce((sum, row) => sum + row.actual_weight, 0);
-  const unshownTotal = Math.max(0, portfolioTotal - displayedTotal);
-  const cashTotal = Math.max(0, 1 - portfolioTotal);
+  const factor = selectedFactor();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const snapshot = factorScoreSnapshot(run, date, factor);
+  const availableDates = run.scenario_available_dates || [];
+  const allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
+  const stats = periodFactorStats(run, date, windowKey, factor);
   return {
-    weighted,
-    displayedTotal,
-    portfolioTotal,
-    unshownTotal,
-    cashTotal,
-    topN,
-    maxWeight,
-    availableCount: allRows.length,
-    selectedFactor: allRows[0]?.factor || '-',
-    windowLabel: allRows[0]?.window_label || windowKey || '-',
+    ...allocation,
+    snapshot,
+    selectedFactor: factor || '-',
+    windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
+    scoreDate: snapshot?.score_date || null,
+    missingReason: snapshot
+      ? null
+      : availableDates.length && !availableDates.includes(date)
+      ? '선택한 기준일은 용량과 로딩 속도 제한 때문에 종목/비중 스냅샷 보관 범위 밖입니다.'
+      : '선택한 기준일에 이 팩터의 점수 스냅샷이 없습니다.',
   };
 }
 
-function appendBarRow(target, label, valueLabel, value, maxAbs) {
+function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
   const row = document.createElement('div');
-  row.className = 'bar-row';
+  row.className = `bar-row ${options.className || ''}`.trim();
 
   const labelNode = document.createElement('div');
   labelNode.className = 'bar-label';
@@ -285,6 +452,28 @@ function appendBarRow(target, label, valueLabel, value, maxAbs) {
   target.appendChild(row);
 }
 
+function factorAvailableDates(run, factor) {
+  const byFactor = run.scenario_available_dates_by_factor || {};
+  const dates = byFactor[factor] || run.scenario_available_dates || [];
+  return new Set(dates);
+}
+
+function fillDateOptions(run, preferredDate = null) {
+  const dates = uniqueDates(run);
+  const availableDates = factorAvailableDates(run, selectedFactor());
+  const dateSelect = document.querySelector('#date-select');
+  dateSelect.replaceChildren();
+  dates.forEach((date) => {
+    const option = document.createElement('option');
+    option.value = date;
+    option.textContent = availableDates.has(date) ? `${date} · 종목/비중 가능` : `${date} · 팩터 수익률만`;
+    dateSelect.appendChild(option);
+  });
+  if (dates.length) {
+    dateSelect.value = preferredDate && dates.includes(preferredDate) ? preferredDate : dates[0];
+  }
+}
+
 function fillControls() {
   const runSelect = document.querySelector('#run-select');
   runSelect.replaceChildren();
@@ -300,6 +489,7 @@ function fillControls() {
   runSelect.disabled = runs.length <= 1;
 
   const run = currentRun();
+  const previousFactor = document.querySelector('#factor-select')?.value || run.summary?.selected_factor || '';
   const windows = run.periods || [];
   const windowSelect = document.querySelector('#window-select');
   windowSelect.replaceChildren();
@@ -311,17 +501,24 @@ function fillControls() {
   });
   windowSelect.value = windows[1]?.key || windows[0]?.key || '1M';
 
-  const dates = uniqueDates(run);
-  const dateSelect = document.querySelector('#date-select');
-  dateSelect.replaceChildren();
-  dates.forEach((date) => {
+  const factorSelect = document.querySelector('#factor-select');
+  const previousDate = document.querySelector('#date-select')?.value || null;
+  factorSelect.replaceChildren();
+  const options = factorOptions(run);
+  options.forEach((item) => {
     const option = document.createElement('option');
-    option.value = date;
-    option.textContent = date;
-    dateSelect.appendChild(option);
+    option.value = item.factor;
+    option.textContent = item.factor === run.summary?.selected_factor
+      ? `${item.factor} · 현재 실행 선택`
+      : `${item.factor} · ${humanFactorCategory(item.category)}`;
+    factorSelect.appendChild(option);
   });
-  if (dates.length) dateSelect.value = dates[0];
+  const factors = options.map((item) => item.factor);
+  factorSelect.value = factors.includes(previousFactor)
+    ? previousFactor
+    : (factors.includes(run.summary?.selected_factor) ? run.summary.selected_factor : factors[0] || '');
 
+  fillDateOptions(run, previousDate);
   document.querySelector('#topn-input').value = run.summary?.default_top_n || 20;
   document.querySelector('#max-weight-input').value = Math.round((run.summary?.default_max_weight || 0.1) * 100);
 }
@@ -330,14 +527,21 @@ function renderSummary() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const row = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
+  const best = periodBestStats(run, date, windowKey);
+  const factor = selectedFactor();
+  const selectedStats = periodFactorStats(run, date, windowKey, factor);
   const summary = run.summary || {};
   const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
   const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
-  setText('#best-factor', row?.best_factor || '-');
-  setText('#best-factor-detail', row ? `${row.window_label} 수익률 ${formatPercent(row.best_return)}` : '-');
-  setText('#selected-factor', summary.selected_factor || '-');
-  setText('#selected-factor-detail', row ? `선택 팩터 순위 ${row.selected_factor_rank || '-'} · ${formatPercent(row.selected_factor_return)}` : '-');
+  setText('#best-factor', best?.factor || '-');
+  setText('#best-factor-detail', best ? `${best.window_label} 수익률 ${formatPercent(best.period_return)}` : '-');
+  setText('#selected-factor', factor || '-');
+  setText(
+    '#selected-factor-detail',
+    selectedStats && selectedStats.rank
+      ? `${selectedStats.window_label} 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)} · ${factorDescription(factor, run)}`
+      : `자료 없음 · ${factorDescription(factor, run)}`,
+  );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
   setText('#latest-run-at', latestRunAt);
@@ -467,45 +671,74 @@ function renderDiagnostics() {
 function renderFactorTable() {
   const run = currentRun();
   const windowKey = selectedWindow();
+  const factor = selectedFactor();
   const rows = (run.factor_leaders || []).filter((row) => row.window === windowKey).slice(-30).reverse();
   const tbody = document.querySelector('#factor-table tbody');
   tbody.replaceChildren();
   rows.forEach((row) => {
+    const selectedStats = periodFactorStats(run, row.date, row.window, factor);
     const tr = document.createElement('tr');
     appendCell(tr, row.date);
     appendCell(tr, row.window_label, { badge: true });
     appendCell(tr, row.best_factor);
     appendCell(tr, formatPercent(row.best_return), { className: classForNumber(row.best_return) });
-    appendCell(tr, formatPercent(row.selected_factor_return), { className: classForNumber(row.selected_factor_return) });
-    appendCell(tr, row.selected_factor_rank || '-');
+    appendCell(tr, selectedStats?.period_return == null ? '자료 없음' : formatPercent(selectedStats.period_return), { className: classForNumber(selectedStats?.period_return) });
+    appendCell(tr, selectedStats?.rank ? `${selectedStats.rank}/${selectedStats.factor_count || '-'}` : '자료 없음');
     tbody.appendChild(tr);
   });
 }
 
 function renderHoldingsTable() {
   const run = currentRun();
-  const { weighted, displayedTotal, portfolioTotal, unshownTotal, cashTotal, topN, availableCount, selectedFactor, windowLabel } = currentWeightedHoldings();
-  const weightLabel = isPracticalRun(run) ? '투자 비중' : '모형/연구 비중';
+  const {
+    weighted,
+    displayedTotal,
+    portfolioTotal,
+    cashTotal,
+    topN,
+    availableCount,
+    selectedFactor: factor,
+    windowLabel,
+    scoreDate,
+    unusedCandidateCount,
+    maxWeight,
+    missingReason,
+  } = currentWeightedHoldings();
+  const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
   setText(
     '#weight-summary',
-    `전체 ${formatPercent(portfolioTotal)} · 표시 ${formatPercent(displayedTotal)} · 미표시 ${formatPercent(unshownTotal)} · 현금 ${formatPercent(cashTotal)}`,
+    `시나리오 배분 ${formatPercent(portfolioTotal)} · 화면 표시 ${formatPercent(displayedTotal)} · 현금/미사용 ${formatPercent(cashTotal)}`,
   );
+  const capNote = topN * maxWeight < 1
+    ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
+    : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
   setText(
     '#holdings-availability',
-    run.history_payload_type === 'summary'
+    missingReason
+      ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
+      : run.history_payload_type === 'summary'
       ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
-      : `${windowLabel} 최고 팩터 ${selectedFactor} 기준 백테스트 보유입니다. 전체 ${formatInteger(availableCount)}개 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 기존 분석 코드가 저장한 일별 보유 비중을 그대로 사용합니다.`,
+      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. 전체 ${formatInteger(availableCount)}개 후보 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
+  if (!weighted.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.textContent = '선택한 기준일과 팩터에 표시할 점수 스냅샷이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
   weighted.forEach((row) => {
     const tr = document.createElement('tr');
     appendCell(tr, row.display_rank);
     appendCell(tr, row.symbol, { strong: true });
     appendCell(tr, formatNumber(row.score));
     appendCell(tr, formatPercent(row.display_weight));
-    appendCell(tr, row.factor);
-    appendCell(tr, row.score_date || row.date);
+    appendCell(tr, factor);
+    appendCell(tr, scoreDate || selectedDate());
     tbody.appendChild(tr);
   });
 }
@@ -541,24 +774,52 @@ function renderFactorReturnChart() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const rows = (run.factor_period_rankings || [])
-    .filter((row) => row.date === date && row.window === windowKey)
-    .slice(0, 10);
+  const factor = selectedFactor();
+  const best = periodBestStats(run, date, windowKey);
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  let rows = [];
+  if (matrix && Array.isArray(matrix.factors)) {
+    rows = matrix.factors.map((name, index) => ({
+      factor: name,
+      rank: index + 1,
+      period_return: optionalNumber(matrix.returns?.[index]),
+      window_label: matrix.window_label,
+    }));
+  } else {
+    rows = (run.factor_period_rankings || []).filter((row) => row.date === date && row.window === windowKey);
+  }
+  const selectedRow = rows.find((row) => row.factor === factor);
+  rows = rows.slice(0, 10);
+  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
   const target = document.querySelector('#factor-return-chart');
   target.replaceChildren();
   const windowLabel = rows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || '-';
-  setText('#factor-chart-meta', `${date || '-'} · ${windowLabel}`);
+  setText('#factor-chart-meta', `${date || '-'} · ${windowLabel} · 선택 ${factor || '-'}`);
   if (!rows.length) {
     appendEmpty('#factor-return-chart', '선택한 기준일과 기간에 표시할 팩터 수익률 데이터가 없습니다.');
     return;
   }
   const maxAbs = Math.max(...rows.map((row) => Math.abs(Number(row.period_return) || 0)), 0.01);
-  rows.forEach((row) => appendBarRow(target, `${row.rank}. ${row.factor}`, formatPercent(row.period_return), row.period_return, maxAbs));
+  rows.forEach((row) => appendBarRow(
+    target,
+    `${row.rank}. ${row.factor}`,
+    formatPercent(row.period_return),
+    row.period_return,
+    maxAbs,
+    { className: `${row.factor === factor ? 'is-selected' : ''} ${row.factor === best?.factor ? 'is-best' : ''}`.trim() },
+  ));
+  if (!selectedRow) {
+    const note = document.createElement('div');
+    note.className = 'scenario-note';
+    note.textContent = '선택 팩터가 이 기준일/기간의 내보낸 순위 데이터에 없습니다. 팩터 비교는 가능한 데이터 범위 안에서만 표시됩니다.';
+    target.appendChild(note);
+  }
 }
 
 function renderWindowComparisonChart() {
   const run = currentRun();
   const date = selectedDate();
+  const selectedFactorName = selectedFactor();
   const periodOrder = (run.periods || []).map((period) => period.key);
   const rows = (run.factor_leaders || [])
     .filter((row) => row.date === date)
@@ -574,11 +835,14 @@ function renderWindowComparisonChart() {
     chip.className = 'window-chip';
     const label = document.createElement('span');
     label.textContent = row.window_label || row.window;
-    const factor = document.createElement('strong');
-    factor.textContent = row.best_factor || '-';
+    const factorNode = document.createElement('strong');
+    factorNode.textContent = row.best_factor || '-';
     const detail = document.createElement('small');
-    detail.textContent = `최고 수익률 ${formatPercent(row.best_return)} · 기존 선택 팩터 순위 ${row.selected_factor_rank || '-'}`;
-    chip.append(label, factor, detail);
+    const selectedStats = periodFactorStats(run, row.date, row.window, selectedFactorName);
+    detail.textContent = selectedStats?.rank
+      ? `최고 수익률 ${formatPercent(row.best_return)} · 선택 팩터 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
+      : `최고 수익률 ${formatPercent(row.best_return)} · 선택 팩터 자료 없음`;
+    chip.append(label, factorNode, detail);
     target.appendChild(chip);
   });
 }
@@ -617,49 +881,173 @@ function renderLeaderTrendChart() {
 
 function renderWeightChart() {
   const run = currentRun();
-  const { weighted, unshownTotal, cashTotal, topN, maxWeight } = currentWeightedHoldings();
+  const { weighted, cashTotal, topN, maxWeight, unusedCandidateCount } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 비중' : '모형/연구 비중'} · 상위 ${topN}개 표시 · 실행 목표 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 시나리오' : '연구 시나리오'} · 상위 ${topN}개 · 브라우저 최대 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
-    appendEmpty('#weight-chart', '선택한 기준일과 기간에 표시할 상위 종목 데이터가 없습니다.');
+    appendEmpty('#weight-chart', '선택한 기준일과 팩터에 표시할 상위 종목 점수 스냅샷이 없습니다.');
     return;
   }
   const maxWeightValue = Math.max(
     ...weighted.map((row) => Number(row.display_weight) || 0),
-    Number(unshownTotal) || 0,
     Number(cashTotal) || 0,
     0.01,
   );
   weighted.forEach((row) => appendBarRow(target, row.symbol, formatPercent(row.display_weight), row.display_weight, maxWeightValue));
-  if (unshownTotal > 0.000001) {
-    appendBarRow(target, '미표시 보유분', formatPercent(unshownTotal), unshownTotal, maxWeightValue);
-  }
   if (cashTotal > 0.000001) {
-    appendBarRow(target, '현금/미투자', formatPercent(cashTotal), cashTotal, maxWeightValue);
+    appendBarRow(target, '현금/미사용', formatPercent(cashTotal), cashTotal, maxWeightValue);
   }
+  if (unusedCandidateCount > 0) {
+    const note = document.createElement('div');
+    note.className = 'scenario-note';
+    note.textContent = `상위 N개 제한 때문에 ${formatInteger(unusedCandidateCount)}개 후보는 이번 브라우저 시나리오 목표 비중에서 제외했습니다.`;
+    target.appendChild(note);
+  }
+}
+
+function factorBacktestSeries(run, factor) {
+  return (run.factor_backtest_series || []).find((series) => series.factor === factor) || null;
+}
+
+function seriesPointsThroughDate(series, date, limit = 120) {
+  if (!series || !Array.isArray(series.dates)) return [];
+  const points = series.dates.map((pointDate, index) => ({
+    date: pointDate,
+    equity: Number(series.equity?.[index]),
+    drawdown: Number(series.drawdown?.[index]),
+  })).filter((point) => point.date && Number.isFinite(point.equity));
+  const through = date ? points.filter((point) => String(point.date) <= String(date)) : points;
+  return through.slice(-limit);
+}
+
+function normalizedLine(points) {
+  if (!points.length) return [];
+  const base = points[0].equity || 1;
+  return points.map((point) => ({ ...point, normalized: base ? point.equity / base : point.equity }));
+}
+
+function renderBacktestChart() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const best = periodBestStats(run, date, windowKey);
+  const selectedSeries = normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, factor), date));
+  const bestSeries = best?.factor && best.factor !== factor
+    ? normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, best.factor), date))
+    : [];
+  const target = document.querySelector('#backtest-chart');
+  target.replaceChildren();
+  setText('#backtest-chart-meta', `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}`);
+  if (!selectedSeries.length) {
+    appendEmpty('#backtest-chart', '선택 팩터의 최근 백테스트 추이 데이터가 없습니다. 기간 최고 팩터 데이터를 대신 표시하지 않습니다.');
+    return;
+  }
+  const allValues = [...selectedSeries, ...bestSeries].map((point) => point.normalized).filter((value) => Number.isFinite(value));
+  const minValue = Math.min(...allValues, 0.95);
+  const maxValue = Math.max(...allValues, 1.05);
+  const width = 720;
+  const height = 220;
+  const pad = 18;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', '선택 팩터와 기간 최고 팩터의 최근 백테스트 누적 성과 비교');
+  [0.25, 0.5, 0.75].forEach((ratio) => {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    const y = pad + (height - pad * 2) * ratio;
+    line.setAttribute('x1', String(pad));
+    line.setAttribute('x2', String(width - pad));
+    line.setAttribute('y1', String(y));
+    line.setAttribute('y2', String(y));
+    line.setAttribute('class', 'line-grid');
+    svg.appendChild(line);
+  });
+  const toPolyline = (points) => points.map((point, index) => {
+    const x = pad + (points.length <= 1 ? 0 : index / (points.length - 1) * (width - pad * 2));
+    const y = height - pad - ((point.normalized - minValue) / Math.max(0.000001, maxValue - minValue)) * (height - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const appendLine = (points, className) => {
+    if (!points.length) return;
+    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    polyline.setAttribute('points', toPolyline(points));
+    polyline.setAttribute('class', `line-path ${className}`);
+    svg.appendChild(polyline);
+  };
+  appendLine(selectedSeries, 'selected');
+  appendLine(bestSeries, 'best');
+  target.appendChild(svg);
+
+  const legend = document.createElement('div');
+  legend.className = 'line-legend';
+  const selectedReturn = selectedSeries.at(-1)?.normalized - 1;
+  const bestReturn = bestSeries.length ? bestSeries.at(-1)?.normalized - 1 : null;
+  const selectedDrawdown = selectedSeries.at(-1)?.drawdown;
+  const bestDrawdown = bestSeries.length ? bestSeries.at(-1)?.drawdown : null;
+  const selectedLegend = document.createElement('span');
+  const selectedDot = document.createElement('span');
+  selectedDot.className = 'legend-dot';
+  selectedLegend.appendChild(selectedDot);
+  selectedLegend.append(`선택 팩터 ${factor}: 구간 ${formatPercent(selectedReturn)} · 낙폭 ${formatPercent(selectedDrawdown)}`);
+  legend.appendChild(selectedLegend);
+  if (bestSeries.length) {
+    const bestLegend = document.createElement('span');
+    const bestDot = document.createElement('span');
+    bestDot.className = 'legend-dot best';
+    bestLegend.appendChild(bestDot);
+    bestLegend.append(`기간 최고 ${best.factor}: 구간 ${formatPercent(bestReturn)} · 낙폭 ${formatPercent(bestDrawdown)}`);
+    legend.appendChild(bestLegend);
+  }
+  target.appendChild(legend);
 }
 
 function renderPeriodRankingTable() {
   const run = currentRun();
   const date = selectedDate();
-  const rows = (run.factor_period_rankings || []).filter((row) => row.date === date).slice(0, 40);
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  let rows = [];
+  if (matrix && Array.isArray(matrix.factors)) {
+    rows = matrix.factors.map((name, index) => ({
+      window_label: matrix.window_label || windowKey,
+      factor: name,
+      period_return: optionalNumber(matrix.returns?.[index]),
+      rank: index + 1,
+    }));
+  } else {
+    rows = (run.factor_period_rankings || []).filter((row) => row.date === date && row.window === windowKey);
+  }
+  const selectedRow = rows.find((row) => row.factor === factor);
+  rows = rows.slice(0, 40);
+  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
   const tbody = document.querySelector('#period-ranking-table tbody');
   tbody.replaceChildren();
   rows.forEach((row) => {
     const tr = document.createElement('tr');
     appendCell(tr, row.window_label);
-    appendCell(tr, row.factor);
+    appendCell(tr, row.factor, { strong: row.factor === factor });
     appendCell(tr, formatPercent(row.period_return), { className: classForNumber(row.period_return) });
     appendCell(tr, row.rank);
     tbody.appendChild(tr);
   });
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = '선택한 기준일과 기간에 팩터 랭킹 자료가 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
 }
 
 function renderAll() {
   renderSummary();
   renderDiagnostics();
   renderFactorReturnChart();
+  renderBacktestChart();
   renderWindowComparisonChart();
   renderLeaderTrendChart();
   renderWeightChart();
@@ -691,7 +1079,11 @@ fetch('data/dashboard.json')
       fillControls();
       renderWithBusy('실행 결과를 전환하는 중입니다...');
     });
-    ['#date-select', '#window-select', '#topn-input'].forEach((selector) => {
+    document.querySelector('#factor-select').addEventListener('change', () => {
+      fillDateOptions(currentRun(), selectedDate());
+      renderWithBusy('선택 팩터를 반영하는 중입니다...');
+    });
+    ['#date-select', '#window-select', '#topn-input', '#max-weight-input'].forEach((selector) => {
       document.querySelector(selector).addEventListener('input', () => renderWithBusy('선택값을 반영하는 중입니다...'));
       document.querySelector(selector).addEventListener('change', () => renderWithBusy('선택값을 반영하는 중입니다...'));
     });
