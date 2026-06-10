@@ -39,6 +39,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
+ASSET_VERSION = "20260611-performance-grid-3x2"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -47,7 +48,7 @@ HTML_TEMPLATE = """<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{title}</title>
-  <link rel="stylesheet" href="assets/styles.css" />
+  <link rel="stylesheet" href="assets/styles.css?v={asset_version}" />
 </head>
 <body>
   <header class="hero">
@@ -389,7 +390,7 @@ HTML_TEMPLATE = """<!doctype html>
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js"></script>
+  <script src="assets/dashboard.js?v={asset_version}"></script>
 </body>
 </html>
 """
@@ -546,7 +547,7 @@ tbody tr:hover { background: #f8fbff; }
 .performance-metrics-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: end; flex-wrap: wrap; }
 .performance-metrics-heading h4 { margin: 0; font-size: 1rem; }
 .performance-metrics-heading p { margin: .25rem 0 0; color: var(--muted); font-size: .86rem; line-height: 1.55; }
-.performance-period-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); gap: .85rem; align-items: start; }
+.performance-period-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .85rem; align-items: start; }
 .performance-period-card { border: 1px solid var(--line); border-radius: 18px; background: #fff; overflow: hidden; box-shadow: 0 10px 24px rgba(15, 23, 42, .04); }
 .performance-period-card h5 { margin: 0; padding: .8rem .95rem; font-size: .95rem; background: #f8fafc; border-bottom: 1px solid var(--line); }
 .performance-table-wrap { overflow-x: auto; }
@@ -559,6 +560,9 @@ tbody tr:hover { background: #f8fbff; }
 .series-name.selected { color: var(--accent); }
 .series-name.best { color: var(--good); }
 .series-name.benchmark { color: #7c3aed; }
+@media (max-width: 1180px) {
+  .performance-period-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 720px) {
   .performance-period-grid { grid-template-columns: 1fr; }
   .performance-table th, .performance-table td { padding: .52rem .55rem; }
@@ -2212,7 +2216,7 @@ def write_dashboard_site(
     combined = _fit_combined_dashboard_payload(combined, max_bytes=DASHBOARD_MAX_JSON_BYTES)
 
     escaped_title = html.escape(title, quote=True)
-    index_path.write_text(HTML_TEMPLATE.format(title=escaped_title), encoding="utf-8")
+    index_path.write_text(HTML_TEMPLATE.format(title=escaped_title, asset_version=ASSET_VERSION), encoding="utf-8")
     css_path.write_text(CSS_CONTENT, encoding="utf-8")
     js_path.write_text(JS_CONTENT, encoding="utf-8")
     data_path.write_text(

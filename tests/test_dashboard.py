@@ -226,6 +226,8 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     css = Path(paths["css"]).read_text(encoding="utf-8")
     js = Path(paths["js"]).read_text(encoding="utf-8")
     assert "모멘텀 팩터 데일리 대시보드" in html
+    assert 'assets/styles.css?v=20260611-performance-grid-3x2' in html
+    assert 'assets/dashboard.js?v=20260611-performance-grid-3x2' in html
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
     assert "최근 실행 시각" in html
     assert "X축: 날짜" in js
@@ -236,8 +238,9 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "각 기간 카드에서 같은 지표" in js
     assert "performance-period-grid" in js
     assert "performance-period-card" in js
-    assert "minmax(560px, 1fr)" in css
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr))" in css
     assert "table-layout: fixed" in css
+    assert "@media (max-width: 1180px)" in css
     assert "@media (max-width: 720px)" in css
     assert "niceReturnTicks" in js
     assert "dateTickMarks" in js
