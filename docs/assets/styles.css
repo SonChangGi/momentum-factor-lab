@@ -24,6 +24,9 @@ body {
 .hero > * { min-width: 0; }
 .hero h1 { margin: .25rem 0 1rem; font-size: clamp(2rem, 5vw, 4rem); }
 .hero-copy { max-width: 760px; line-height: 1.7; opacity: .92; }
+.hero-actions { margin-top: 1.25rem; display: flex; flex-wrap: wrap; gap: .75rem; }
+.hero-link { color: #0f2f68; background: rgba(255,255,255,.92); border-color: rgba(255,255,255,.55); box-shadow: 0 14px 30px rgba(15, 23, 42, .18); }
+.hero-link:hover { background: #fff; transform: translateY(-1px); }
 .eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .035em; font-size: .78rem; line-height: 1.45; }
 .hero .eyebrow { color: #c7dcff; }
 .status-card { min-width: 300px; align-self: center; border: 1px solid rgba(255,255,255,.32); border-radius: 24px; padding: 1.25rem; background: rgba(255,255,255,.14); backdrop-filter: blur(8px); line-height: 1.6; }

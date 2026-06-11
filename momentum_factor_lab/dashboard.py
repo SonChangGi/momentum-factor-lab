@@ -39,7 +39,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260611-research-signal-weights"
+ASSET_VERSION = "20260612-hub-return-link"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -59,6 +59,9 @@ HTML_TEMPLATE = """<!doctype html>
         매일 미국 종가 기준으로 업데이트되는 모멘텀 팩터 비교 화면입니다.
         최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 모형 비중을 한 화면에서 비교합니다.
       </p>
+      <div class="hero-actions">
+        <a class="button hero-link" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="투자 리서치 프로젝트 통합 대시보드로 돌아가기">← 통합 대시보드로 돌아가기</a>
+      </div>
     </div>
     <div class="status-card" id="run-status">데이터를 불러오는 중...</div>
   </header>
@@ -425,6 +428,9 @@ body {
 .hero > * { min-width: 0; }
 .hero h1 { margin: .25rem 0 1rem; font-size: clamp(2rem, 5vw, 4rem); }
 .hero-copy { max-width: 760px; line-height: 1.7; opacity: .92; }
+.hero-actions { margin-top: 1.25rem; display: flex; flex-wrap: wrap; gap: .75rem; }
+.hero-link { color: #0f2f68; background: rgba(255,255,255,.92); border-color: rgba(255,255,255,.55); box-shadow: 0 14px 30px rgba(15, 23, 42, .18); }
+.hero-link:hover { background: #fff; transform: translateY(-1px); }
 .eyebrow { margin: 0 0 .35rem; color: var(--accent); font-weight: 800; letter-spacing: .035em; font-size: .78rem; line-height: 1.45; }
 .hero .eyebrow { color: #c7dcff; }
 .status-card { min-width: 300px; align-self: center; border: 1px solid rgba(255,255,255,.32); border-radius: 24px; padding: 1.25rem; background: rgba(255,255,255,.14); backdrop-filter: blur(8px); line-height: 1.6; }

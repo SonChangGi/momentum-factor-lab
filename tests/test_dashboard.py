@@ -228,6 +228,9 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "모멘텀 팩터 데일리 대시보드" in html
     assert f'assets/styles.css?v={ASSET_VERSION}' in html
     assert f'assets/dashboard.js?v={ASSET_VERSION}' in html
+    assert 'href="https://sonchanggi.github.io/quant-dashboard/"' in html
+    assert "통합 대시보드로 돌아가기" in html
+    assert "hero-link" in css
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
     assert "최근 실행 시각" in html
     assert "X축: 날짜" in js
