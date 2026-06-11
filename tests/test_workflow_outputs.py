@@ -62,6 +62,14 @@ def _assert_research_only_fail_closed(result, *expected_blockers: str) -> None:
     assert result.metadata["research_only"]
     assert result.metadata["recommendation_output_key"] == "research_signals"
     assert result.recommendations["weight"].eq(0.0).all()
+    if (
+        not result.recommendations.empty
+        and "raw_weight_score" in result.recommendations
+        and "pre_cap_weight" in result.recommendations
+    ):
+        assert result.recommendations["raw_weight_score"].gt(0.0).any()
+        assert result.recommendations["pre_cap_weight"].gt(0.0).any()
+        assert result.recommendations["pre_cap_weight"].sum() == pytest.approx(1.0)
     if "proposed_weight" in result.recommendations:
         assert result.recommendations["proposed_weight"].eq(0.0).all()
     if "target_notional" in result.recommendations:

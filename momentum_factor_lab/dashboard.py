@@ -39,7 +39,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260611-policy-metrics-size"
+ASSET_VERSION = "20260611-research-signal-weights"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -280,10 +280,12 @@ HTML_TEMPLATE = """<!doctype html>
         </div>
         <p>
           현재 실행에서 생성된 최신 추천 또는 연구 신호 행입니다.
-          최종 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
+          최종 매매 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
+          게이트 전 모형 비중은 점수·규모·유동성으로 계산한 연구용 진단값이며 실제 주문 비중이 아닙니다.
           이 표는 브라우저 시나리오 비중과 별개로 기존 분석 코드가 생성한 최신 출력입니다.
         </p>
       </div>
+      <p id="current-output-note" class="scenario-note">-</p>
       <div class="table-wrap">
         <table id="current-output-table">
           <thead>
@@ -291,8 +293,8 @@ HTML_TEMPLATE = """<!doctype html>
               <th>순위</th>
               <th>종목</th>
               <th>모멘텀 신호</th>
-              <th>최종 비중</th>
-              <th>사전 산출 비중</th>
+              <th>최종 매매 비중</th>
+              <th>게이트 전 모형 비중</th>
               <th>비중 산출 방식</th>
               <th>신호일</th>
             </tr>
@@ -646,6 +648,11 @@ const formatCount = (value) => {
 
 const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
 const textValue = (value) => value === null || value === undefined ? '-' : String(value);
+const joinReasonList = (value) => {
+  if (Array.isArray(value)) return value.map(textValue).filter((item) => item !== '-').join(', ');
+  const text = textValue(value);
+  return text === '-' ? '' : text;
+};
 
 function formatKoreanDateTime(value) {
   if (!value) return '-';
@@ -719,8 +726,14 @@ function humanStatus(status, outputLabel) {
 
 function isPracticalRun(run = currentRun()) {
   const summary = run.summary || {};
-  return String(summary.recommendation_output_label || '').includes('Practical')
-    || String(summary.recommendation_status || '') === 'current_live';
+  return summary.recommendation_output_key === 'recommendations'
+    && summary.research_only === false
+    && summary.recommendation_output_available === true
+    && summary.tradable_output_available === true
+    && summary.current_recommendations_available === true
+    && summary.tradable_recommendations_available === true
+    && summary.same_run_factor_selection_blocked_for_tradable === false
+    && summary.same_sample_selection_blocked_for_tradable === false;
 }
 
 function humanFactorCategory(value) {
@@ -1372,10 +1385,23 @@ function renderHoldingsTable() {
 
 function renderCurrentOutputTable() {
   const run = currentRun();
+  const summary = run.summary || {};
+  const quality = run.data_quality_summary || {};
   const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
   const rows = (run.latest_output_rows || []).slice(0, topN);
   const tbody = document.querySelector('#current-output-table tbody');
+  const note = document.querySelector('#current-output-note');
   tbody.replaceChildren();
+  if (note) {
+    const isResearch = !isPracticalRun(run);
+    const blockers = joinReasonList(summary.tradability_blockers) || joinReasonList(summary.fail_closed_reasons) || '실전 매매 게이트 미통과';
+    const candidateCount = formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size);
+    const eligibleCount = formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size);
+    const liquidityCount = formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size);
+    note.textContent = isResearch
+      ? `연구용 fail-closed 출력입니다. 최종 매매 비중과 목표금액은 0으로 고정하고, 게이트 전 모형 비중만 후보 간 상대 강도 진단으로 표시합니다. 미충족 요건: ${blockers}. 후보 ${candidateCount}, 가격 적격 ${eligibleCount}, 유동성 적격 ${liquidityCount}.`
+      : `실행 가능성 게이트를 통과한 최신 추천입니다. 후보 ${candidateCount}, 가격 적격 ${eligibleCount}, 유동성 적격 ${liquidityCount}.`;
+  }
   rows.forEach((row, index) => {
     const tr = document.createElement('tr');
     appendCell(tr, row.rank || index + 1);
@@ -2318,8 +2344,6 @@ DASHBOARD_RESEARCH_ONLY_SELECTION_SOURCES = frozenset(
 DASHBOARD_RESEARCH_ONLY_ZERO_FIELDS = (
     "weight",
     "proposed_weight",
-    "pre_cap_weight",
-    "weight_cap_excess",
     "target_notional",
     "adv_participation",
     "capacity_utilization",
@@ -2412,18 +2436,46 @@ def _dashboard_has_affirmative_practical_proof(summary: dict[str, Any]) -> bool:
     )
 
 
+def _restore_pre_cap_weight_from_raw_scores(rows: list[dict[str, Any]]) -> None:
+    raw_scores: list[float | None] = []
+    for row in rows:
+        raw = row.get("raw_weight_score")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raw_scores.append(None)
+            continue
+        raw_scores.append(value if value > 0 else None)
+    total = sum(value for value in raw_scores if value is not None)
+    if total <= 0:
+        return
+    for row, value in zip(rows, raw_scores, strict=False):
+        if value is None:
+            continue
+        existing = row.get("pre_cap_weight")
+        try:
+            existing_value = float(existing)
+        except (TypeError, ValueError):
+            existing_value = 0.0
+        if existing_value <= 0:
+            row["pre_cap_weight"] = value / total
+
+
 def _sanitize_research_only_output_rows(rows: list[Any], summary: dict[str, Any]) -> list[Any]:
     if not _dashboard_rows_are_research_only(summary, rows):
         return rows
     reason = "; ".join(summary.get("tradability_blockers") or summary.get("fail_closed_reasons") or [])
     if not reason:
         reason = "research_only_or_non_tradable_output"
+    dict_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    _restore_pre_cap_weight_from_raw_scores(dict_rows)
     sanitized: list[Any] = []
+    restored_iter = iter(dict_rows)
     for row in rows:
         if not isinstance(row, dict):
             sanitized.append(row)
             continue
-        clean = dict(row)
+        clean = next(restored_iter)
         for key in DASHBOARD_RESEARCH_ONLY_ZERO_FIELDS:
             if key in clean:
                 clean[key] = 0.0

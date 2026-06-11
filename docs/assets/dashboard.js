@@ -63,6 +63,11 @@ const formatCount = (value) => {
 
 const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
 const textValue = (value) => value === null || value === undefined ? '-' : String(value);
+const joinReasonList = (value) => {
+  if (Array.isArray(value)) return value.map(textValue).filter((item) => item !== '-').join(', ');
+  const text = textValue(value);
+  return text === '-' ? '' : text;
+};
 
 function formatKoreanDateTime(value) {
   if (!value) return '-';
@@ -136,8 +141,14 @@ function humanStatus(status, outputLabel) {
 
 function isPracticalRun(run = currentRun()) {
   const summary = run.summary || {};
-  return String(summary.recommendation_output_label || '').includes('Practical')
-    || String(summary.recommendation_status || '') === 'current_live';
+  return summary.recommendation_output_key === 'recommendations'
+    && summary.research_only === false
+    && summary.recommendation_output_available === true
+    && summary.tradable_output_available === true
+    && summary.current_recommendations_available === true
+    && summary.tradable_recommendations_available === true
+    && summary.same_run_factor_selection_blocked_for_tradable === false
+    && summary.same_sample_selection_blocked_for_tradable === false;
 }
 
 function humanFactorCategory(value) {
@@ -789,10 +800,23 @@ function renderHoldingsTable() {
 
 function renderCurrentOutputTable() {
   const run = currentRun();
+  const summary = run.summary || {};
+  const quality = run.data_quality_summary || {};
   const topN = Math.max(1, Math.min(50, Number(document.querySelector('#topn-input').value || 20)));
   const rows = (run.latest_output_rows || []).slice(0, topN);
   const tbody = document.querySelector('#current-output-table tbody');
+  const note = document.querySelector('#current-output-note');
   tbody.replaceChildren();
+  if (note) {
+    const isResearch = !isPracticalRun(run);
+    const blockers = joinReasonList(summary.tradability_blockers) || joinReasonList(summary.fail_closed_reasons) || '실전 매매 게이트 미통과';
+    const candidateCount = formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size);
+    const eligibleCount = formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size);
+    const liquidityCount = formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size);
+    note.textContent = isResearch
+      ? `연구용 fail-closed 출력입니다. 최종 매매 비중과 목표금액은 0으로 고정하고, 게이트 전 모형 비중만 후보 간 상대 강도 진단으로 표시합니다. 미충족 요건: ${blockers}. 후보 ${candidateCount}, 가격 적격 ${eligibleCount}, 유동성 적격 ${liquidityCount}.`
+      : `실행 가능성 게이트를 통과한 최신 추천입니다. 후보 ${candidateCount}, 가격 적격 ${eligibleCount}, 유동성 적격 ${liquidityCount}.`;
+  }
   rows.forEach((row, index) => {
     const tr = document.createElement('tr');
     appendCell(tr, row.rank || index + 1);

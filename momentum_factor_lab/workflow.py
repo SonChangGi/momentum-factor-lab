@@ -1389,8 +1389,6 @@ def _row_level_capacity_pass(recommendations: pd.DataFrame) -> bool:
 RESEARCH_ONLY_ZERO_COLUMNS = (
     "weight",
     "proposed_weight",
-    "pre_cap_weight",
-    "weight_cap_excess",
     "target_notional",
     "adv_participation",
     "capacity_utilization",
@@ -1399,7 +1397,13 @@ RESEARCH_ONLY_ZERO_COLUMNS = (
 
 
 def _sanitize_research_signal_rows(recommendations: pd.DataFrame, *, reason: str) -> pd.DataFrame:
-    """Remove tradable sizing cues from fail-closed research-only rows."""
+    """Remove tradable sizing cues from fail-closed research-only rows.
+
+    Keep model-diagnostic sizing fields such as ``pre_cap_weight`` and
+    ``raw_weight_score``.  They explain the ranking economics before the
+    tradability gate, while ``weight``/notional fields remain zero so a
+    research-only row cannot be mistaken for a trade instruction.
+    """
 
     frame = recommendations.copy()
     for column in RESEARCH_ONLY_ZERO_COLUMNS:

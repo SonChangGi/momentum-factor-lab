@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>모멘텀 팩터 데일리 대시보드</title>
-  <link rel="stylesheet" href="assets/styles.css?v=20260611-policy-metrics-size" />
+  <link rel="stylesheet" href="assets/styles.css?v=20260611-research-signal-weights" />
 </head>
 <body>
   <header class="hero">
@@ -236,10 +236,12 @@
         </div>
         <p>
           현재 실행에서 생성된 최신 추천 또는 연구 신호 행입니다.
-          최종 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
+          최종 매매 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
+          게이트 전 모형 비중은 점수·규모·유동성으로 계산한 연구용 진단값이며 실제 주문 비중이 아닙니다.
           이 표는 브라우저 시나리오 비중과 별개로 기존 분석 코드가 생성한 최신 출력입니다.
         </p>
       </div>
+      <p id="current-output-note" class="scenario-note">-</p>
       <div class="table-wrap">
         <table id="current-output-table">
           <thead>
@@ -247,8 +249,8 @@
               <th>순위</th>
               <th>종목</th>
               <th>모멘텀 신호</th>
-              <th>최종 비중</th>
-              <th>사전 산출 비중</th>
+              <th>최종 매매 비중</th>
+              <th>게이트 전 모형 비중</th>
               <th>비중 산출 방식</th>
               <th>신호일</th>
             </tr>
@@ -347,6 +349,6 @@
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v=20260611-policy-metrics-size"></script>
+  <script src="assets/dashboard.js?v=20260611-research-signal-weights"></script>
 </body>
 </html>

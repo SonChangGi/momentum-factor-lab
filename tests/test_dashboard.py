@@ -9,7 +9,7 @@ import pytest
 
 from momentum_factor_lab import cli
 from momentum_factor_lab.config import RunConfig
-from momentum_factor_lab.dashboard import _holding_rows, build_dashboard_payload, write_dashboard_site
+from momentum_factor_lab.dashboard import ASSET_VERSION, _holding_rows, build_dashboard_payload, write_dashboard_site
 from momentum_factor_lab.report import write_reports
 from momentum_factor_lab.workflow import run_analysis
 
@@ -226,8 +226,8 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     css = Path(paths["css"]).read_text(encoding="utf-8")
     js = Path(paths["js"]).read_text(encoding="utf-8")
     assert "모멘텀 팩터 데일리 대시보드" in html
-    assert 'assets/styles.css?v=20260611-policy-metrics-size' in html
-    assert 'assets/dashboard.js?v=20260611-policy-metrics-size' in html
+    assert f'assets/styles.css?v={ASSET_VERSION}' in html
+    assert f'assets/dashboard.js?v={ASSET_VERSION}' in html
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
     assert "최근 실행 시각" in html
     assert "X축: 날짜" in js
@@ -704,11 +704,75 @@ def test_dashboard_sanitizes_legacy_research_signal_rows(tmp_path):
     assert "no_same_sample_factor_selection" in summary["tradability_blockers"]
     assert "walk-forward selection for practical labels" not in summary["selected_reason"]
     assert row["proposed_weight"] == 0.0
-    assert row["pre_cap_weight"] == 0.0
+    assert row["pre_cap_weight"] == 0.2
     assert row["target_notional"] == 0.0
     assert row["capacity_pass"] is False
     assert row["capacity_status"] == "research_only_gate_failed"
 
+
+def test_dashboard_restores_research_pre_cap_weight_from_raw_scores(tmp_path):
+    run_json = tmp_path / "run_results_raw_weight_research.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-10T00:00:00Z",
+                    "summary": {
+                        "run_timestamp_utc": "2026-06-10T00:00:00Z",
+                        "data_as_of": "2026-06-09",
+                        "selected_factor": "mom_9_1",
+                        "recommendation_output_label": "Research signals (not tradable)",
+                        "tradability_blockers": ["point_in_time_universe"],
+                    },
+                    "periods": [],
+                    "factor_options": [],
+                    "factor_leaders": [],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                    "factor_score_snapshots": [],
+                    "latest_output_rows": [
+                        {
+                            "rank": 1,
+                            "symbol": "AAA",
+                            "score": 2.0,
+                            "weight": 0.0,
+                            "pre_cap_weight": 0.0,
+                            "raw_weight_score": 3.0,
+                            "target_notional": 10_000,
+                            "capacity_status": "pass",
+                            "capacity_pass": True,
+                            "recommendation_output": "research_signals",
+                        },
+                        {
+                            "rank": 2,
+                            "symbol": "BBB",
+                            "score": 1.0,
+                            "weight": 0.0,
+                            "pre_cap_weight": 0.0,
+                            "raw_weight_score": 1.0,
+                            "target_notional": 5_000,
+                            "capacity_status": "pass",
+                            "capacity_pass": True,
+                            "recommendation_output": "research_signals",
+                        },
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    combined = json.loads(Path(paths["data"]).read_text(encoding="utf-8"))
+    rows = combined["runs"][0]["latest_output_rows"]
+
+    assert rows[0]["weight"] == 0.0
+    assert rows[1]["weight"] == 0.0
+    assert rows[0]["target_notional"] == 0.0
+    assert rows[1]["target_notional"] == 0.0
+    assert rows[0]["pre_cap_weight"] == pytest.approx(0.75)
+    assert rows[1]["pre_cap_weight"] == pytest.approx(0.25)
 
 
 def test_dashboard_preserves_predeclared_factor_policy_when_other_gate_fails(tmp_path):
