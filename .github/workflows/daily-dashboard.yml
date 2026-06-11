@@ -100,5 +100,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs
-          git commit -m "Update daily momentum dashboard"
+          git commit \
+            -m "Keep the published dashboard current after the daily data run" \
+            -m "Constraint: GitHub Actions updates only generated docs assets after a successful scheduled or manual dashboard run.
+Confidence: high
+Scope-risk: narrow
+Directive: Do not use this automated commit for source-code or policy changes; those require reviewed human/agent commits.
+Tested: momentum_factor_lab.cli scheduled-dashboard completed in this workflow.
+Not-tested: External free data providers may publish the latest close with delay."
           git push

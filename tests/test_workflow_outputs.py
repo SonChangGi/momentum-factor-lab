@@ -75,6 +75,24 @@ def _assert_research_only_fail_closed(result, *expected_blockers: str) -> None:
         assert blocker in result.metadata["tradability_blockers"]
 
 
+def _frozen_policy_path(tmp_path: Path, selected_factor: str = "mom_1m") -> Path:
+    path = tmp_path / f"policy-{selected_factor}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "policy_id": f"test-{selected_factor}-policy",
+                "created_at_utc": "2026-06-01T00:00:00Z",
+                "effective_from": "2026-06-01",
+                "factor_selection_mode": "predeclared",
+                "selected_factor": selected_factor,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _live_fixture_market_data(
     config: RunConfig,
     *,
@@ -461,6 +479,7 @@ def test_unstructured_pit_attestation_does_not_satisfy_practical_gate(tmp_path, 
         max_weight=0.2,
         selected_factor="mom_1m",
         factor_selection_mode="predeclared",
+        frozen_policy_path=_frozen_policy_path(tmp_path),
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -549,6 +568,7 @@ def test_market_cap_enrichment_does_not_change_price_universe_or_coverage(tmp_pa
         max_weight=0.2,
         selected_factor="mom_1m",
         factor_selection_mode="predeclared",
+        frozen_policy_path=_frozen_policy_path(tmp_path),
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -580,6 +600,7 @@ def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_r
         max_weight=0.2,
         selected_factor="mom_1m",
         factor_selection_mode="predeclared",
+        frozen_policy_path=_frozen_policy_path(tmp_path),
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -651,6 +672,35 @@ def test_walk_forward_factor_selection_records_limitation_without_frozen_policy(
     assert result.recommendations["weight"].eq(0.0).all()
 
 
+def test_predeclared_factor_without_frozen_policy_stays_research_only(tmp_path, monkeypatch):
+    config = RunConfig(
+        output_dir=tmp_path / "outputs",
+        report_dir=tmp_path / "reports",
+        offline_sample=False,
+        stale_after_days=10_000,
+        top_n=5,
+        max_weight=0.2,
+        selected_factor="mom_1m",
+        factor_selection_mode="predeclared",
+        target_aum=100_000,
+        max_adv_participation=0.05,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.load_market_data",
+        lambda _: _live_fixture_market_data(config, subset_run=False, point_in_time=True),
+    )
+
+    result = run_analysis(config)
+
+    assert result.metadata["selected_factor_selection_source"] == "predeclared"
+    assert not result.metadata["selection_policy_frozen_for_live"]
+    assert result.metadata["tradability_requirements"]["factor_selection_policy_available"] is False
+    assert result.metadata["tradability_requirements"]["no_same_sample_factor_selection"] is True
+    assert result.metadata["factor_selection_warning"]
+    _assert_research_only_fail_closed(result, "factor_selection_policy_available")
+    assert "no_same_sample_factor_selection" not in result.metadata["tradability_blockers"]
+
+
 def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path, monkeypatch):
     config = RunConfig(
         output_dir=tmp_path / "outputs",
@@ -661,6 +711,7 @@ def test_current_live_predeclared_exports_recommendations_key_and_sheet(tmp_path
         max_weight=0.2,
         selected_factor="mom_1m",
         factor_selection_mode="predeclared",
+        frozen_policy_path=_frozen_policy_path(tmp_path),
         target_aum=100_000,
         max_adv_participation=0.05,
     )
@@ -953,6 +1004,7 @@ def test_small_user_universe_with_approved_provenance_can_use_tradable_labels(tm
         max_weight=0.2,
         selected_factor="mom_1m",
         factor_selection_mode="predeclared",
+        frozen_policy_path=_frozen_policy_path(tmp_path),
         target_aum=100_000,
         max_adv_participation=0.05,
         universe=["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL"],
@@ -1139,6 +1191,7 @@ def test_current_live_pdf_labels_tradable_output_and_diagnostics(tmp_path, monke
         max_weight=0.2,
         selected_factor="mom_1m",
         factor_selection_mode="predeclared",
+        frozen_policy_path=_frozen_policy_path(tmp_path),
         target_aum=100_000,
         max_adv_participation=0.05,
     )

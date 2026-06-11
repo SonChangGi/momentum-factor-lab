@@ -1091,6 +1091,8 @@ const PERFORMANCE_METRICS = [
 ];
 
 function formatNumberWithDigits(value, digits = 2) {
+  if (value === Infinity) return '∞';
+  if (value === -Infinity) return '-∞';
   if (value === null || value === undefined || Number.isNaN(Number(value)) || !Number.isFinite(Number(value))) return '-';
   return Number(value).toLocaleString('ko-KR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
@@ -1117,10 +1119,10 @@ function returnSeries(points) {
   return returns;
 }
 
-function sampleStd(values) {
+function populationStd(values) {
   if (values.length < 2) return null;
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(Math.max(0, variance));
 }
 
@@ -1153,9 +1155,9 @@ function performanceMetrics(points, period) {
   const last = Number(slice.at(-1).equity);
   const cumulativeReturn = first > 0 ? last / first - 1 : null;
   const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
-  const std = sampleStd(returns);
-  const downside = returns.map((value) => Math.min(0, value));
-  const downsideStd = sampleStd(downside);
+  const std = populationStd(returns);
+  const downside = returns.filter((value) => value < 0);
+  const downsideStd = downside.length >= 2 ? populationStd(downside) : null;
   const annualizedReturn = cumulativeReturn === null || cumulativeReturn <= -1
     ? null
     : ((1 + cumulativeReturn) ** (252 / returns.length) - 1);
@@ -1167,7 +1169,7 @@ function performanceMetrics(points, period) {
     sharpe: std && std > 0 ? (mean / std) * Math.sqrt(252) : null,
     volatility,
     maxDrawdown,
-    sortino: downsideStd && downsideStd > 0 ? (mean / downsideStd) * Math.sqrt(252) : null,
+    sortino: downside.length === 0 && mean > 0 ? Infinity : (downsideStd && downsideStd > 0 ? (mean / downsideStd) * Math.sqrt(252) : null),
     calmar: maxDrawdown < 0 && annualizedReturn !== null ? annualizedReturn / Math.abs(maxDrawdown) : null,
     cvar: cvarFromReturns(returns),
     winRate,
@@ -1347,7 +1349,7 @@ function renderPerformanceMetricsTable(seriesList) {
   const title = document.createElement('h4');
   title.textContent = '기간별 성과 지표 비교';
   const note = document.createElement('p');
-  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 샤프·변동성·소르티노·칼마는 연율화, CVaR은 최악 5% 일간 손실 평균입니다.';
+  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 샤프·변동성·소르티노·칼마는 백엔드와 동일하게 일간 수익률 population 표준편차(ddof=0)로 연율화하며, CVaR은 최악 5% 일간 손실 평균입니다. 1주·1개월 지표는 표본이 짧아 참고용입니다.';
   headingText.append(title, note);
   heading.appendChild(headingText);
   target.appendChild(heading);

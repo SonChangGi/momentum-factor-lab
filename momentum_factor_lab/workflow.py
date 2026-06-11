@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+import signal
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date as date_cls, datetime
 from pathlib import Path
@@ -24,6 +27,14 @@ from .portfolio import (
     recommendation_table,
 )
 from .universe import is_known_etf_symbol, normalize_symbol
+
+
+FROZEN_POLICY_REQUIRED_FIELDS = ("policy_id", "factor_selection_mode", "selected_factor")
+MARKET_CAP_LOOKUP_TIMEOUT_SECONDS = 8.0
+
+
+class _MarketCapLookupTimeout(RuntimeError):
+    """Raised when optional yfinance market-cap enrichment exceeds its budget."""
 
 
 @dataclass(slots=True)
@@ -751,6 +762,84 @@ def _walk_forward_selection_history(backtests: dict[str, BacktestResult], config
     return pd.DataFrame(rows)
 
 
+def _load_frozen_factor_policy(config: RunConfig) -> dict[str, Any]:
+    """Validate the pre-run factor policy artifact used for practical gating.
+
+    A selected factor passed on the CLI/config is useful for research, but a
+    practical recommendation needs evidence that the choice was frozen before
+    the run.  The artifact is intentionally simple JSON and is hashed so the
+    dashboard can show exactly which policy controlled the run.
+    """
+
+    path = config.frozen_policy_path
+    if path is None:
+        return {
+            "available": False,
+            "status": "missing_path",
+            "checks": {
+                "path_provided": False,
+                "file_exists": False,
+                "json_parseable": False,
+                "required_fields_present": False,
+                "mode_matches_config": False,
+                "selected_factor_matches_config": False,
+            },
+            "warning": "사전 고정 팩터 정책 파일이 없어 실전 매매 권고 승격을 막습니다.",
+        }
+
+    policy_path = Path(path)
+    checks: dict[str, bool] = {
+        "path_provided": True,
+        "file_exists": policy_path.exists(),
+        "json_parseable": False,
+        "required_fields_present": False,
+        "mode_matches_config": False,
+        "selected_factor_matches_config": False,
+    }
+    policy: dict[str, Any] = {}
+    sha256: str | None = None
+    if not policy_path.exists():
+        return {
+            "available": False,
+            "status": "missing_file",
+            "path": str(policy_path),
+            "checks": checks,
+            "warning": f"사전 고정 팩터 정책 파일을 찾을 수 없습니다: {policy_path}",
+        }
+    try:
+        raw_bytes = policy_path.read_bytes()
+        sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        loaded = json.loads(raw_bytes.decode("utf-8"))
+        if isinstance(loaded, dict):
+            policy = loaded
+            checks["json_parseable"] = True
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        policy = {}
+    checks["required_fields_present"] = all(str(policy.get(field) or "").strip() for field in FROZEN_POLICY_REQUIRED_FIELDS)
+    checks["mode_matches_config"] = (
+        str(policy.get("factor_selection_mode") or "").strip() == config.effective_factor_selection_mode
+        and config.effective_factor_selection_mode == "predeclared"
+    )
+    checks["selected_factor_matches_config"] = (
+        str(policy.get("selected_factor") or "").strip() == str(config.selected_factor or "").strip()
+    )
+    available = all(checks.values())
+    status = "verified" if available else "invalid"
+    return {
+        "available": available,
+        "status": status,
+        "path": str(policy_path),
+        "sha256": sha256,
+        "policy_id": policy.get("policy_id"),
+        "created_at_utc": policy.get("created_at_utc"),
+        "effective_from": policy.get("effective_from"),
+        "checks": checks,
+        "warning": None
+        if available
+        else "사전 고정 팩터 정책 파일이 설정과 일치하지 않아 실전 매매 권고 승격을 막습니다.",
+    }
+
+
 def _resolve_selected_factor(
     config: RunConfig,
     factor_scores: dict[str, pd.DataFrame],
@@ -1101,7 +1190,21 @@ def _write_market_cap_cache(config: RunConfig, symbol: str, market_cap: float) -
 
 
 def _lookup_yfinance_market_cap(symbol: str) -> float | None:
+    def handle_timeout(_signum: int, _frame: object) -> None:
+        raise _MarketCapLookupTimeout(f"market-cap lookup timed out after {MARKET_CAP_LOOKUP_TIMEOUT_SECONDS:.0f}s")
+
+    timeout_enabled = (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+    old_handler: Any = None
+    old_timer: tuple[float, float] | None = None
     try:
+        if timeout_enabled:
+            old_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, handle_timeout)
+            old_timer = signal.setitimer(signal.ITIMER_REAL, MARKET_CAP_LOOKUP_TIMEOUT_SECONDS)
         import yfinance as yf  # type: ignore
 
         ticker = yf.Ticker(symbol)
@@ -1118,6 +1221,10 @@ def _lookup_yfinance_market_cap(symbol: str) -> float | None:
         market_cap = float(value)
     except Exception:
         return None
+    finally:
+        if timeout_enabled:
+            signal.setitimer(signal.ITIMER_REAL, *(old_timer or (0.0, 0.0)))
+            signal.signal(signal.SIGALRM, old_handler)
     return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
 
 
@@ -1327,10 +1434,13 @@ def _apply_tradability_gate(
     subset_run: bool,
     selection_source: str,
     same_sample_blocked: bool,
+    selection_policy_frozen_for_live: bool,
 ) -> TradabilityAssessment:
     requirements = {
         "fresh_live_data": current_available,
-        "factor_selection_policy_available": selection_source == "predeclared",
+        "factor_selection_policy_available": (
+            selection_source == "predeclared" and selection_policy_frozen_for_live
+        ),
         "no_same_sample_factor_selection": not same_sample_blocked,
         "no_explicit_price_symbol_cap": _has_no_explicit_price_symbol_cap(config, subset_run),
         "complete_requested_price_coverage": _has_complete_requested_price_coverage(market_data),
@@ -1397,6 +1507,8 @@ def run_analysis(config: RunConfig) -> RunResult:
     score_components = _score_factors(metrics)
     validation_selected_factor = str(score_components.index[0])
     selection_history = _walk_forward_selection_history(backtests, config) if config.effective_factor_selection_mode == "walk_forward" else pd.DataFrame()
+    frozen_policy = _load_frozen_factor_policy(config)
+    selection_policy_frozen_for_live = bool(frozen_policy.get("available")) and config.effective_factor_selection_mode == "predeclared"
     selected_factor, selection_source, selected_reason, same_sample_blocked = _resolve_selected_factor(
         config,
         factor_scores,
@@ -1433,6 +1545,7 @@ def run_analysis(config: RunConfig) -> RunResult:
         subset_run,
         selection_source,
         same_sample_blocked,
+        selection_policy_frozen_for_live,
     )
     status = tradability_assessment.status
     if not tradability_assessment.recommendation_output_available:
@@ -1479,13 +1592,23 @@ def run_analysis(config: RunConfig) -> RunResult:
         "selected_factor_selection_window": config.selection_window,
         "selection_window": config.selection_window,
         "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
-        "selection_policy_frozen_for_live": selection_source == "predeclared",
+        "frozen_policy_status": frozen_policy.get("status"),
+        "frozen_policy_id": frozen_policy.get("policy_id"),
+        "frozen_policy_sha256": frozen_policy.get("sha256"),
+        "frozen_policy_created_at_utc": frozen_policy.get("created_at_utc"),
+        "frozen_policy_effective_from": frozen_policy.get("effective_from"),
+        "frozen_policy_checks": frozen_policy.get("checks", {}),
+        "selection_policy_frozen_for_live": selection_policy_frozen_for_live,
         "same_sample_selection_blocked_for_tradable": same_sample_blocked,
         "factor_selection_warning": (
             "Validation-selected factor is a same-run research ranking and is blocked from tradable "
             "recommendation output; explicitly predeclare a selected factor before the run for practical labels."
             if selection_source == "research_validation"
-            else None
+            else (
+                frozen_policy.get("warning")
+                if selection_source == "predeclared" and not selection_policy_frozen_for_live
+                else None
+            )
         ),
         "sensitivity_coverage": sensitivity_coverage,
         "sensitivity_factor_parameter_variant_count": factor_parameter_variants,

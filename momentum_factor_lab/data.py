@@ -230,6 +230,8 @@ DATA_QUALITY_COLUMNS = [
     "data_quality_warning",
 ]
 
+YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
+
 
 def _exclusion_status(reason: object) -> str:
     text = str(reason or "").strip().lower()
@@ -701,7 +703,8 @@ def _download_yfinance_chunk(symbols: list[str], config: RunConfig) -> tuple[pd.
                 auto_adjust=True,
                 group_by="column",
                 progress=False,
-                threads=True,
+                threads=False,
+                timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
             )
             prices, volumes = _extract_yfinance(raw, symbols)
             _write_price_cache(cache_path, prices, volumes, provider="yfinance", symbols=symbols)

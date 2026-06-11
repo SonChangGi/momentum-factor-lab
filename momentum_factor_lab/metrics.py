@@ -33,6 +33,21 @@ def annualized_volatility(returns: pd.Series, periods_per_year: int = TRADING_DA
     return float(returns.std(ddof=0) * np.sqrt(periods_per_year))
 
 
+def conditional_value_at_risk(returns: pd.Series, tail: float = 0.05) -> float:
+    """Average of the worst tail daily returns.
+
+    The dashboard uses the same definition so table values remain consistent
+    with backend exports: sort ascending daily returns, take the worst 5% by
+    default, and report their arithmetic mean.
+    """
+
+    returns = returns.dropna().sort_values()
+    if returns.empty:
+        return 0.0
+    tail_count = max(1, int(np.ceil(len(returns) * tail)))
+    return float(returns.iloc[:tail_count].mean())
+
+
 def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
     returns = returns.dropna()
     if len(returns) < 2:
@@ -84,6 +99,8 @@ def metric_summary(
         "calmar": calmar_ratio(returns),
         "max_drawdown": mdd,
         "mdd": mdd,
+        "cvar_95": conditional_value_at_risk(returns, tail=0.05),
+        "win_rate": float((returns > 0).mean()) if not returns.empty else 0.0,
         "avg_turnover": float(turnover_events.mean()) if not turnover_events.empty else 0.0,
         "total_turnover": total_turnover,
         "turnover_events": float(len(turnover_events)),

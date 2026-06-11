@@ -25,11 +25,11 @@ DASHBOARD_PERIODS: dict[str, int] = {
 }
 
 DASHBOARD_MAX_JSON_BYTES = 5_000_000
-DASHBOARD_PAYLOAD_MAX_BYTES = 4_500_000
-MAX_FACTOR_RANKINGS_PER_PERIOD = 100
-MAX_SCORE_SNAPSHOT_DATES = 35
-MAX_SCORE_SNAPSHOT_SYMBOLS = 50
-MAX_BACKTEST_POINTS = 260
+DASHBOARD_PAYLOAD_MAX_BYTES = 3_800_000
+MAX_FACTOR_RANKINGS_PER_PERIOD = 80
+MAX_SCORE_SNAPSHOT_DATES = 24
+MAX_SCORE_SNAPSHOT_SYMBOLS = 35
+MAX_BACKTEST_POINTS = 220
 
 PERIOD_LABELS: dict[str, str] = {
     "1M": "최근 1개월",
@@ -39,7 +39,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260611-performance-grid-3x2"
+ASSET_VERSION = "20260611-policy-metrics-size"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -1673,6 +1673,8 @@ const PERFORMANCE_METRICS = [
 ];
 
 function formatNumberWithDigits(value, digits = 2) {
+  if (value === Infinity) return '∞';
+  if (value === -Infinity) return '-∞';
   if (value === null || value === undefined || Number.isNaN(Number(value)) || !Number.isFinite(Number(value))) return '-';
   return Number(value).toLocaleString('ko-KR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
@@ -1699,10 +1701,10 @@ function returnSeries(points) {
   return returns;
 }
 
-function sampleStd(values) {
+function populationStd(values) {
   if (values.length < 2) return null;
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1);
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(Math.max(0, variance));
 }
 
@@ -1735,9 +1737,9 @@ function performanceMetrics(points, period) {
   const last = Number(slice.at(-1).equity);
   const cumulativeReturn = first > 0 ? last / first - 1 : null;
   const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
-  const std = sampleStd(returns);
-  const downside = returns.map((value) => Math.min(0, value));
-  const downsideStd = sampleStd(downside);
+  const std = populationStd(returns);
+  const downside = returns.filter((value) => value < 0);
+  const downsideStd = downside.length >= 2 ? populationStd(downside) : null;
   const annualizedReturn = cumulativeReturn === null || cumulativeReturn <= -1
     ? null
     : ((1 + cumulativeReturn) ** (252 / returns.length) - 1);
@@ -1749,7 +1751,7 @@ function performanceMetrics(points, period) {
     sharpe: std && std > 0 ? (mean / std) * Math.sqrt(252) : null,
     volatility,
     maxDrawdown,
-    sortino: downsideStd && downsideStd > 0 ? (mean / downsideStd) * Math.sqrt(252) : null,
+    sortino: downside.length === 0 && mean > 0 ? Infinity : (downsideStd && downsideStd > 0 ? (mean / downsideStd) * Math.sqrt(252) : null),
     calmar: maxDrawdown < 0 && annualizedReturn !== null ? annualizedReturn / Math.abs(maxDrawdown) : null,
     cvar: cvarFromReturns(returns),
     winRate,
@@ -1929,7 +1931,7 @@ function renderPerformanceMetricsTable(seriesList) {
   const title = document.createElement('h4');
   title.textContent = '기간별 성과 지표 비교';
   const note = document.createElement('p');
-  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 샤프·변동성·소르티노·칼마는 연율화, CVaR은 최악 5% 일간 손실 평균입니다.';
+  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 샤프·변동성·소르티노·칼마는 백엔드와 동일하게 일간 수익률 population 표준편차(ddof=0)로 연율화하며, CVaR은 최악 5% 일간 손실 평균입니다. 1주·1개월 지표는 표본이 짧아 참고용입니다.';
   headingText.append(title, note);
   heading.appendChild(headingText);
   target.appendChild(heading);
@@ -2286,6 +2288,12 @@ DASHBOARD_SUMMARY_SAFETY_KEYS: tuple[str, ...] = (
     "same_sample_selection_blocked_for_tradable",
     "factor_selection_warning",
     "selection_policy_frozen_for_live",
+    "frozen_policy_status",
+    "frozen_policy_id",
+    "frozen_policy_sha256",
+    "frozen_policy_created_at_utc",
+    "frozen_policy_effective_from",
+    "frozen_policy_checks",
     "recommendation_weighting_method",
     "recommendation_weight_sum",
     "recommendation_cash_weight",
@@ -2356,8 +2364,6 @@ def _dashboard_factor_selection_policy_available(
     if source == "predeclared" or row_sources == {"predeclared"}:
         return (
             summary.get("selection_policy_frozen_for_live") is True
-            or summary.get("factor_selection_mode") == "predeclared"
-            or source == "predeclared"
         ) and summary.get("same_run_factor_selection_blocked_for_tradable") is not True
     requirements = summary.get("tradability_requirements")
     return bool(isinstance(requirements, dict) and requirements.get("factor_selection_policy_available") is True)
@@ -2487,11 +2493,15 @@ def _sanitize_dashboard_payload_safety(payload: dict[str, Any]) -> dict[str, Any
                 "no_same_sample_factor_selection",
             )
         else:
-            summary["same_run_factor_selection_blocked_for_tradable"] = True
-            summary["same_sample_selection_blocked_for_tradable"] = True
+            summary["same_run_factor_selection_blocked_for_tradable"] = not no_same_sample_selection
+            summary["same_sample_selection_blocked_for_tradable"] = not no_same_sample_selection
             summary["factor_selection_warning"] = (
-                "실전 출력임을 입증하는 안전 메타데이터가 없거나 같은 실행에서 고른 연구용 팩터입니다. "
-                "대시보드는 보수적으로 매매 권고가 아닌 연구용 신호로 처리합니다."
+                "사전 고정 팩터 정책 파일 검증이 없어 실전 매매 권고로 승격하지 않습니다."
+                if no_same_sample_selection
+                else (
+                    "실전 출력임을 입증하는 안전 메타데이터가 없거나 같은 실행에서 고른 연구용 팩터입니다. "
+                    "대시보드는 보수적으로 매매 권고가 아닌 연구용 신호로 처리합니다."
+                )
             )
             if isinstance(summary.get("selected_reason"), str):
                 summary["selected_reason"] = (
@@ -2505,20 +2515,22 @@ def _sanitize_dashboard_payload_safety(payload: dict[str, Any]) -> dict[str, Any
                         "predeclare/freeze the selected factor before the run for practical labels",
                     )
                 )
+            selection_blockers = (
+                ("factor_selection_policy_available",)
+                if no_same_sample_selection
+                else ("factor_selection_policy_available", "no_same_sample_factor_selection")
+            )
             summary["tradability_blockers"] = _append_unique(
                 summary.get("tradability_blockers") or summary.get("fail_closed_reasons"),
-                "factor_selection_policy_available",
-                "no_same_sample_factor_selection",
+                *selection_blockers,
             )
             summary["execution_limitations"] = _append_unique(
                 summary.get("execution_limitations"),
-                "factor_selection_policy_available",
-                "no_same_sample_factor_selection",
+                *selection_blockers,
             )
             summary["fail_closed_reasons"] = _append_unique(
                 summary.get("fail_closed_reasons") or summary.get("tradability_blockers"),
-                "factor_selection_policy_available",
-                "no_same_sample_factor_selection",
+                *selection_blockers,
             )
         requirements = summary.setdefault("tradability_requirements", {})
         if isinstance(requirements, dict):
@@ -2978,7 +2990,10 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
                 ]
             ),
         )
-        return _sanitize_dashboard_payload_safety(dashboard)
+        return _fit_dashboard_payload(
+            _sanitize_dashboard_payload_safety(dashboard),
+            max_bytes=DASHBOARD_PAYLOAD_MAX_BYTES,
+        )
     return _fallback_dashboard_payload(payload, path)
 
 
@@ -3138,6 +3153,15 @@ def _merge_dashboard_history(
 def _compact_historical_run(payload: dict[str, Any]) -> dict[str, Any]:
     """Keep prior runs useful for comparison without shipping every holding row."""
 
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    selected_factor = summary.get("selected_factor")
+    factor_options = [
+        option
+        for option in payload.get("factor_options", [])
+        if isinstance(option, dict) and option.get("factor") == selected_factor
+    ][:1]
+    if not factor_options:
+        factor_options = list(payload.get("factor_options", []))[:1]
     return _json_safe(
         {
             "schema_version": payload.get("schema_version", 1),
@@ -3148,18 +3172,18 @@ def _compact_historical_run(payload: dict[str, Any]) -> dict[str, Any]:
                 "이전 실행은 GitHub Pages 초기 로딩 속도를 위해 상위 보유 행과 최신 출력 행을 제거한 "
                 "요약 이력입니다. 전체 종목/비중 상세는 최신 실행에서 확인하세요."
             ),
-            "summary": payload.get("summary", {}),
+            "summary": summary,
             "periods": payload.get("periods", []),
-            "factor_options": payload.get("factor_options", []),
-            "factor_leaders": list(payload.get("factor_leaders", []))[-120:],
-            "factor_period_rankings": list(payload.get("factor_period_rankings", []))[-120:],
+            "factor_options": factor_options,
+            "factor_leaders": list(payload.get("factor_leaders", []))[-60:],
+            "factor_period_rankings": list(payload.get("factor_period_rankings", []))[-60:],
             "factor_period_matrix": [],
             "holdings": [],
             "factor_score_snapshots": [],
             "scenario_available_dates": [],
             "scenario_available_dates_by_factor": {},
             "factor_backtest_series": [],
-            "benchmark_backtest_series": payload.get("benchmark_backtest_series", []),
+            "benchmark_backtest_series": {},
             "latest_output_rows": [],
             "data_quality_summary": payload.get("data_quality_summary", {}),
             "tradability_gate": payload.get("tradability_gate", []),

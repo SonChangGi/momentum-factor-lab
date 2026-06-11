@@ -1,7 +1,7 @@
 {
   "title": "모멘텀 팩터 데일리 대시보드",
   "site_dir": "docs",
-  "history_limit": 60,
+  "history_limit": 30,
   "run_args": [
     "--live",
     "--start-date",
@@ -36,6 +36,8 @@
     "mom_9_1",
     "--factor-selection-mode",
     "predeclared",
+    "--frozen-policy-path",
+    "configs/factor-selection-policy.mom_9_1.v1.json",
     "--chart-benchmark",
     "^IXIC"
   ]

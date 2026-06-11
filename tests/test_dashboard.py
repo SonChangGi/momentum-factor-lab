@@ -226,8 +226,8 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     css = Path(paths["css"]).read_text(encoding="utf-8")
     js = Path(paths["js"]).read_text(encoding="utf-8")
     assert "모멘텀 팩터 데일리 대시보드" in html
-    assert 'assets/styles.css?v=20260611-performance-grid-3x2' in html
-    assert 'assets/dashboard.js?v=20260611-performance-grid-3x2' in html
+    assert 'assets/styles.css?v=20260611-policy-metrics-size' in html
+    assert 'assets/dashboard.js?v=20260611-policy-metrics-size' in html
     assert "다음 자동 실행 설정을 저장하지 않습니다" in html
     assert "최근 실행 시각" in html
     assert "X축: 날짜" in js
@@ -940,5 +940,9 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "mom_9_1" in config["run_args"]
     assert "--chart-benchmark" in config["run_args"]
     assert "^IXIC" in config["run_args"]
+    assert "--frozen-policy-path" in config["run_args"]
+    policy_index = config["run_args"].index("--frozen-policy-path")
+    assert config["run_args"][policy_index + 1] == "configs/factor-selection-policy.mom_9_1.v1.json"
+    assert config["history_limit"] == 30
     mode_index = config["run_args"].index("--factor-selection-mode")
     assert config["run_args"][mode_index + 1] == "predeclared"
