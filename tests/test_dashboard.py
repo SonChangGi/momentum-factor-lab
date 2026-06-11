@@ -254,8 +254,8 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "칼마 지수" in js
     assert "CVaR(95%)" in js
     assert "최악 5% 일간 손실 평균" in js
-    assert "08:17을 기본 실행 시각" in html
-    assert "이미 실행된 경우" in html
+    assert "08:13부터 10:37까지" in html
+    assert "기대 기준일까지 반영된 경우" in html
     assert "최신 데이터 업데이트 실행" in html
     assert "자동화 실패 시 그 시점의 최신 데이터" in html
     assert "GitHub Actions에서 최신 데이터 업데이트 실행" in html
@@ -914,10 +914,17 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     readme = Path("README.md").read_text(encoding="utf-8")
     config = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
 
-    assert "cron: '17 23 * * *'" in workflow
-    assert "cron: '47 23 * * *'" in workflow
-    assert "cron: '17 0 * * *'" in workflow
-    assert "08:17 KST" in workflow
+    for cron in [
+        "cron: '13 23 * * *'",
+        "cron: '37 23 * * *'",
+        "cron: '7 0 * * *'",
+        "cron: '37 0 * * *'",
+        "cron: '7 1 * * *'",
+        "cron: '37 1 * * *'",
+    ]:
+        assert cron in workflow
+    assert "08:13/08:37 KST" in workflow
+    assert "10:07/10:37 KST" in workflow
     assert "08:00 KST" in workflow
     assert "concurrency:" in workflow
     assert "cancel-in-progress: false" in workflow
@@ -925,8 +932,25 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "dashboard_freshness" in workflow
     assert "continue-on-error: true" in workflow
     assert "Remote branch already has a dashboard execution after 08:00 KST" in workflow
+    assert "dashboard_monotonic" in workflow
+    assert "Push attempt ${attempt} failed" in workflow
     assert "workflow_dispatch:" in workflow
-    assert "23:17 UTC" in readme
+
+    watchdog = Path(".github/workflows/daily-dashboard-watchdog.yml").read_text(encoding="utf-8")
+    assert "Daily Momentum Dashboard Watchdog" in watchdog
+    assert "workflow_dispatch:" in watchdog
+    assert "cron: '11 2 * * *'" in watchdog
+    assert "cron: '41 2 * * *'" in watchdog
+    assert "cron: '11 3 * * *'" in watchdog
+    assert "actions: write" in watchdog
+    assert "dashboard_freshness" in watchdog
+    assert "gh workflow run daily-dashboard.yml" in watchdog
+    assert "steps.freshness.outputs.skip != 'true'" in watchdog
+    assert "daily-dashboard-watchdog.yml" in readme
+    assert "11:11" in readme and "12:11 KST" in readme
+    assert "08:13, 08:37, 09:07, 09:37, 10:07, and" in readme
+    assert "10:37 KST" in readme
+    assert "covers the expected most recent U.S. close date" in readme
     assert "workflow_dispatch" in readme
     assert "최신 데이터 업데이트 실행" in readme
     assert "저장소 쓰기 권한" in readme
@@ -941,6 +965,8 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "--chart-benchmark" in config["run_args"]
     assert "^IXIC" in config["run_args"]
     assert "--frozen-policy-path" in config["run_args"]
+    retry_index = config["run_args"].index("--retry-count")
+    assert config["run_args"][retry_index + 1] == "2"
     policy_index = config["run_args"].index("--frozen-policy-path")
     assert config["run_args"][policy_index + 1] == "configs/factor-selection-policy.mom_9_1.v1.json"
     assert config["history_limit"] == 30

@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions cron is UTC. Avoid :00 because scheduled workflows can be
-    # delayed or dropped during top-of-hour load. 23:17 UTC = 08:17 KST.
-    - cron: '17 23 * * *'
-    # Fallback windows: skip automatically if the dashboard already executed
+    # delayed or dropped during top-of-hour load. Morning KST retry band:
+    # 23:13/23:37 UTC = 08:13/08:37 KST; 00:07/00:37 UTC =
+    # 09:07/09:37 KST; 01:07/01:37 UTC = 10:07/10:37 KST.
+    - cron: '13 23 * * *'
+    - cron: '37 23 * * *'
+    - cron: '7 0 * * *'
+    - cron: '37 0 * * *'
+    - cron: '7 1 * * *'
+    - cron: '37 1 * * *'
+    # Fallback windows skip automatically if the dashboard already executed
     # after 08:00 KST for the current Korean calendar day.
-    - cron: '47 23 * * *'
-    - cron: '17 0 * * *'
 
 concurrency:
   group: daily-momentum-dashboard-${{ github.ref }}
@@ -77,22 +82,29 @@ jobs:
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+          validate_candidate_against_remote() {
             git fetch origin "${GITHUB_REF_NAME}" --depth=1
             remote_dashboard="${RUNNER_TEMP}/remote-dashboard.json"
             if git show "origin/${GITHUB_REF_NAME}:docs/data/dashboard.json" > "${remote_dashboard}" 2>/dev/null; then
-              precommit_freshness="${RUNNER_TEMP}/precommit-freshness.out"
-              python -m momentum_factor_lab.dashboard_freshness \
-                --event-name "${GITHUB_EVENT_NAME}" \
-                --data-path "${remote_dashboard}" > "${precommit_freshness}" || true
-              cat "${precommit_freshness}"
-              if grep -q '^skip=true$' "${precommit_freshness}"; then
-                echo "Remote branch already has a dashboard execution after 08:00 KST; skipping duplicate commit."
-                exit 0
+              if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+                precommit_freshness="${RUNNER_TEMP}/precommit-freshness.out"
+                python -m momentum_factor_lab.dashboard_freshness \
+                  --event-name "${GITHUB_EVENT_NAME}" \
+                  --data-path "${remote_dashboard}" > "${precommit_freshness}" || true
+                cat "${precommit_freshness}"
+                if grep -q '^skip=true$' "${precommit_freshness}"; then
+                  echo "Remote branch already has a dashboard execution after 08:00 KST; skipping duplicate commit."
+                  exit 0
+                fi
               fi
+              python -m momentum_factor_lab.dashboard_monotonic \
+                --baseline "${remote_dashboard}" \
+                --candidate docs/data/dashboard.json
             fi
-          fi
+          }
+          validate_candidate_against_remote
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          validate_candidate_against_remote
           if git diff --quiet -- docs; then
             echo "No dashboard changes to commit."
             exit 0
@@ -113,4 +125,14 @@ jobs:
           EOF
           sed -i 's/^          //' "${commit_message}"
           git commit -F "${commit_message}"
-          git push
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push attempt ${attempt} failed; rebasing on the latest remote branch before retry."
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+            validate_candidate_against_remote
+            sleep $((attempt * 10))
+          done
+          echo "Failed to push dashboard updates after retries." >&2
+          exit 1

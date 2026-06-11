@@ -69,10 +69,15 @@ python -m momentum_factor_lab.cli scheduled-dashboard \
 ```
 
 The committed workflow `.github/workflows/daily-dashboard.yml` has both
-`workflow_dispatch` and scheduled runs. The primary schedule is 23:17 UTC
-(08:17 KST), with 08:47 and 09:17 KST fallback windows that skip automatically
-when the dashboard already executed after 08:00 KST for that Korean calendar
-day. It rebuilds `docs/` so GitHub Pages can serve the latest dashboard.
+`workflow_dispatch` and scheduled runs. To reduce GitHub Actions schedule drops,
+it uses a KST morning retry band at 08:13, 08:37, 09:07, 09:37, 10:07, and
+10:37 KST. Each scheduled retry skips automatically only when the dashboard already
+executed after 08:00 KST for that Korean calendar day and its `data_as_of`
+covers the expected most recent U.S. close date. A lightweight watchdog
+workflow, `.github/workflows/daily-dashboard-watchdog.yml`, runs at 11:11,
+11:41, and 12:11 KST; if the dashboard is still stale, it dispatches the main
+`daily-dashboard.yml` workflow using GitHub's explicit `workflow_dispatch` path.
+The pipeline rebuilds `docs/` so GitHub Pages can serve the latest dashboard.
 Website controls such as recent period, Top-N, selected factor, and max
 position weight are client-side viewing controls; the next scheduled run inputs
 are stored in `.github/momentum-dashboard-config.json`.

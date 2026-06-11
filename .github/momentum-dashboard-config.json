@@ -19,7 +19,7 @@
     "--price-chunk-size",
     "25",
     "--retry-count",
-    "0",
+    "2",
     "--stooq-fallback-limit",
     "250",
     "--finance-datareader-fallback-limit",

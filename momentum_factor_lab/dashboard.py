@@ -74,8 +74,9 @@ HTML_TEMPLATE = """<!doctype html>
       <strong>중요:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
       다음 자동 실행 설정을 저장하지 않습니다. 매일 실행 입력값은 저장소의
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
-      자동 실행은 GitHub Actions 예약 지연을 줄이기 위해 한국시간 08:17을 기본 실행 시각으로 두고,
-      08:47·09:17 보강 실행은 당일 08:00 이후 이미 실행된 경우 자동으로 건너뜁니다.
+      자동 실행은 GitHub Actions 예약 지연을 줄이기 위해 한국시간 08:13부터 10:37까지 여러 번 재시도하고,
+      11:11·11:41·12:11 감시 워크플로는 당일 08:00 이후 실행 기록이 없을 때 main workflow를 다시 호출합니다.
+      당일 08:00 이후 실행됐고 기대 기준일까지 반영된 경우에만 보강 실행을 자동으로 건너뜁니다.
     </section>
 
     <section class="manual-update" aria-label="수동 최신 데이터 업데이트">

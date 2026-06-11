@@ -1,0 +1,64 @@
+name: Daily Momentum Dashboard Watchdog
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub scheduled workflows can be delayed or occasionally dropped.
+    # Watchdog windows run after the main KST morning retry band and dispatch
+    # the daily dashboard workflow if no dashboard execution occurred after
+    # 08:00 KST for the current Korean calendar day.
+    - cron: '11 2 * * *'   # 11:11 KST
+    - cron: '41 2 * * *'   # 11:41 KST
+    - cron: '11 3 * * *'   # 12:11 KST
+
+concurrency:
+  group: daily-momentum-dashboard-watchdog-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch-if-stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Refresh checkout to latest branch head
+        run: |
+          git fetch origin "${DEFAULT_BRANCH:-main}" --depth=1
+          git reset --hard "origin/${DEFAULT_BRANCH:-main}"
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+      - name: Decide whether dashboard is stale
+        id: freshness
+        env:
+          GITHUB_EVENT_NAME: schedule
+        run: |
+          python -m momentum_factor_lab.dashboard_freshness \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --data-path docs/data/dashboard.json >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch daily dashboard workflow
+        if: steps.freshness.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          echo "Dashboard is stale: ${{ steps.freshness.outputs.reason }}"
+          echo "Latest run KST: ${{ steps.freshness.outputs.latest_run_kst }}"
+          echo "Cutoff KST: ${{ steps.freshness.outputs.cutoff_kst }}"
+          gh workflow run daily-dashboard.yml --repo "${GITHUB_REPOSITORY}" --ref "${DEFAULT_BRANCH:-main}"
+
+      - name: Report dashboard already fresh
+        if: steps.freshness.outputs.skip == 'true'
+        run: |
+          echo "${{ steps.freshness.outputs.reason }}"
+          echo "Latest run KST: ${{ steps.freshness.outputs.latest_run_kst }}"
+          echo "Cutoff KST: ${{ steps.freshness.outputs.cutoff_kst }}"
