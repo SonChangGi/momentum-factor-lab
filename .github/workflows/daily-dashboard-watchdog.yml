@@ -39,10 +39,10 @@ jobs:
       - name: Decide whether dashboard is stale
         id: freshness
         env:
-          GITHUB_EVENT_NAME: schedule
+          DASHBOARD_FRESHNESS_EVENT_NAME: schedule
         run: |
           python -m momentum_factor_lab.dashboard_freshness \
-            --event-name "${GITHUB_EVENT_NAME}" \
+            --event-name "${DASHBOARD_FRESHNESS_EVENT_NAME}" \
             --data-path docs/data/dashboard.json >> "$GITHUB_OUTPUT"
 
       - name: Dispatch daily dashboard workflow

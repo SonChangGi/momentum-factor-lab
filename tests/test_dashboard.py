@@ -944,6 +944,9 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "cron: '11 3 * * *'" in watchdog
     assert "actions: write" in watchdog
     assert "dashboard_freshness" in watchdog
+    assert "DASHBOARD_FRESHNESS_EVENT_NAME: schedule" in watchdog
+    assert '--event-name "${DASHBOARD_FRESHNESS_EVENT_NAME}"' in watchdog
+    assert "GITHUB_EVENT_NAME: schedule" not in watchdog
     assert "gh workflow run daily-dashboard.yml" in watchdog
     assert "steps.freshness.outputs.skip != 'true'" in watchdog
     assert "daily-dashboard-watchdog.yml" in readme
