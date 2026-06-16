@@ -1134,7 +1134,7 @@ def _apply_nasdaq_latest_repair(
 
 
 def _stooq_symbol(symbol: str) -> str:
-    return quote(symbol.lower().replace("-", ".") + ".us")
+    return quote(symbol.lower().replace("/", ".").replace("-", ".") + ".us")
 
 
 def _validated_provider_close_volume(
@@ -1367,7 +1367,8 @@ def _fallback_candidate_symbols(
     A yfinance column can exist while still being unusable for the current run
     because it is stale, too short, too sparse, non-positive, anomalous, or lacks
     enough liquidity evidence. Treat those cases like missing symbols so a free
-    Stooq/FDR fallback may improve coverage before the run falls closed.
+    Configured free-provider fallbacks can improve coverage before the run falls closed,
+    while source labels preserve adjusted-close compatibility evidence.
     """
 
     fallback: list[str] = []

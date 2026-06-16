@@ -2,10 +2,11 @@
 
 This catalog is generated from `momentum_factor_lab.factors.FACTOR_SPECS` and documents the live factor library used in reports and JSON/XLSX exports.
 
-- Total factors: **56**
-- Categories: **13**
+- Total factors: **62**
+- Categories: **15**
 - Price notation: `P[t]` is the adjusted close on signal date `t`; `P[t-k]` is the adjusted close `k` trading days earlier; `MA_n` is an `n`-trading-day moving average; rolling windows use trading-day counts.
 - Skip notation: `6m(skip10)` means the return ending 10 trading days before the signal date, reducing short-term reversal/lookahead contamination.
+- Equal-weight universe notation uses the same eligible stock-candidate price panel as a transparent market proxy; it is not an investable benchmark and is used only inside relative factor definitions.
 - All factors are cross-sectional ranking signals for the eligible stock-candidate universe; benchmark ETFs are comparator-only and are excluded from factor ranks and recommendations.
 
 ## Category coverage
@@ -13,16 +14,18 @@ This catalog is generated from `momentum_factor_lab.factors.FACTOR_SPECS` and do
 | Category | Count | Factor names |
 | --- | ---: | --- |
 | acceleration | 6 | `acceleration`, `short_acceleration`, `decay_adjusted`, `accel_1m_vs_3m`, `accel_3m_vs_6m`, `accel_6m_vs_12m` |
+| asymmetry | 1 | `up_down_capture_6m` |
 | breakout | 3 | `breakout_63d`, `breakout_126d`, `breakout_20d` |
 | composite | 1 | `multi_horizon` |
-| cross_sectional | 1 | `relative_strength_6m` |
+| cross_sectional | 3 | `relative_strength_6m`, `residual_12_1`, `excess_ir_6m` |
 | drawdown | 4 | `drawdown_aware`, `high_52w`, `high_26w`, `ulcer_adjusted` |
-| quality | 5 | `consistency`, `persistent_12_1`, `trend_quality`, `price_efficiency`, `smooth_return_6m` |
+| quality | 6 | `consistency`, `persistent_12_1`, `trend_quality`, `price_efficiency`, `smooth_return_6m`, `high_persistence_6m` |
 | range | 2 | `range_position`, `range_position_252d` |
 | recent | 8 | `mom_10d`, `mom_6m_unskipped`, `mom_3m`, `mom_2m`, `mom_2_1`, `mom_6m`, `mom_12m`, `mom_1m` |
 | reversal | 1 | `reversal_adjusted` |
 | risk_adjusted | 8 | `vol_adjusted`, `risk_adjusted`, `downside_risk_adjusted`, `low_vol_momentum`, `stability_adjusted`, `vol_adjusted_3m`, `vol_adjusted_12m`, `downside_adjusted_12m` |
-| robust | 6 | `gap_resistant`, `winsorized_skip`, `median_return_3m`, `median_return_6m`, `winsorized_3m`, `winsorized_12m` |
+| robust | 7 | `gap_resistant`, `winsorized_skip`, `median_return_3m`, `median_return_6m`, `winsorized_3m`, `winsorized_12m`, `jump_excluded_6m` |
+| tail_risk | 1 | `tail_resilient_6m` |
 | traditional | 5 | `mom_12_1`, `mom_9_1`, `mom_6_1`, `mom_12_2`, `mom_3_1` |
 | trend | 6 | `dual_momentum`, `ma_trend`, `time_series_trend`, `ma_slope_50`, `price_vs_ma200`, `ma_stack_quality` |
 
@@ -86,3 +89,9 @@ This catalog is generated from `momentum_factor_lab.factors.FACTOR_SPECS` and do
 | 54 | `accel_6m_vs_12m` | acceleration | `6m momentum - 12m momentum` | Acceleration from twelve-month to six-month leadership. | Manual acceleration fixture tests. |
 | 55 | `ulcer_adjusted` | drawdown | `6m(skip10) / sqrt(mean(drawdown_126^2, 126d))` | Momentum scaled by Ulcer-style drawdown severity. | Drawdown denominator and finite audit. |
 | 56 | `smooth_return_6m` | quality | `6m simple momentum - rolling_std_daily_return_126d` | Six-month return momentum penalized by daily return roughness. | Smoothness edge-case tests. |
+| 57 | `residual_12_1` | cross_sectional | `sum_252(return shifted21) - beta_252_to_equal_weight_market * sum_252(market_return shifted21)` | Twelve-minus-one beta-neutral residual momentum versus the equal-weight candidate-universe proxy. | Rolling beta residual formula, rank-distinctness, and no-lookahead tests. |
+| 58 | `excess_ir_6m` | cross_sectional | `annualized_mean(excess_return_126d) / annualized_tracking_error_126d` | Six-month information-ratio style momentum versus the equal-weight candidate universe. | Tracking-error denominator and no-lookahead tests. |
+| 59 | `up_down_capture_6m` | asymmetry | `mean(return \| market_up,126d) - abs(mean(return \| market_down,126d))` | Rewards stocks that participate on up-market days without giving back as much on down-market days. | Market-up/down conditioning and finite-coverage tests. |
+| 60 | `tail_resilient_6m` | tail_risk | `6m(skip10) + q05(daily_return,126d)` | Six-month skipped momentum penalized by poor left-tail daily returns. | Rolling quantile edge-case and no-lookahead tests. |
+| 61 | `jump_excluded_6m` | robust | `sum_126(daily_return shifted10) - max_126(daily_return shifted10)` | Formation-window momentum that removes the single largest daily jump to reduce one-day gap dominance. | Independent shifted-return and outlier-resistance tests. |
+| 62 | `high_persistence_6m` | quality | `mean_63(I(P >= 0.98*rolling_high_126))` | Fraction of recent days spent near a six-month high, capturing persistent leadership rather than one-day proximity. | Rolling-high persistence and no-lookahead tests. |

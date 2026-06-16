@@ -24,6 +24,7 @@ The practical execution checklist requires live-data freshness, a validated froz
 - Nasdaq latest-close repair runs after Yahoo chart for symbols that still have an existing adjusted-price history but lack the newest trading dates. It fills only missing tail dates after the adjusted-history cutoff, preserves existing adjusted prices, does not replace full histories for symbols with no adjusted history, and is labeled as `nasdaq-latest-close-repair`. The appended tail is Nasdaq close data, so corporate-action-sensitive rows remain source-labeled for review instead of being silently treated as fully adjusted histories.
 - Stooq daily CSV is the next fallback for symbols still missing or unusable after Yahoo chart repair. By default, every remaining missing/unusable symbol is retried; `--stooq-fallback-limit 0` disables this fallback and positive limits are smoke/debug bounds. Stooq fallback rows are labeled separately because close-price/adjustment semantics can differ from yfinance.
 - FinanceDataReader is an optional final fallback for still-missing symbols when installed via the `live` extra. By default, every remaining missing symbol is retried; `--finance-datareader-fallback-limit 0` disables this fallback and positive limits are smoke/debug bounds. FinanceDataReader fallback rows are also labeled separately when used.
+- Finviz is used only as an optional final market-cap metadata fallback for final recommendation/research-signal rows when yfinance market-cap lookup is unavailable. It is labeled as `finviz-snapshot-market-cap`, is non-blocking, and never adds or repairs price history.
 - Source summary sheets include cache, retry, partial-failure, subset-run, and provider notes.
 - `data_quality` exports one row per requested symbol, including source labels, first/last price dates, recent missing-price and missing-volume ratios, non-positive price counts, recent and full-history extreme adjusted daily-return counts, stale-days, exclusion reasons, and pass/fail status. Recommended/research-signal rows inherit these diagnostics; hard price-integrity checks reject hard price-integrity failures, fallback close-price sources, volume/liquidity gaps, and failed capacity checks before any current recommendations can be emitted.
 - The web dashboard also exports aggregate data-quality controls: price coverage, eligible-price ratio, liquidity-eligible ratio, fresh-price ratio, price-source distribution, and per-source success/failure/no-newer health so overall provider reliability is visible rather than inferred from one symbol.
@@ -31,7 +32,7 @@ The practical execution checklist requires live-data freshness, a validated froz
 
 ## Factor library
 
-The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 56 factors; the full formula and definition table is kept in `docs/factor-catalog.md` and exported in the `factor_definitions` report sheet:
+The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 62 factors; the full formula and definition table is kept in `docs/factor-catalog.md` and exported in the `factor_definitions` report sheet:
 
 - traditional skipped return: 12-1, 9-1, 6-1;
 - recent momentum: 12m, 6m, 3m, 2m, 1m, including unskipped and short-skip variants where economically distinct;
@@ -47,13 +48,17 @@ The factor registry is `FactorSpec` based. Each factor has a name, category, for
 - long-horizon persistence;
 - low-vol momentum;
 - relative-strength percentile;
+- residual and information-ratio momentum versus an equal-weight universe proxy;
+- up/down market capture asymmetry;
+- left-tail-resilient momentum;
 - trend quality;
 - gap-resistant clipped-return momentum;
+- single-jump-excluded robust momentum;
 - robust median/winsorized variants;
 - volatility/downside/ulcer-adjusted variants;
 - moving-average slope/stack variants;
 - multiple breakout and acceleration horizons;
-- range-position and path-efficiency quality variants.
+- range-position, high-persistence, and path-efficiency quality variants.
 
 ## Formula validation
 

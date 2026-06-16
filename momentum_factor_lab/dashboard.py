@@ -1219,6 +1219,7 @@ function humanSourceName(value) {
     'stooq-daily-close-fallback': 'Stooq 대체',
     'finance-datareader-close-fallback': 'FinanceDataReader 대체',
     'yfinance-fast-info-market-cap': '시가총액 보강',
+    'finviz-snapshot-market-cap': 'Finviz 시가총액 보강',
     'live-run-summary': '전체 실행 요약',
     'packaged-default-universe': '패키지 유니버스',
   };
@@ -3105,7 +3106,8 @@ def _data_source_health_rows(data_sources: pd.DataFrame) -> list[dict[str, Any]]
         "stooq-daily-close-fallback": 3,
         "finance-datareader-close-fallback": 4,
         "yfinance-fast-info-market-cap": 5,
-        "live-run-summary": 6,
+        "finviz-snapshot-market-cap": 6,
+        "live-run-summary": 7,
     }
     rows: list[dict[str, Any]] = []
     for source, group in data_sources.groupby("source", sort=False):
@@ -3261,6 +3263,8 @@ FACTOR_CATEGORY_DESCRIPTIONS_KO: dict[str, str] = {
     "cross_sectional": "동일 시점 후보군 안에서 상대 순위를 비교하는 횡단면 상대강도 계열입니다.",
     "robust": "극단값 영향을 줄여 과도한 한두 종목 효과를 완화하는 견고화 계열입니다.",
     "range": "최근 가격이 과거 거래 범위 안에서 어디에 위치하는지 보는 범위 위치 계열입니다.",
+    "asymmetry": "상승장 참여도와 하락장 방어력을 함께 보려는 비대칭 참여 계열입니다.",
+    "tail_risk": "좌측 꼬리위험과 급락 민감도를 모멘텀에 반영하는 꼬리위험 보정 계열입니다.",
 }
 
 

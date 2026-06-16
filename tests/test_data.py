@@ -20,6 +20,7 @@ from momentum_factor_lab.data import (
     _finance_datareader_cache_path,
     _nasdaq_cache_path,
     _stooq_cache_path,
+    _stooq_symbol,
     _yahoo_chart_cache_path,
     build_data_quality_frame,
     download_live_data,
@@ -334,6 +335,11 @@ def test_stooq_fallback_records_symbol_provider_and_cache(monkeypatch, tmp_path)
     assert row["source"] == "stooq-daily-close-fallback"
     assert row["status"] == "cache_hit"
     assert row["cache_path"].endswith("cached.csv")
+
+
+def test_stooq_symbol_normalizes_share_class_delimiters():
+    assert _stooq_symbol("BRK/B") == "brk.b.us"
+    assert _stooq_symbol("BF-B") == "bf.b.us"
 
 
 def test_stooq_fallback_defaults_to_all_missing_symbols(monkeypatch, tmp_path):

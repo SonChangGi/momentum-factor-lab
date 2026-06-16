@@ -616,6 +616,7 @@ function humanSourceName(value) {
     'stooq-daily-close-fallback': 'Stooq 대체',
     'finance-datareader-close-fallback': 'FinanceDataReader 대체',
     'yfinance-fast-info-market-cap': '시가총액 보강',
+    'finviz-snapshot-market-cap': 'Finviz 시가총액 보강',
     'live-run-summary': '전체 실행 요약',
     'packaged-default-universe': '패키지 유니버스',
   };

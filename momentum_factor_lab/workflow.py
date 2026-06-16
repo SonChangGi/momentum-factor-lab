@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from html import unescape
 import json
 import math
 import re
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date as date_cls, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
@@ -31,6 +34,7 @@ from .universe import is_known_etf_symbol, normalize_symbol
 
 FROZEN_POLICY_REQUIRED_FIELDS = ("policy_id", "factor_selection_mode", "selected_factor")
 MARKET_CAP_LOOKUP_TIMEOUT_SECONDS = 8.0
+FINVIZ_MARKET_CAP_SOURCE = "finviz-snapshot-market-cap"
 
 
 class _MarketCapLookupTimeout(RuntimeError):
@@ -1152,14 +1156,15 @@ def _recommendation_capacity_warning(row: pd.Series) -> str:
     return "Capacity evidence is incomplete; row is not tradable."
 
 
-def _market_cap_cache_path(config: RunConfig, symbol: str) -> Path:
+def _market_cap_cache_path(config: RunConfig, symbol: str, source: str = "yfinance_fast_info") -> Path:
     safe = normalize_symbol(symbol).replace("/", "_").replace("-", "_")
     as_of = config.effective_end_date
-    return config.cache_dir / "fundamentals" / "yfinance_fast_info_market_cap" / f"{safe}_{as_of}.json"
+    safe_source = re.sub(r"[^a-zA-Z0-9_]+", "_", source).strip("_") or "market_cap"
+    return config.cache_dir / "fundamentals" / f"{safe_source}_market_cap" / f"{safe}_{as_of}.json"
 
 
-def _cached_market_cap(config: RunConfig, symbol: str) -> tuple[float | None, str | None]:
-    path = _market_cap_cache_path(config, symbol)
+def _cached_market_cap(config: RunConfig, symbol: str, source: str = "yfinance_fast_info") -> tuple[float | None, str | None]:
+    path = _market_cap_cache_path(config, symbol, source)
     if not path.exists():
         return None, None
     try:
@@ -1176,15 +1181,15 @@ def _cached_market_cap(config: RunConfig, symbol: str) -> tuple[float | None, st
     return None, None
 
 
-def _write_market_cap_cache(config: RunConfig, symbol: str, market_cap: float) -> str:
-    path = _market_cap_cache_path(config, symbol)
+def _write_market_cap_cache(config: RunConfig, symbol: str, market_cap: float, source: str = "yfinance_fast_info") -> str:
+    path = _market_cap_cache_path(config, symbol, source)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "symbol": normalize_symbol(symbol),
                 "market_cap": float(market_cap),
-                "source": "yfinance_fast_info",
+                "source": source,
                 "as_of": config.effective_end_date,
                 "fetched_at_utc": datetime.now(UTC).isoformat(),
             },
@@ -1232,6 +1237,51 @@ def _lookup_yfinance_market_cap(symbol: str) -> float | None:
             signal.setitimer(signal.ITIMER_REAL, *(old_timer or (0.0, 0.0)))
             signal.signal(signal.SIGALRM, old_handler)
     return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
+
+
+def _parse_compact_market_cap(value: str | None) -> float | None:
+    if value is None:
+        return None
+    text = unescape(str(value)).strip().upper().replace(",", "").replace("$", "")
+    if not text or text in {"-", "N/A", "NA", "NONE"}:
+        return None
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([TMBK]?)", text)
+    if match is None:
+        return None
+    number = float(match.group(1))
+    multiplier = {"T": 1_000_000_000_000.0, "B": 1_000_000_000.0, "M": 1_000_000.0, "K": 1_000.0, "": 1.0}[
+        match.group(2)
+    ]
+    market_cap = number * multiplier
+    return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
+
+
+def _extract_finviz_market_cap(html_text: str) -> float | None:
+    text = re.sub(r"<[^>]+>", "\n", html_text)
+    tokens = [unescape(token).strip() for token in re.split(r"\s*\n+\s*", text) if unescape(token).strip()]
+    for index, token in enumerate(tokens):
+        if token.lower() == "market cap" and index + 1 < len(tokens):
+            market_cap = _parse_compact_market_cap(tokens[index + 1])
+            if market_cap is not None:
+                return market_cap
+    match = re.search(r"Market\s+Cap\s*</[^>]+>\s*<[^>]+>\s*([^<]+)", html_text, flags=re.IGNORECASE)
+    return _parse_compact_market_cap(match.group(1)) if match else None
+
+
+def _lookup_finviz_market_cap(symbol: str) -> float | None:
+    url = f"https://finviz.com/quote.ashx?t={quote(normalize_symbol(symbol))}&p=d"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; momentum-factor-lab/0.1; "
+            "+https://github.com/sonchanggi/momentum-factor-lab)"
+        )
+    }
+    try:
+        with urlopen(Request(url, headers=headers), timeout=MARKET_CAP_LOOKUP_TIMEOUT_SECONDS) as response:
+            html_text = response.read().decode("utf-8", errors="replace")
+    except Exception:  # pragma: no cover - network/provider dependent
+        return None
+    return _extract_finviz_market_cap(html_text)
 
 
 def _attach_recommendation_market_caps(
@@ -1299,9 +1349,10 @@ def _attach_recommendation_market_caps(
             else:
                 error = "market cap unavailable from yfinance fast_info/info"
         mask = frame["symbol"].map(normalize_symbol).eq(symbol)
+        market_cap_source = "yfinance_fast_info" if market_cap is not None else "unavailable"
         if market_cap is not None:
             frame.loc[mask, "market_cap"] = market_cap
-            frame.loc[mask, "market_cap_source"] = "yfinance_fast_info"
+            frame.loc[mask, "market_cap_source"] = market_cap_source
         rows.append(
             {
                 "source": "yfinance-fast-info-market-cap",
@@ -1317,6 +1368,40 @@ def _attach_recommendation_market_caps(
                 "note": "Best-effort current market cap for recommendation weighting; non-blocking.",
             }
         )
+        if market_cap is None:
+            finviz_market_cap, finviz_cache_path = _cached_market_cap(config, symbol, "finviz_snapshot")
+            finviz_status = "cache_hit" if finviz_market_cap is not None else "unavailable"
+            finviz_error = None
+            if finviz_market_cap is None:
+                finviz_market_cap = _lookup_finviz_market_cap(symbol)
+                if finviz_market_cap is not None:
+                    finviz_cache_path = _write_market_cap_cache(
+                        config,
+                        symbol,
+                        finviz_market_cap,
+                        "finviz_snapshot",
+                    )
+                    finviz_status = "fetched"
+                else:
+                    finviz_error = "market cap unavailable from Finviz snapshot"
+            if finviz_market_cap is not None:
+                frame.loc[mask, "market_cap"] = finviz_market_cap
+                frame.loc[mask, "market_cap_source"] = "finviz_snapshot"
+            rows.append(
+                {
+                    "source": FINVIZ_MARKET_CAP_SOURCE,
+                    "symbol": symbol,
+                    "status": finviz_status,
+                    "records": int(finviz_market_cap is not None),
+                    "requested_symbols": symbol,
+                    "returned_symbols": symbol if finviz_market_cap is not None else "",
+                    "missing_symbols": "" if finviz_market_cap is not None else symbol,
+                    "cache_hit": finviz_status == "cache_hit",
+                    "cache_path": finviz_cache_path,
+                    "error": finviz_error,
+                    "note": "Optional Finviz snapshot market cap for recommendation weighting only; non-blocking and not used as price history.",
+                }
+            )
     return frame, pd.DataFrame(rows)
 
 

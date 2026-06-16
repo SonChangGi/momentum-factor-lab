@@ -10,7 +10,15 @@ import pytest
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import MarketData, generate_offline_sample_data
 from momentum_factor_lab.report import _executive_summary_lines, write_pdf, write_reports
-from momentum_factor_lab.workflow import _factor_rank_ic_summary, _factor_redundancy_summary, run_analysis, write_run_results_json
+from momentum_factor_lab.workflow import (
+    _attach_recommendation_market_caps,
+    _extract_finviz_market_cap,
+    _factor_rank_ic_summary,
+    _factor_redundancy_summary,
+    _parse_compact_market_cap,
+    run_analysis,
+    write_run_results_json,
+)
 
 
 LIQUIDITY_CAPACITY_COLUMNS = {
@@ -596,6 +604,42 @@ def test_market_cap_enrichment_does_not_change_price_universe_or_coverage(tmp_pa
     assert int(summary["eligible_price_symbols"]) == eligible_count
     assert "yfinance-fast-info-market-cap" in set(result.data_sources["source"])
     assert result.metadata["current_recommendations_available"]
+
+
+def test_finviz_market_cap_fallback_is_non_price_metadata(tmp_path, monkeypatch):
+    config = RunConfig(cache_dir=tmp_path, output_dir=tmp_path / "outputs", report_dir=tmp_path / "reports")
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    market_data = MarketData(
+        prices=pd.DataFrame({"AAA": [10.0, 11.0, 12.0]}, index=dates),
+        volumes=pd.DataFrame({"AAA": [1_000_000, 1_000_000, 1_000_000]}, index=dates),
+        provider="live-fixture",
+        fetched_at=datetime.now(UTC),
+        as_of=dates[-1],
+        exclusions=pd.DataFrame(),
+        offline_sample=False,
+        candidate_universe=pd.DataFrame({"symbol": ["AAA"]}),
+        eligible_universe=pd.DataFrame({"symbol": ["AAA"]}),
+        price_sources=pd.DataFrame({"symbol": ["AAA"], "price_source": ["yfinance-adjusted-daily"]}),
+        data_sources=pd.DataFrame(),
+    )
+    recommendations = pd.DataFrame({"symbol": ["AAA"], "weight": [1.0]})
+    monkeypatch.setattr("momentum_factor_lab.workflow._lookup_yfinance_market_cap", lambda _: None)
+    monkeypatch.setattr("momentum_factor_lab.workflow._lookup_finviz_market_cap", lambda _: 123_000_000.0)
+
+    enriched, sources = _attach_recommendation_market_caps(recommendations, config, market_data)
+
+    assert enriched.loc[0, "market_cap"] == 123_000_000.0
+    assert enriched.loc[0, "market_cap_source"] == "finviz_snapshot"
+    assert "finviz-snapshot-market-cap" in set(sources["source"])
+    assert set(market_data.prices.columns) == {"AAA"}
+
+
+def test_finviz_market_cap_parser_handles_compact_values():
+    assert _parse_compact_market_cap("4.35T") == pytest.approx(4_350_000_000_000.0)
+    assert _parse_compact_market_cap("987.6M") == pytest.approx(987_600_000.0)
+    assert _parse_compact_market_cap("-") is None
+    html = "<td>Market Cap</td><td>4353.63B</td>"
+    assert _extract_finviz_market_cap(html) == pytest.approx(4_353_630_000_000.0)
 
 
 def test_predeclared_factor_controls_fresh_live_recommendations_not_validation_rank(tmp_path, monkeypatch):

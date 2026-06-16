@@ -232,6 +232,25 @@ def test_every_factor_matches_independent_formula_construction():
     direct_move = simple_momentum(prices, 126).abs()
     ulcer_drawdown = prices.divide(rolling_high126) - 1.0
     ulcer = ulcer_drawdown.pow(2).rolling(126).mean().pow(0.5)
+    market_return = returns.mean(axis=1, skipna=True).where(returns.notna().any(axis=1))
+    stock_return_shifted = returns.shift(21)
+    market_return_shifted = market_return.shift(21)
+    stock_mean = stock_return_shifted.rolling(252).mean()
+    market_mean = market_return_shifted.rolling(252).mean()
+    covariance = (
+        stock_return_shifted.mul(market_return_shifted, axis=0).rolling(252).mean()
+        - stock_mean.mul(market_mean, axis=0)
+    )
+    market_variance = market_return_shifted.pow(2).rolling(252).mean() - market_mean.pow(2)
+    beta = covariance.divide(market_variance.replace(0, np.nan), axis=0)
+    excess = returns.sub(market_return, axis=0)
+    tracking_error = excess.rolling(126).std() * np.sqrt(252)
+    up_mean = returns.where(market_return.gt(0), np.nan, axis=0).rolling(126, min_periods=21).mean()
+    down_mean = returns.where(market_return.lt(0), np.nan, axis=0).rolling(126, min_periods=21).mean()
+    enough_market_history = market_return.rolling(126).count().ge(126)
+    left_tail = returns.rolling(126).quantile(0.05)
+    shifted_returns = returns.shift(10)
+    near_high = prices.ge(rolling_high126 * 0.98).astype(float).where(rolling_high126.notna())
     expected = {
         "mom_12_1": mom_12_1,
         "mom_9_1": mom_9_1,
@@ -314,6 +333,16 @@ def test_every_factor_matches_independent_formula_construction():
         "accel_6m_vs_12m": mom_6m_simple - mom_12m,
         "ulcer_adjusted": total_return_momentum(prices, 126, skip=10).divide(ulcer.replace(0, np.nan)),
         "smooth_return_6m": mom_6m_simple - returns.rolling(126).std(),
+        "residual_12_1": stock_return_shifted.rolling(252).sum()
+        - beta.mul(market_return_shifted.rolling(252).sum(), axis=0),
+        "excess_ir_6m": (excess.rolling(126).mean() * 252).divide(tracking_error.replace(0, np.nan)),
+        "up_down_capture_6m": (up_mean.fillna(0.0) - down_mean.abs().fillna(0.0)).where(
+            enough_market_history,
+            axis=0,
+        ),
+        "tail_resilient_6m": mom_6m_skip10 + left_tail,
+        "jump_excluded_6m": shifted_returns.rolling(126).sum() - shifted_returns.rolling(126).max(),
+        "high_persistence_6m": near_high.rolling(63).mean(),
     }
     scores = compute_factor_scores(prices)
     assert set(expected).issubset(scores)
@@ -338,10 +367,40 @@ def test_new_factor_golden_vectors_and_edge_cases():
 
 
 def test_repaired_factors_are_distinct_and_require_full_history():
-    prices = fixture_prices(columns=3, periods=320)
+    prices = fixture_prices(columns=3, periods=420)
     scores = compute_factor_scores(prices)
 
     assert not scores["mom_6m"].equals(scores["mom_6m_unskipped"])
     assert scores["time_series_trend"].iloc[:199].dropna(how="all").empty
     assert scores["ma_stack_quality"].iloc[:199].dropna(how="all").empty
     assert "persistent_12_1" in scores
+    assert "residual_12_1" in scores
+    assert scores["tail_resilient_6m"].shape == prices.shape
+    assert scores["high_persistence_6m"].dropna(how="all").to_numpy().min() >= 0.0
+    assert scores["high_persistence_6m"].dropna(how="all").to_numpy().max() <= 1.0
+    assert not scores["jump_excluded_6m"].equals(scores["mom_6m"])
+
+
+def test_residual_momentum_changes_cross_sectional_ranks_vs_raw_momentum():
+    dates = pd.bdate_range("2022-01-03", periods=340)
+    market = np.linspace(-0.01, 0.012, len(dates))
+    idiosyncratic_a = np.sin(np.linspace(0, 16, len(dates))) * 0.003 + 0.0005
+    idiosyncratic_b = np.cos(np.linspace(0, 12, len(dates))) * 0.002 - 0.0001
+    idiosyncratic_c = np.linspace(0.0004, -0.0003, len(dates))
+    returns = pd.DataFrame(
+        {
+            "HIGH_BETA": 1.8 * market + idiosyncratic_a,
+            "LOW_BETA": 0.4 * market + idiosyncratic_b,
+            "IDIO": 0.2 * market + idiosyncratic_c,
+            "DEFENSIVE": -0.1 * market + 0.0002,
+        },
+        index=dates,
+    )
+    prices = 100 * (1 + returns).cumprod()
+    scores = compute_factor_scores(prices)
+    signal_date = scores["residual_12_1"].dropna(how="all").index[-1]
+
+    raw_rank = scores["mom_12_1"].loc[signal_date].rank()
+    residual_rank = scores["residual_12_1"].loc[signal_date].rank()
+
+    assert not raw_rank.equals(residual_rank)

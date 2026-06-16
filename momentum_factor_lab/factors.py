@@ -298,6 +298,56 @@ def range_position_252d_momentum(prices: pd.DataFrame) -> pd.DataFrame:
     return total_return_momentum(prices, 252, skip=21) + range_position
 
 
+def equal_weight_market_return(prices: pd.DataFrame) -> pd.Series:
+    returns = prices.pct_change()
+    return returns.mean(axis=1, skipna=True).where(returns.notna().any(axis=1))
+
+
+def residual_twelve_one_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    stock_return = prices.pct_change().shift(21)
+    market_return = equal_weight_market_return(prices).shift(21)
+    stock_mean = stock_return.rolling(252).mean()
+    market_mean = market_return.rolling(252).mean()
+    covariance = stock_return.mul(market_return, axis=0).rolling(252).mean() - stock_mean.mul(market_mean, axis=0)
+    market_variance = market_return.pow(2).rolling(252).mean() - market_mean.pow(2)
+    beta = covariance.divide(market_variance.replace(0, np.nan), axis=0)
+    return stock_return.rolling(252).sum() - beta.mul(market_return.rolling(252).sum(), axis=0)
+
+
+def excess_information_ratio_6m(prices: pd.DataFrame) -> pd.DataFrame:
+    returns = prices.pct_change()
+    excess = returns.sub(equal_weight_market_return(prices), axis=0)
+    mean = excess.rolling(126).mean() * TRADING_DAYS
+    tracking_error = excess.rolling(126).std() * np.sqrt(TRADING_DAYS)
+    return _safe_div(mean, tracking_error)
+
+
+def up_down_capture_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    returns = prices.pct_change()
+    market_return = equal_weight_market_return(prices)
+    up_mean = returns.where(market_return.gt(0), np.nan, axis=0).rolling(126, min_periods=21).mean()
+    down_mean = returns.where(market_return.lt(0), np.nan, axis=0).rolling(126, min_periods=21).mean()
+    enough_market_history = market_return.rolling(126).count().ge(126)
+    return (up_mean.fillna(0.0) - down_mean.abs().fillna(0.0)).where(enough_market_history, axis=0)
+
+
+def tail_resilient_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    returns = prices.pct_change()
+    left_tail = returns.rolling(126).quantile(0.05)
+    return total_return_momentum(prices, 126, skip=10) + left_tail
+
+
+def jump_excluded_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    formation_returns = prices.pct_change().shift(10)
+    return formation_returns.rolling(126).sum() - formation_returns.rolling(126).max()
+
+
+def high_persistence_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    rolling_high = prices.rolling(126).max()
+    near_high = prices.ge(rolling_high * 0.98).astype(float).where(rolling_high.notna())
+    return near_high.rolling(63).mean()
+
+
 FactorFn = Callable[[pd.DataFrame], pd.DataFrame]
 
 
@@ -370,6 +420,12 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         FactorSpec("accel_6m_vs_12m", "acceleration", "6m momentum - 12m momentum", "Acceleration from twelve-month to six-month leadership.", "Manual acceleration fixture tests.", acceleration_6m_vs_12m),
         FactorSpec("ulcer_adjusted", "drawdown", "6m(skip10) / sqrt(mean(drawdown_126^2, 126d))", "Momentum scaled by Ulcer-style drawdown severity.", "Drawdown denominator and finite audit.", ulcer_adjusted_momentum),
         FactorSpec("smooth_return_6m", "quality", "6m simple momentum - rolling_std_daily_return_126d", "Six-month return momentum penalized by daily return roughness.", "Smoothness edge-case tests.", smooth_return_momentum),
+        FactorSpec("residual_12_1", "cross_sectional", "sum_252(return shifted21) - beta_252_to_equal_weight_market * sum_252(market_return shifted21)", "Twelve-minus-one beta-neutral residual momentum versus the equal-weight candidate-universe proxy.", "Rolling beta residual formula, rank-distinctness, and no-lookahead tests.", residual_twelve_one_momentum),
+        FactorSpec("excess_ir_6m", "cross_sectional", "annualized_mean(excess_return_126d) / annualized_tracking_error_126d", "Six-month information-ratio style momentum versus the equal-weight candidate universe.", "Tracking-error denominator and no-lookahead tests.", excess_information_ratio_6m),
+        FactorSpec("up_down_capture_6m", "asymmetry", "mean(return | market_up,126d) - abs(mean(return | market_down,126d))", "Rewards stocks that participate on up-market days without giving back as much on down-market days.", "Market-up/down conditioning and finite-coverage tests.", up_down_capture_momentum),
+        FactorSpec("tail_resilient_6m", "tail_risk", "6m(skip10) + q05(daily_return,126d)", "Six-month skipped momentum penalized by poor left-tail daily returns.", "Rolling quantile edge-case and no-lookahead tests.", tail_resilient_momentum),
+        FactorSpec("jump_excluded_6m", "robust", "sum_126(daily_return shifted10) - max_126(daily_return shifted10)", "Formation-window momentum that removes the single largest daily jump to reduce one-day gap dominance.", "Independent shifted-return and outlier-resistance tests.", jump_excluded_momentum),
+        FactorSpec("high_persistence_6m", "quality", "mean_63(I(P >= 0.98*rolling_high_126))", "Fraction of recent days spent near a six-month high, capturing persistent leadership rather than one-day proximity.", "Rolling-high persistence and no-lookahead tests.", high_persistence_momentum),
     ]
 }
 

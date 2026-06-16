@@ -27,6 +27,7 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "row-level liquidity/capacity" in combined
     assert "`--max-price-symbols` is still available for explicit smoke/debug runs" in readme
     assert "FinanceDataReader fallback" in readme
+    assert "Finviz snapshot market-cap fallback" in readme
     assert "Nasdaq historical latest-close repair" in readme
     assert "per-source success/failure health" in readme
     assert "point-in-time universe evidence" in readme
@@ -42,9 +43,10 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "Nasdaq latest-close repair runs after Yahoo chart" in methodology
     assert "Stooq daily CSV is the next fallback" in methodology
     assert "FinanceDataReader is an optional final fallback" in methodology
+    assert "Finviz is used only as an optional final market-cap metadata fallback" in methodology
     assert "per-source success/failure/no-newer health" in methodology
     assert "docs/factor-catalog.md" in readme
-    assert "Total factors: **56**" in factor_catalog
+    assert f"Total factors: **{len(FACTOR_SPECS)}**" in factor_catalog
     assert "Full factor definitions" in factor_catalog
     assert "US individual stocks" in combined
     assert "ETFs are excluded from candidate holdings" in combined
