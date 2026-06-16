@@ -33,12 +33,12 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "--max-adv-participation" in readme
     assert "--min-liquidity-observations" in readme
     assert "no explicit price-symbol cap" in methodology
-    assert "complete requested price coverage" in methodology
+    assert "complete provider price coverage" in methodology
     assert "hard price-integrity checks" in methodology
     assert "Stooq daily CSV is the first fallback" in methodology
     assert "FinanceDataReader is an optional second fallback" in methodology
     assert "docs/factor-catalog.md" in readme
-    assert "Total factors: **55**" in factor_catalog
+    assert "Total factors: **56**" in factor_catalog
     assert "Full factor definitions" in factor_catalog
     assert "US individual stocks" in combined
     assert "ETFs are excluded from candidate holdings" in combined

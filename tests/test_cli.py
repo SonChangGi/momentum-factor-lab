@@ -169,7 +169,7 @@ def _install_fake_reports(monkeypatch, tmp_path, captured):
                 "provider": "test-provider",
                 "candidate_universe_size": len(config.universe),
                 "eligible_price_universe_size": 3,
-                "factor_count": 55,
+                "factor_count": 56,
                 "factor_validation_status": "pass",
                 "universe_profile": config.universe_profile,
                 "factor_selection_mode": config.effective_factor_selection_mode,

@@ -2,7 +2,7 @@
 
 ## Universe construction
 
-The default candidate universe is packaged as `momentum_factor_lab/resources/default_universe.csv` and contains 2,900+ current US-listed individual stocks. ETFs are excluded from candidate holdings. The seed is built from public listing-style sources and ordered toward large/liquid stocks before broader stocks.
+The default candidate universe is packaged as `momentum_factor_lab/resources/default_universe.csv` and contains 2,800+ current US-listed individual stocks. ETFs, ETNs, exchange-traded debt, commodity/royalty trusts, closed-end style income/term/equity trusts, and listed partnership units are excluded from candidate holdings so the cross-sectional ranks stay closer to ordinary common-stock behavior. The seed is built from public listing-style sources and ordered toward large/liquid stocks before broader stocks.
 
 User-supplied symbol lists are intentionally fail-closed: a symbol-only custom input is not treated as an individual stock unless it resolves to packaged/public stock metadata. Common ETF/ETN/fund tickers and fund-like instrument names are denied, and refresh-mode source rows preserve any Nasdaq Trader ETF flag before combined stock-only filtering.
 
@@ -14,7 +14,7 @@ Runtime separates:
 
 Only eligible stock-candidate symbols can enter factor backtests or model-portfolio output rows. Benchmark ETFs such as SPY may be present in raw price data solely for benchmark-relative metrics and are excluded from factor scores, backtest weights, sensitivity, and recommendations. Current live runs emit the primary `recommendations` output only when all practical tradability requirements pass; otherwise they fail closed into zero-weight `research_signals` with candidate/requested/eligible/exclusion counts, data-quality diagnostics, liquidity evidence, and capacity warnings.
 
-The practical execution checklist requires live-data freshness, a validated frozen factor-selection policy artifact, no explicit price-symbol cap, complete requested price coverage from requested stock-candidate symbols into eligible price symbols, broad or explicitly approved tradable-universe provenance, structured point-in-time universe provenance, row-level data-quality pass, row-level liquidity pass, and row-level capacity pass. By default, `research_validation` selects a factor for research ranking only and is blocked from tradable recommendation output. `--factor-selection-mode predeclared --selected-factor ...` is also blocked from practical labels unless `--frozen-policy-path` points to a JSON policy whose selected factor and mode match the run configuration. Broad packaged/refresh stock universes should meet the configured 2,000-symbol minimum; smaller user-supplied stock universes are tradable only when marked as approved tradable universes and backed by point-in-time provenance. Row-level hard checks reject missing prices, excessive missing prices, non-positive prices, stale prices, insufficient history, below-minimum prices, provider-adjustment-incompatible close-price fallbacks, insufficient liquidity evidence, failed liquidity floors, failed capacity checks, and extreme adjusted daily-return anomalies. Practical PIT provenance should include structured source, as-of date, symbol count, and hash/snapshot evidence, not only a free-text date.
+The practical execution checklist requires live-data freshness, a validated frozen factor-selection policy artifact, no explicit price-symbol cap, complete provider price coverage for the requested stock-candidate symbols, broad or explicitly approved tradable-universe provenance, structured point-in-time universe provenance, row-level data-quality pass, row-level liquidity pass, and row-level capacity pass. Provider coverage is tracked separately from the stricter eligible-price universe: a provider can return a symbol that is later excluded by history, liquidity, freshness, or price-quality gates. By default, `research_validation` selects a factor for research ranking only and is blocked from tradable recommendation output. `--factor-selection-mode predeclared --selected-factor ...` is also blocked from practical labels unless `--frozen-policy-path` points to a JSON policy whose selected factor and mode match the run configuration. Broad packaged/refresh stock universes should meet the configured 2,000-symbol minimum; smaller user-supplied stock universes are tradable only when marked as approved tradable universes and backed by point-in-time provenance. Row-level hard checks reject missing prices, excessive missing prices, non-positive prices, stale prices, insufficient history, below-minimum prices, provider-adjustment-incompatible close-price fallbacks, insufficient liquidity evidence, failed liquidity floors, failed capacity checks, and extreme adjusted daily-return anomalies. Practical PIT provenance should include structured source, as-of date, symbol count, and hash/snapshot evidence, not only a free-text date.
 
 ## Data collection
 
@@ -28,10 +28,10 @@ The practical execution checklist requires live-data freshness, a validated froz
 
 ## Factor library
 
-The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 55 factors; the full formula and definition table is kept in `docs/factor-catalog.md` and exported in the `factor_definitions` report sheet:
+The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 56 factors; the full formula and definition table is kept in `docs/factor-catalog.md` and exported in the `factor_definitions` report sheet:
 
 - traditional skipped return: 12-1, 9-1, 6-1;
-- recent momentum: 3m, 1m;
+- recent momentum: 12m, 6m, 3m, 2m, 1m, including unskipped and short-skip variants where economically distinct;
 - composite multi-horizon;
 - volatility/risk/downside-risk adjusted;
 - dual and moving-average trend;
@@ -41,6 +41,7 @@ The factor registry is `FactorSpec` based. Each factor has a name, category, for
 - reversal-adjusted;
 - acceleration;
 - consistency;
+- long-horizon persistence;
 - low-vol momentum;
 - relative-strength percentile;
 - trend quality;

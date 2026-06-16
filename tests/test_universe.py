@@ -10,6 +10,7 @@ from momentum_factor_lab.universe import (
     is_known_etf_symbol,
     is_supported_symbol,
     load_packaged_universe_frame,
+    normalize_exchange,
     parse_nasdaq_symbol_directory,
     parse_sec_company_tickers_exchange,
     universe_frame_for_symbols,
@@ -36,8 +37,48 @@ def test_raw_packaged_universe_resource_is_stock_only_not_runtime_only():
     assert not raw["is_etf"].astype(bool).any()
     assert set(raw["asset_type"]) == {"stock"}
     assert not raw["name"].map(is_excluded_instrument_name).any()
-    assert {"SPY", "QQQ", "IWM", "XLK", "XLF", "XLV", "PHYS", "PDI", "QQQX"}.isdisjoint(set(raw["symbol"]))
-    assert {"PLTR", "UBER", "SNOW", "BKU", "YOU", "ABR", "AUR"}.issubset(set(raw["symbol"]))
+    assert {
+        "SPY",
+        "QQQ",
+        "IWM",
+        "XLK",
+        "XLF",
+        "XLV",
+        "PHYS",
+        "PDI",
+        "QQQX",
+        "BAR",
+        "ECCU",
+        "MGR",
+        "PMTU",
+        "PMTW",
+        "BSTZ",
+        "BTT",
+        "PBT",
+        "MTR",
+        "SBR",
+        "VVR",
+        "GDV",
+        "RVT",
+        "GAB",
+        "BCAT",
+        "BDJ",
+        "ECAT",
+        "BTX",
+        "BGR",
+        "BLW",
+        "GJR",
+        "MCR",
+        "BST",
+        "BXDC",
+        "ET",
+        "EPD",
+        "BIP",
+        "BEP",
+        "KRP",
+        "DMLP",
+    }.isdisjoint(set(raw["symbol"]))
+    assert {"PLTR", "UBER", "SNOW", "BKU", "YOU", "ABR", "AUR", "EQR"}.issubset(set(raw["symbol"]))
 
 
 def test_sec_company_tickers_exchange_parser():
@@ -45,7 +86,15 @@ def test_sec_company_tickers_exchange_parser():
     frame = parse_sec_company_tickers_exchange(payload)
     assert frame.loc[0, "symbol"] == "ACME"
     assert frame.loc[0, "asset_type"] == "stock"
-    assert frame.loc[0, "exchange"] == "Nasdaq"
+    assert frame.loc[0, "exchange"] == "NASDAQ"
+
+
+def test_exchange_labels_are_normalized_for_reporting():
+    assert normalize_exchange("Nasdaq") == "NASDAQ"
+    assert normalize_exchange("N") == "NYSE"
+    assert normalize_exchange("A") == "NYSE American"
+    assert normalize_exchange("P") == "NYSE Arca"
+    assert normalize_exchange("") == "Unknown"
 
 
 def test_sec_parser_filters_fund_like_instruments_by_name():
@@ -77,19 +126,33 @@ def test_suffix_endings_do_not_drop_common_equities_and_metadata_excludes_deriva
     assert is_excluded_instrument_name("Acme Corp Warrants")
     assert is_excluded_instrument_name("Acme Corp Rights")
     assert is_excluded_instrument_name("Acme Corp Units")
+    assert is_excluded_instrument_name("Acme 7.75% Notes due 2030")
+    assert is_excluded_instrument_name("BlackRock Science & Technology Term Trust")
+    assert is_excluded_instrument_name("BlackRock Science & Technology Trust")
+    assert is_excluded_instrument_name("Permian Basin Royalty Trust")
+    assert is_excluded_instrument_name("Invesco Senior Income Trust Common Stock (DE)")
+    assert is_excluded_instrument_name("Enterprise Products Partners L.P.")
+    assert is_excluded_instrument_name("Energy Transfer LP")
     assert not is_excluded_instrument_name("Preferred Bank")
+    assert not is_excluded_instrument_name("BlackRock, Inc.")
+    assert not is_excluded_instrument_name("Equity Residential Common Shares of Beneficial Interest")
     payload = (
         "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\n"
         "UBER|Uber Technologies Inc. Common Stock|Q|N|N|100|N|N\n"
         "PLTR|Palantir Technologies Inc. Class A Common Stock|Q|N|N|100|N|N\n"
         "DOW|Dow Inc. Common Stock|Q|N|N|100|N|N\n"
+        "EQR|Equity Residential Common Shares of Beneficial Interest|Q|N|N|100|N|N\n"
+        "ECCU|Eagle Point Credit Company 7.75% Notes due 2030|Q|N|N|100|N|N\n"
+        "BAR|GraniteShares Gold Trust Shares of Beneficial Interest|Q|N|N|100|N|N\n"
+        "PBT|PERMIAN BASIN ROYALTY TRUST|Q|N|N|100|N|N\n"
+        "BSTZ|BlackRock Science & Technology Term Trust|Q|N|N|100|N|N\n"
         "ACMEW|Acme Corp Warrants|Q|N|N|100|N|N\n"
         "ACMEU|Acme Corp Units|Q|N|N|100|N|N\n"
         "ACMER|Acme Corp Rights|Q|N|N|100|N|N\n"
         "File Creation Time: today"
     )
     frame = parse_nasdaq_symbol_directory(payload, source_name="fixture")
-    assert set(frame["symbol"]) == {"UBER", "PLTR", "DOW"}
+    assert set(frame["symbol"]) == {"UBER", "PLTR", "DOW", "EQR"}
 
 
 def test_public_universe_refresh_combined_output_is_stock_only(monkeypatch, tmp_path):

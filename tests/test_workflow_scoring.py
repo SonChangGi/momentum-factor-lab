@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 import pandas as pd
 
 from momentum_factor_lab.backtest import BacktestResult
-from momentum_factor_lab.workflow import _percentile, _score_factors
+from momentum_factor_lab.workflow import _has_complete_requested_price_coverage, _percentile, _score_factors
 from momentum_factor_lab.workflow import _metrics_for_backtests
 
 
@@ -55,3 +57,20 @@ def test_metrics_for_backtests_slices_turnover_and_costs_by_return_window():
     validation = robustness[robustness["slice"].eq("validation")].iloc[0]
     assert validation["total_turnover"] == 0.8
     assert validation["total_cost"] == 0.04
+
+
+def test_requested_price_coverage_uses_provider_returns_not_post_filter_eligibility():
+    market_data = SimpleNamespace(
+        data_sources=pd.DataFrame(
+            [
+                {
+                    "source": "live-run-summary",
+                    "requested_price_symbols": 100,
+                    "returned_price_symbols": 100,
+                    "eligible_price_symbols": 24,
+                }
+            ]
+        )
+    )
+
+    assert _has_complete_requested_price_coverage(market_data)

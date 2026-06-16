@@ -202,7 +202,8 @@ def test_every_factor_matches_independent_formula_construction():
     mom_3m = simple_momentum(prices, 63)
     mom_2m = prices.divide(prices.shift(42)) - 1.0
     mom_2_1 = prices.shift(21).divide(prices.shift(63)) - 1.0
-    mom_6m = prices.divide(prices.shift(126)) - 1.0
+    mom_6m_simple = prices.divide(prices.shift(126)) - 1.0
+    mom_6m = prices.shift(10).divide(prices.shift(136)) - 1.0
     mom_12m = prices.divide(prices.shift(252)) - 1.0
     mom_1m = simple_momentum(prices, 21)
     mom_6m_skip10 = prices.shift(10).divide(prices.shift(136)) - 1.0
@@ -215,6 +216,10 @@ def test_every_factor_matches_independent_formula_construction():
     ma100 = prices.rolling(100).mean()
     ma126 = prices.rolling(126).mean()
     ma200 = prices.rolling(200).mean()
+    trend_stack_valid = prices.notna() & ma20.notna() & ma100.notna() & ma200.notna()
+    ma_stack_valid = prices.notna() & ma20.notna() & ma50.notna() & ma100.notna() & ma200.notna()
+    positive = returns.gt(0).astype(float).where(returns.notna())
+    positive_skip21 = returns.shift(21).gt(0).astype(float).where(returns.shift(21).notna())
     rolling_high20 = prices.rolling(20).max()
     rolling_high63 = prices.rolling(63).max()
     rolling_low126 = prices.rolling(126).min()
@@ -255,9 +260,11 @@ def test_every_factor_matches_independent_formula_construction():
             total_return_momentum(prices, 126, skip=10) - (prices.divide(ma200) - 1.0).abs() - 1.0,
         ),
         "ma_trend": prices.divide(ma200) - 1.0 + 0.5 * (ma50.divide(ma200) - 1.0),
-        "time_series_trend": (prices > ma20).astype(float)
-        + (ma20 > ma100).astype(float)
-        + (ma100 > ma200).astype(float),
+        "time_series_trend": (
+            (prices > ma20).astype(float).where(trend_stack_valid)
+            + (ma20 > ma100).astype(float).where(trend_stack_valid)
+            + (ma100 > ma200).astype(float).where(trend_stack_valid)
+        ),
         "drawdown_aware": total_return_momentum(prices, 126, skip=10)
         + prices.divide(rolling_high126)
         - 1.0,
@@ -269,7 +276,8 @@ def test_every_factor_matches_independent_formula_construction():
         "acceleration": mom_3m - 0.5 * mom_6_1,
         "short_acceleration": mom_1m - 0.5 * mom_3m,
         "decay_adjusted": mom_6m_skip10 - 0.25 * mom_1m.abs(),
-        "consistency": total_return_momentum(prices, 126, skip=10) * returns.gt(0).rolling(126).mean(),
+        "consistency": total_return_momentum(prices, 126, skip=10) * positive.rolling(126).mean(),
+        "persistent_12_1": mom_12_1 * positive_skip21.rolling(252, min_periods=252).mean(),
         "low_vol_momentum": total_return_momentum(prices, 126, skip=10) - vol63,
         "stability_adjusted": mom_6m_skip10.divide((1.0 + vol126).replace(0, np.nan)),
         "relative_strength_6m": total_return_momentum(prices, 126, skip=10).rank(axis=1, pct=True),
@@ -294,16 +302,18 @@ def test_every_factor_matches_independent_formula_construction():
         "downside_adjusted_12m": mom_12_1.divide((returns.where(returns < 0, 0.0).rolling(252).std() * np.sqrt(252)).replace(0, np.nan)),
         "ma_slope_50": ma50.divide(ma50.shift(21)) - 1.0,
         "price_vs_ma200": prices.divide(ma200) - 1.0,
-        "ma_stack_quality": (prices > ma20).astype(float)
-        + (ma20 > ma50).astype(float)
-        + (ma50 > ma100).astype(float)
-        + (ma100 > ma200).astype(float),
+        "ma_stack_quality": (
+            (prices > ma20).astype(float).where(ma_stack_valid)
+            + (ma20 > ma50).astype(float).where(ma_stack_valid)
+            + (ma50 > ma100).astype(float).where(ma_stack_valid)
+            + (ma100 > ma200).astype(float).where(ma_stack_valid)
+        ),
         "breakout_20d": prices.divide(rolling_high20) - 1.0 + 0.5 * mom_10d,
         "accel_1m_vs_3m": mom_1m - mom_3m,
-        "accel_3m_vs_6m": mom_3m - mom_6m,
-        "accel_6m_vs_12m": mom_6m - mom_12m,
+        "accel_3m_vs_6m": mom_3m - mom_6m_simple,
+        "accel_6m_vs_12m": mom_6m_simple - mom_12m,
         "ulcer_adjusted": total_return_momentum(prices, 126, skip=10).divide(ulcer.replace(0, np.nan)),
-        "smooth_return_6m": mom_6m - returns.rolling(126).std(),
+        "smooth_return_6m": mom_6m_simple - returns.rolling(126).std(),
     }
     scores = compute_factor_scores(prices)
     assert set(expected).issubset(scores)
@@ -325,3 +335,13 @@ def test_new_factor_golden_vectors_and_edge_cases():
     assert np.isfinite(scores["ma_stack_quality"].dropna().to_numpy()).all()
     assert scores["winsorized_3m"].shape == prices.shape
     assert scores["vol_adjusted_3m"]["CONST"].dropna().empty
+
+
+def test_repaired_factors_are_distinct_and_require_full_history():
+    prices = fixture_prices(columns=3, periods=320)
+    scores = compute_factor_scores(prices)
+
+    assert not scores["mom_6m"].equals(scores["mom_6m_unskipped"])
+    assert scores["time_series_trend"].iloc[:199].dropna(how="all").empty
+    assert scores["ma_stack_quality"].iloc[:199].dropna(how="all").empty
+    assert "persistent_12_1" in scores

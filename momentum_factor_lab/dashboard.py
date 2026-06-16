@@ -2612,7 +2612,7 @@ GATE_LABELS_KO: dict[str, tuple[str, str]] = {
     "factor_selection_policy_available": ("사전 고정된 팩터 선택 정책", "같은 실행의 검증/연구 순위로 고른 팩터를 매매 권고로 쓰지 않도록 막습니다."),
     "no_same_sample_factor_selection": ("동일 표본 팩터 선택 차단", "같은 실행·같은 표본에서 고른 연구용 팩터가 실전 추천으로 승격되지 않았는지 확인합니다."),
     "no_explicit_price_symbol_cap": ("가격 수집 범위 제한 없음", "디버그용 종목 수 제한이 걸린 실행인지 확인합니다."),
-    "complete_requested_price_coverage": ("요청 종목 가격 커버리지", "요청한 후보 종목이 가격/이력 조건을 충분히 통과했는지 확인합니다."),
+    "complete_requested_price_coverage": ("요청 종목 가격 수신", "요청한 후보 종목의 가격이 공급자에서 실제로 수신됐는지 확인합니다. 이후 이력·유동성·품질 필터는 별도 게이트에서 점검합니다."),
     "broad_or_approved_tradable_universe": ("거래 가능 유니버스 근거", "충분히 넓거나 사용자가 승인한 거래 가능 후보군인지 확인합니다."),
     "point_in_time_universe": ("시점 기준 유니버스 근거", "생존편향을 줄이기 위한 시점 기준 유니버스 증거가 있는지 확인합니다."),
     "data_quality_manifest_available": ("데이터 품질 명세", "종목별 데이터 품질 진단표가 생성됐는지 확인합니다."),

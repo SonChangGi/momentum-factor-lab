@@ -22,6 +22,10 @@ def _weighted_sum(parts: list[pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
+def _true_indicator(condition: pd.DataFrame, valid: pd.DataFrame) -> pd.DataFrame:
+    return condition.astype(float).where(valid)
+
+
 def total_return_momentum(prices: pd.DataFrame, lookback: int, skip: int = 21) -> pd.DataFrame:
     return prices.shift(skip).divide(prices.shift(lookback + skip)) - 1.0
 
@@ -40,6 +44,10 @@ def skipped_two_month_momentum(prices: pd.DataFrame) -> pd.DataFrame:
 
 def unskipped_six_month_momentum(prices: pd.DataFrame) -> pd.DataFrame:
     return simple_momentum(prices, 126)
+
+
+def skipped_ten_day_six_month_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    return total_return_momentum(prices, 126, skip=10)
 
 
 def deep_skip_twelve_month_momentum(prices: pd.DataFrame) -> pd.DataFrame:
@@ -92,7 +100,12 @@ def time_series_trend(prices: pd.DataFrame) -> pd.DataFrame:
     ma20 = prices.rolling(20).mean()
     ma100 = prices.rolling(100).mean()
     ma200 = prices.rolling(200).mean()
-    return (prices > ma20).astype(float) + (ma20 > ma100).astype(float) + (ma100 > ma200).astype(float)
+    valid = prices.notna() & ma20.notna() & ma100.notna() & ma200.notna()
+    return (
+        _true_indicator(prices > ma20, valid)
+        + _true_indicator(ma20 > ma100, valid)
+        + _true_indicator(ma100 > ma200, valid)
+    )
 
 
 def drawdown_aware_momentum(prices: pd.DataFrame) -> pd.DataFrame:
@@ -140,8 +153,16 @@ def decay_adjusted_momentum(prices: pd.DataFrame) -> pd.DataFrame:
 
 def consistency_momentum(prices: pd.DataFrame) -> pd.DataFrame:
     returns = prices.pct_change()
-    positive_ratio = returns.gt(0).rolling(126).mean()
+    positive = returns.gt(0).astype(float).where(returns.notna())
+    positive_ratio = positive.rolling(126).mean()
     return total_return_momentum(prices, 126, skip=10) * positive_ratio
+
+
+def persistent_twelve_one_momentum(prices: pd.DataFrame) -> pd.DataFrame:
+    returns = prices.pct_change().shift(21)
+    positive = returns.gt(0).astype(float).where(returns.notna())
+    positive_ratio = positive.rolling(252, min_periods=252).mean()
+    return total_return_momentum(prices, 252, skip=21) * positive_ratio
 
 
 def low_vol_momentum(prices: pd.DataFrame) -> pd.DataFrame:
@@ -231,7 +252,13 @@ def moving_average_stack_quality(prices: pd.DataFrame) -> pd.DataFrame:
     ma50 = prices.rolling(50).mean()
     ma100 = prices.rolling(100).mean()
     ma200 = prices.rolling(200).mean()
-    return (prices > ma20).astype(float) + (ma20 > ma50).astype(float) + (ma50 > ma100).astype(float) + (ma100 > ma200).astype(float)
+    valid = prices.notna() & ma20.notna() & ma50.notna() & ma100.notna() & ma200.notna()
+    return (
+        _true_indicator(prices > ma20, valid)
+        + _true_indicator(ma20 > ma50, valid)
+        + _true_indicator(ma50 > ma100, valid)
+        + _true_indicator(ma100 > ma200, valid)
+    )
 
 
 def breakout_proximity(prices: pd.DataFrame, high_window: int, confirmation_window: int) -> pd.DataFrame:
@@ -297,7 +324,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         FactorSpec("mom_3m", "recent", "P[t] / P[t-63] - 1", "Three-month recent momentum without skip month.", "Simple-return fixture tests.", lambda p: simple_momentum(p, 63)),
         FactorSpec("mom_2m", "recent", "P[t] / P[t-42] - 1", "Two-month short-horizon momentum for fast leadership changes.", "Independent raw-shift golden tests.", two_month_momentum),
         FactorSpec("mom_2_1", "recent", "P[t-21] / P[t-63] - 1", "Two-month momentum that skips the most recent month.", "Independent raw-shift golden tests.", skipped_two_month_momentum),
-        FactorSpec("mom_6m", "recent", "P[t] / P[t-126] - 1", "Six-month simple momentum without skip month.", "Independent simple-return and no-lookahead tests.", lambda p: simple_momentum(p, 126)),
+        FactorSpec("mom_6m", "recent", "P[t-10] / P[t-136] - 1", "Six-month momentum ending ten trading days before the signal date to avoid very recent reversal noise.", "Independent shifted-return and no-lookahead tests; intentionally distinct from mom_6m_unskipped.", skipped_ten_day_six_month_momentum),
         FactorSpec("mom_12m", "recent", "P[t] / P[t-252] - 1", "Twelve-month simple momentum without skip month.", "Independent simple-return and no-lookahead tests.", lambda p: simple_momentum(p, 252)),
         FactorSpec("mom_1m", "recent", "P[t] / P[t-21] - 1", "One-month short-horizon momentum.", "Simple-return fixture tests.", lambda p: simple_momentum(p, 21)),
         FactorSpec("multi_horizon", "composite", "0.15*1m + 0.25*3m(skip5) + 0.30*6m(skip10) + 0.30*12m(skip21)", "Weighted 1/3/6/12-month multi-horizon momentum composite.", "Component helper tests plus output audit.", multi_horizon_momentum),
@@ -317,6 +344,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         FactorSpec("short_acceleration", "acceleration", "1m momentum - 0.5*3m momentum", "Short-horizon acceleration signal for very recent leadership surges.", "Independent raw-shift golden tests.", short_acceleration_momentum),
         FactorSpec("decay_adjusted", "acceleration", "6m(skip10) - 0.25*abs(1m momentum)", "Six-month momentum penalized when very recent moves look overextended.", "Independent raw-shift golden tests.", decay_adjusted_momentum),
         FactorSpec("consistency", "quality", "6m(skip10) * rolling_positive_return_ratio_126d", "Rewards momentum earned consistently across days.", "Positive-ratio fixture tests.", consistency_momentum),
+        FactorSpec("persistent_12_1", "quality", "12m(skip21) * positive_daily_return_ratio_252d(skip21)", "Long-horizon skipped momentum scaled by the share of positive daily returns in the skipped formation window.", "Positive-ratio and no-lookahead tests.", persistent_twelve_one_momentum),
         FactorSpec("low_vol_momentum", "risk_adjusted", "6m(skip10) - annualized_vol_63d", "Momentum penalized by high recent volatility.", "Low-vol ranking fixture tests.", low_vol_momentum),
         FactorSpec("stability_adjusted", "risk_adjusted", "6m(skip10) / (1 + annualized_vol_126d)", "Six-month momentum damped by one-year realized volatility from price returns.", "Independent volatility golden tests.", stability_adjusted_momentum),
         FactorSpec("relative_strength_6m", "cross_sectional", "cross-sectional percentile_rank(6m(skip10))", "Six-month relative-strength percentile within the eligible universe.", "Cross-sectional rank audit.", relative_strength_6m),

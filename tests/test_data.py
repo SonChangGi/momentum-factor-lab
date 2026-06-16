@@ -518,6 +518,7 @@ def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeyp
     assert {"YF", "STQ", "FDRX"}.issubset(set(result.prices.columns))
     summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
     assert int(summary["requested_price_symbols"]) == 3
+    assert int(summary["returned_price_symbols"]) == 3
     assert int(summary["eligible_price_symbols"]) == 3
     assert int(summary["liquidity_eligible_symbols"]) == 3
 
@@ -568,6 +569,7 @@ def test_live_download_attempts_free_fallback_when_yfinance_unavailable(monkeypa
     assert yf_row["status"] == "unavailable"
     assert "stooq-daily-close-fallback" in set(result.data_sources["source"])
     summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
+    assert int(summary["returned_price_symbols"]) == 1
     assert int(summary["eligible_price_symbols"]) == 1
 
 

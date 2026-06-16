@@ -58,6 +58,7 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         "records",
         "candidate_symbols",
         "requested_price_symbols",
+        "returned_price_symbols",
         "eligible_price_symbols",
         "liquidity_eligible_symbols",
         "excluded_symbols",
@@ -514,6 +515,7 @@ def generate_offline_sample_data(config: RunConfig) -> MarketData:
                         "records": len(symbols),
                         "candidate_symbols": len(candidate),
                         "requested_price_symbols": len(eligible_symbols),
+                        "returned_price_symbols": len(eligible_symbols),
                         "eligible_price_symbols": len(eligible_symbols),
                         "requested_download_symbols": len(symbols),
                         "requested_symbols": ",".join(symbols),
@@ -1325,6 +1327,7 @@ def download_live_data(config: RunConfig) -> MarketData:
     )
     provider = _provider_label_from_sources(stooq_sources, finance_datareader_sources, yf_sources)
     returned_symbols = [symbol for symbol in symbols if symbol in downloaded_prices.columns]
+    returned_candidate_symbols = [symbol for symbol in requested_candidate_symbols if symbol in downloaded_prices.columns]
     missing_symbols = [symbol for symbol in symbols if symbol not in downloaded_prices.columns]
     summary = _source_frame(
         [
@@ -1334,6 +1337,7 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "records": len(prices.columns),
                 "candidate_symbols": len(candidate),
                 "requested_price_symbols": len(requested_candidate_symbols),
+                "returned_price_symbols": len(returned_candidate_symbols),
                 "eligible_price_symbols": len(eligible),
                 "liquidity_eligible_symbols": liquidity_eligible_symbols,
                 "requested_download_symbols": len(symbols),

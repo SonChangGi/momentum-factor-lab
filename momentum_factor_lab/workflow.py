@@ -1088,10 +1088,16 @@ def _has_complete_requested_price_coverage(market_data: MarketData) -> bool:
         return False
     latest = summary.iloc[-1]
     requested = latest.get("requested_price_symbols")
-    eligible = latest.get("eligible_price_symbols")
-    if pd.isna(requested) or pd.isna(eligible):
+    returned = latest.get("returned_price_symbols")
+    if pd.isna(returned):
+        returned_symbols = latest.get("returned_symbols")
+        if isinstance(returned_symbols, str) and returned_symbols.strip():
+            returned = len([symbol for symbol in returned_symbols.split(",") if symbol.strip()])
+        else:
+            returned = latest.get("eligible_price_symbols")
+    if pd.isna(requested) or pd.isna(returned):
         return False
-    return int(eligible) >= int(requested)
+    return int(returned) >= int(requested)
 
 
 def _recommendation_liquidity_status(row: pd.Series, config: RunConfig) -> str:

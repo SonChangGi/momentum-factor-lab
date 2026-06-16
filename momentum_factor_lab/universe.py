@@ -172,8 +172,32 @@ NON_STOCK_INSTRUMENT_PATTERNS = (
     r"\bSPROTT PHYSICAL\b",
     r"\bTREASURY\b",
     r"\bBOND\b",
+    r"\bNOTES?\b",
+    r"\bDEBENTURES?\b",
+    r"\bDUE\s+20\d{2}\b",
     r"\bCOMMODIT(Y|IES)\b",
     r"\bCURRENCY\b",
+    r"\b(GOLD|SILVER|PLATINUM|PALLADIUM)\s+TRUST\b",
+    r"\bTRUST\s+SHARES?\b",
+    r"\bROYALTY\s+TRUST\b",
+    r"\bTERM\s+TRUST\b",
+    r"\bTARGET\s+TERM\s+TRUST\b",
+    r"\bMUNICIPAL\s+\d{4}\s+TARGET\s+TERM\s+TRUST\b",
+    r"\bDIVIDEND\s+AND\s+INCOME\s+TRUST\b",
+    r"\bEQUITY\s+TRUST\b",
+    r"\bENHANCED\s+EQUITY\s+DIVIDEND\s+TRUST\b",
+    r"\bSENIOR\s+INCOME\s+TRUST\b",
+    r"\bCHARTER\s+INCOME\s+TRUST\b",
+    r"\bLIMITED\s+DURATION\s+INCOME\s+TRUST\b",
+    r"\bENERGY\s+AND\s+RESOURCES\s+TRUST\b",
+    r"\bSMALL[- ]CAP\s+TRUST\b",
+    r"\bBLACKROCK\b.*\bTRUST\b",
+    r"\bBLACKSTONE\s+DIGITAL\s+INFRASTRUCTURE\s+TRUST\b",
+    r"\bSTRATS\s+TRUST\b",
+    r"\bSYNTHETIC\s+FIXED[- ]INCOME\b",
+    r"\bL\.P\.",
+    r"\bLP\b",
+    r"\bLIMITED\s+PARTNERSHIP\b",
     r"\bWARRANTS?\b",
     r"\bRIGHTS?\b",
     r"\bUNITS?\b",
@@ -181,6 +205,29 @@ NON_STOCK_INSTRUMENT_PATTERNS = (
     r"\bPREFERENCE\s+(STOCK|SHARES?|SECURIT(Y|IES))\b",
     r"\bDEPOSITARY SHARES\b",
 )
+
+EXCHANGE_ALIASES = {
+    "NASDAQ": "NASDAQ",
+    "NASDAQ GLOBAL SELECT MARKET": "NASDAQ",
+    "NASDAQ GLOBAL MARKET": "NASDAQ",
+    "NASDAQ CAPITAL MARKET": "NASDAQ",
+    "NYSE": "NYSE",
+    "NEW YORK STOCK EXCHANGE": "NYSE",
+    "N": "NYSE",
+    "NYSE AMERICAN": "NYSE American",
+    "NYSE MKT": "NYSE American",
+    "A": "NYSE American",
+    "NYSE ARCA": "NYSE Arca",
+    "P": "NYSE Arca",
+    "CBOE": "Cboe",
+    "CBOE BZX": "Cboe BZX",
+    "Z": "Cboe BZX",
+    "IEX": "IEX",
+    "V": "IEX",
+    "OTC": "OTC",
+    "OTCQX": "OTC",
+    "OTCQB": "OTC",
+}
 
 
 def is_supported_symbol(symbol: str) -> bool:
@@ -204,6 +251,15 @@ def is_excluded_instrument_name(name: object) -> bool:
     if " DAILY " in upper and (" LONG " in upper or " SHORT " in upper):
         return True
     return False
+
+
+def normalize_exchange(exchange: object) -> str:
+    if pd.isna(exchange):
+        return "Unknown"
+    cleaned = re.sub(r"\s+", " ", str(exchange or "").strip())
+    if not cleaned:
+        return "Unknown"
+    return EXCHANGE_ALIASES.get(cleaned.upper(), cleaned)
 
 
 def normalize_symbols(symbols: list[str] | tuple[str, ...] | str | None) -> list[str]:
@@ -235,6 +291,7 @@ def _normalize_frame(
         if col not in out:
             out[col] = ""
     out["symbol"] = out["symbol"].map(normalize_symbol)
+    out["exchange"] = out["exchange"].map(normalize_exchange)
     out = out[out["symbol"].map(is_supported_symbol)]
     if exclude_by_name:
         out = out[~out["name"].map(is_excluded_instrument_name)]
