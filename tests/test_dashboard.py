@@ -45,6 +45,8 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert {"date", "window", "factors", "returns"}.issubset(payload["factor_period_matrix"][0])
     assert payload["factor_score_snapshots"]
     assert {"date", "factor", "score_date", "rows"}.issubset(payload["factor_score_snapshots"][0])
+    assert payload["factor_weight_snapshots"]
+    assert {"date", "window", "factor", "weight_date", "rows"}.issubset(payload["factor_weight_snapshots"][0])
     assert payload["factor_backtest_series"]
     assert {"factor", "dates", "equity", "drawdown"}.issubset(payload["factor_backtest_series"][0])
     assert payload["benchmark_backtest_series"]["symbol"] == "^IXIC"
@@ -326,7 +328,7 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "팩터 수익률 막대 차트" in html
     assert "선택 팩터와 기간 최고 팩터 누적 성과 비교" in html
     assert "상위 N개 모형 비중 시각화" in html
-    assert "상위 10개 팩터 동일가중 합산" in html
+    assert "상위 10개 팩터 동일비중 합산" in html
     assert "기존 결과물 기준 · 해당 날짜 최고 팩터 추천/연구 신호" in html
     assert "기준 팩터" in html
     assert "데이터 품질 · 유동성 · 매매 가능성 게이트" in html
@@ -337,7 +339,7 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "최신 출력" in html
     assert "매일 실행 입력값" in html
     assert "팩터 점수가 높은 종목에 더 큰 비중" in html
-    assert "동일가중" in html
+    assert "동일비중" in html
     assert "Top-N" not in html
     assert 'id="factor-select"' in html
     assert 'id="max-weight-input"' in html
@@ -457,8 +459,13 @@ const run = {{
     {{ date: '2026-01-10', factor: 'best_factor', score_date: '2026-01-10', rows: [['AAA', 9], ['BBB', 8]] }},
     {{ date: '2026-01-10', factor: 'second_factor', score_date: '2026-01-10', rows: [['BBB', 7], ['CCC', 6]] }},
   ],
+  factor_weight_snapshots: [
+    {{ date: '2026-01-10', window: '1M', factor: 'best_factor', weight_date: '2026-01-10', rows: [['AAA', 0.9, 9], ['BBB', 0.1, 8]] }},
+    {{ date: '2026-01-10', window: '1M', factor: 'second_factor', weight_date: '2026-01-10', rows: [['CCC', 0.9, 6], ['BBB', 0.1, 7]] }},
+  ],
 }};
-const ensemble = topFactorEnsembleAllocation(run, '2026-01-10', '1M', 2, 10);
+const ensemble = topFactorEnsembleAllocation(run, '2026-01-10', '1M', 3, 0.5, 10);
+const cappedEnsemble = topFactorEnsembleAllocation(run, '2026-01-10', '1M', 3, 0.3, 10);
 const bestRows = bestFactorSignalRows(run, '2026-01-10', '1M', 2, 0.5);
 let equity = 1;
 const perfPoints = Array.from({{ length: 45 }}, (_, index) => {{
@@ -478,9 +485,11 @@ if (Math.abs(b.cashTotal - 0.20) > 1e-12) throw new Error('factor B cash failed'
 if (!(c.weighted[0].display_weight > 0.39 && c.weighted[0].display_weight < 0.41)) throw new Error('score-proportional weight failed');
 if (!(c.weighted[0].display_weight > c.weighted[1].display_weight && c.weighted[1].display_weight > c.weighted[2].display_weight)) throw new Error('score ordering was not reflected in weights');
 if (!(d.weighted[0].display_weight > d.weighted[1].display_weight && d.weighted[1].display_weight > d.weighted[2].display_weight)) throw new Error('mixed sign score ordering was not reflected in weights');
-if (ensemble.weighted[0].symbol !== 'BBB') throw new Error('top-factor equal sleeve aggregation failed');
-if (Math.abs(ensemble.weighted[0].display_weight - 0.5) > 1e-12) throw new Error('ensemble duplicate symbol weight was not summed');
+if (!['AAA', 'CCC'].includes(ensemble.weighted[0].symbol)) throw new Error('ensemble did not use factor-internal model weights');
+if (Math.abs(ensemble.weighted[0].display_weight - 0.45) > 1e-12) throw new Error('factor-internal model weights were not preserved before final cap');
 if (ensemble.factorsUsedCount !== 2) throw new Error('ensemble did not include the best and second factor sleeves');
+if (cappedEnsemble.weighted.some((row) => row.display_weight > 0.300000000001)) throw new Error('browser max weight cap was not applied to ensemble');
+if (cappedEnsemble.cashTotal <= 0) throw new Error('ensemble cap should leave cash when all candidates hit the cap');
 if (bestRows.best.factor !== 'best_factor') throw new Error('best-factor signal did not use period best factor');
 if (bestRows.rows[0].symbol !== 'AAA') throw new Error('best-factor signal ranking failed');
 if (bestRows.rows[0].weight !== 0) throw new Error('research-only best-factor output must fail closed to zero final weight');

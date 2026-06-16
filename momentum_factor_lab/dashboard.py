@@ -277,7 +277,7 @@ HTML_TEMPLATE = """<!doctype html>
           <div class="viz-card-heading">
             <div>
               <p class="eyebrow">팩터 앙상블</p>
-              <h3>상위 10개 팩터 동일가중 합산</h3>
+              <h3>상위 10개 팩터 동일비중 합산</h3>
             </div>
             <span id="ensemble-chart-meta" class="chart-meta">-</span>
           </div>
@@ -782,7 +782,7 @@ function humanWeightingMethod(value) {
     score_size_liquidity: '점수·규모·유동성 기반',
     score_proportional_capped: '팩터 점수 비례·상한 적용',
     best_factor_score_proportional_capped: '최고 팩터 점수 비례·상한 적용',
-    top_factor_equal_sleeve: '상위 팩터 동일가중 합산',
+    top_factor_equal_sleeve: '상위 팩터 동일비중 합산',
   };
   return labels[text] || text;
 }
@@ -914,6 +914,12 @@ function factorScoreSnapshot(run, date, factor) {
   return (run.factor_score_snapshots || []).find((snapshot) => snapshot.date === date && snapshot.factor === factor) || null;
 }
 
+function factorWeightSnapshot(run, date, windowKey, factor) {
+  return (run.factor_weight_snapshots || []).find((snapshot) => (
+    snapshot.date === date && snapshot.window === windowKey && snapshot.factor === factor
+  )) || null;
+}
+
 function normalizeSnapshotRows(snapshot) {
   const rows = snapshot?.rows || [];
   return rows
@@ -923,6 +929,17 @@ function normalizeSnapshotRows(snapshot) {
     })
     .filter((row) => row.symbol && Number.isFinite(row.score))
     .sort((a, b) => Number(b.score) - Number(a.score) || String(a.symbol).localeCompare(String(b.symbol)));
+}
+
+function normalizeWeightRows(snapshot) {
+  const rows = snapshot?.rows || [];
+  return rows
+    .map((row) => {
+      if (Array.isArray(row)) return { symbol: row[0], weight: Number(row[1]), score: Number(row[2]) };
+      return { symbol: row.symbol, weight: Number(row.weight ?? row.default_weight), score: Number(row.score) };
+    })
+    .filter((row) => row.symbol && Number.isFinite(row.weight) && row.weight > 0)
+    .sort((a, b) => Number(b.weight) - Number(a.weight) || String(a.symbol).localeCompare(String(b.symbol)));
 }
 
 function computeScenarioAllocation(rows, topN, maxWeight) {
@@ -1012,14 +1029,70 @@ function topFactorsForDate(run, date, windowKey, limit = 10) {
     .filter((row) => row.factor);
 }
 
-function topFactorEnsembleAllocation(run, date, windowKey, topN, factorLimit = 10) {
+function capAggregatedWeights(rows, maxWeight) {
+  const cap = Math.max(0.01, Math.min(0.5, Number(maxWeight) || 0.1));
+  const clean = rows
+    .map((row) => ({ ...row, raw_ensemble_weight: Math.max(0, Number(row.raw_ensemble_weight) || 0) }))
+    .filter((row) => row.symbol && row.raw_ensemble_weight > 0);
+  const rawTotal = clean.reduce((sum, row) => sum + row.raw_ensemble_weight, 0);
+  if (!clean.length || rawTotal <= 0) {
+    return {
+      rows: [],
+      investedTotal: 0,
+      cashTotal: 1,
+      maxWeight: cap,
+    };
+  }
+  const targetBudget = Math.min(1, rawTotal);
+  const weights = clean.map((row) => row.raw_ensemble_weight * targetBudget / rawTotal);
+  const active = new Set(clean.map((_, index) => index));
+  let remainingBudget = targetBudget;
+  while (active.size && remainingBudget > 1e-12) {
+    const activeWeightTotal = [...active].reduce((sum, index) => sum + weights[index], 0);
+    if (activeWeightTotal <= 0) break;
+    const cappedThisRound = [];
+    for (const index of active) {
+      const candidateWeight = remainingBudget * (weights[index] / activeWeightTotal);
+      if (candidateWeight > cap) {
+        weights[index] = cap;
+        cappedThisRound.push(index);
+      }
+    }
+    if (!cappedThisRound.length) {
+      for (const index of active) {
+        weights[index] = remainingBudget * (weights[index] / activeWeightTotal);
+      }
+      remainingBudget = 0;
+      break;
+    }
+    cappedThisRound.forEach((index) => {
+      active.delete(index);
+      remainingBudget -= weights[index];
+    });
+  }
+  const cappedRows = clean.map((row, index) => ({
+    ...row,
+    display_weight: Math.max(0, weights[index] || 0),
+    weight_cap: cap,
+    weight_cap_excess: Math.max(0, (row.raw_ensemble_weight * targetBudget / rawTotal) - (weights[index] || 0)),
+  }));
+  const investedTotal = cappedRows.reduce((sum, row) => sum + row.display_weight, 0);
+  return {
+    rows: cappedRows,
+    investedTotal,
+    cashTotal: Math.max(0, 1 - investedTotal),
+    maxWeight: cap,
+  };
+}
+
+function topFactorEnsembleAllocation(run, date, windowKey, topN, maxWeight, factorLimit = 10) {
   const factorRows = topFactorsForDate(run, date, windowKey, factorLimit);
-  const perFactorTopN = Math.max(1, Math.min(50, Math.round(Number(topN) || 20)));
+  const displayTopN = Math.max(1, Math.min(50, Math.round(Number(topN) || 20)));
   const sleeves = [];
   const missingFactors = [];
   factorRows.forEach((factorRow) => {
-    const snapshot = factorScoreSnapshot(run, date, factorRow.factor);
-    const rows = normalizeSnapshotRows(snapshot).slice(0, perFactorTopN);
+    const snapshot = factorWeightSnapshot(run, date, windowKey, factorRow.factor);
+    const rows = normalizeWeightRows(snapshot);
     if (!rows.length) {
       missingFactors.push(factorRow.factor);
       return;
@@ -1030,18 +1103,20 @@ function topFactorEnsembleAllocation(run, date, windowKey, topN, factorLimit = 1
   const bySymbol = new Map();
   const sleeveWeight = sleeves.length ? 1 / sleeves.length : 0;
   sleeves.forEach((sleeve) => {
-    const perNameWeight = sleeve.rows.length ? sleeveWeight / sleeve.rows.length : 0;
     sleeve.rows.forEach((row) => {
       const key = String(row.symbol);
       const current = bySymbol.get(key) || {
         symbol: key,
-        display_weight: 0,
+        raw_ensemble_weight: 0,
         factor_count: 0,
         factors: [],
         score_sum: 0,
         best_score: Number.NEGATIVE_INFINITY,
+        factor_weight_sum: 0,
       };
-      current.display_weight += perNameWeight;
+      const sleeveContribution = sleeveWeight * (Number(row.weight) || 0);
+      current.raw_ensemble_weight += sleeveContribution;
+      current.factor_weight_sum += Number(row.weight) || 0;
       current.factor_count += 1;
       current.factors.push(sleeve.factor);
       current.score_sum += Number(row.score) || 0;
@@ -1050,14 +1125,16 @@ function topFactorEnsembleAllocation(run, date, windowKey, topN, factorLimit = 1
     });
   });
 
-  const weighted = [...bySymbol.values()]
+  const capped = capAggregatedWeights([...bySymbol.values()], maxWeight);
+  const allWeighted = capped.rows
     .sort((a, b) => (
       Number(b.display_weight) - Number(a.display_weight)
       || Number(b.factor_count) - Number(a.factor_count)
       || Number(b.score_sum) - Number(a.score_sum)
       || String(a.symbol).localeCompare(String(b.symbol))
-    ))
-    .slice(0, perFactorTopN)
+    ));
+  const weighted = allWeighted
+    .slice(0, displayTopN)
     .map((row, index) => ({
       ...row,
       display_rank: index + 1,
@@ -1067,13 +1144,17 @@ function topFactorEnsembleAllocation(run, date, windowKey, topN, factorLimit = 1
 
   return {
     weighted,
-    topN: perFactorTopN,
+    topN: displayTopN,
     factorRows,
     sleeves,
     factorsUsedCount: sleeves.length,
     factorLimit,
     missingFactors,
     totalCandidateCount: bySymbol.size,
+    hiddenWeight: allWeighted.slice(displayTopN).reduce((sum, row) => sum + (Number(row.display_weight) || 0), 0),
+    investedTotal: capped.investedTotal,
+    cashTotal: capped.cashTotal,
+    maxWeight: capped.maxWeight,
     windowLabel: factorRows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
   };
 }
@@ -1740,32 +1821,44 @@ function renderEnsembleWeightChart() {
   const date = selectedDate();
   const windowKey = selectedWindow();
   const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
   const target = document.querySelector('#ensemble-weight-chart');
   target.replaceChildren();
-  const ensemble = topFactorEnsembleAllocation(run, date, windowKey, topN, 10);
+  const ensemble = topFactorEnsembleAllocation(run, date, windowKey, topN, maxWeight, 10);
   setText(
     '#ensemble-chart-meta',
-    `${date || '-'} · ${ensemble.windowLabel} · ${ensemble.factorsUsedCount}/${Math.min(10, ensemble.factorRows.length)}개 팩터`,
+    `${date || '-'} · ${ensemble.windowLabel} · ${ensemble.factorsUsedCount}/${Math.min(10, ensemble.factorRows.length)}개 팩터 · 최종 상한 ${formatPercent(ensemble.maxWeight)}`,
   );
   if (!ensemble.weighted.length) {
     appendEmpty(
       '#ensemble-weight-chart',
-      '선택한 기준일과 기간에 상위 팩터 점수 스냅샷이 없어 합산 비중을 표시할 수 없습니다.',
+      '선택한 기준일과 기간에 상위 팩터의 백테스트 보유 비중 스냅샷이 없어 합산 비중을 표시할 수 없습니다.',
     );
     return;
   }
-  const maxWeightValue = Math.max(...ensemble.weighted.map((row) => Number(row.display_weight) || 0), 0.01);
+  const maxWeightValue = Math.max(
+    ...ensemble.weighted.map((row) => Number(row.display_weight) || 0),
+    Number(ensemble.hiddenWeight) || 0,
+    Number(ensemble.cashTotal) || 0,
+    0.01,
+  );
   ensemble.weighted.forEach((row) => {
     const label = `${row.symbol} · ${row.factor_count}개 팩터`;
     appendBarRow(target, label, formatPercent(row.display_weight), row.display_weight, maxWeightValue);
   });
+  if (ensemble.hiddenWeight > 0.000001) {
+    appendBarRow(target, '미표시 후보 합계', formatPercent(ensemble.hiddenWeight), ensemble.hiddenWeight, maxWeightValue);
+  }
+  if (ensemble.cashTotal > 0.000001) {
+    appendBarRow(target, '현금/상한 미사용', formatPercent(ensemble.cashTotal), ensemble.cashTotal, maxWeightValue);
+  }
   const factorNames = ensemble.sleeves.map((sleeve) => `${sleeve.rank}. ${sleeve.factor}`).join(', ');
   const note = document.createElement('div');
   note.className = 'scenario-note';
   const missing = ensemble.missingFactors.length
     ? ` 스냅샷이 없는 팩터 ${ensemble.missingFactors.length}개는 제외했습니다.`
     : '';
-  note.textContent = `해석: ${ensemble.windowLabel} 성과 상위 팩터들을 각각 같은 자금 비중으로 보고, 각 팩터 안에서는 상위 ${ensemble.topN}개 종목을 동일비중으로 둔 뒤 중복 종목 비중을 합산했습니다. ${ensemble.totalCandidateCount}개 합산 후보 중 상위 ${ensemble.weighted.length}개를 표시합니다. 사용 팩터: ${factorNames}.${missing}`;
+  note.textContent = `해석: ${ensemble.windowLabel} 성과 상위 팩터들을 각각 같은 팩터별 포트폴리오 비중으로 보고, 각 팩터 내부는 기존 백테스트 일별 보유 비중을 그대로 사용한 뒤 중복 종목 비중을 합산했습니다. 합산 후 브라우저 종목당 최대 비중 ${formatPercent(ensemble.maxWeight)}를 최종 상한으로 적용했습니다. ${ensemble.totalCandidateCount}개 합산 후보 중 상위 ${ensemble.weighted.length}개를 표시합니다. 사용 팩터: ${factorNames}.${missing}`;
   target.appendChild(note);
 }
 
@@ -2404,6 +2497,13 @@ def build_dashboard_payload(
         max_symbols=max_score_snapshot_symbols,
         eligibility_mask=_score_eligibility_mask(result),
     )
+    weight_snapshots = _factor_weight_snapshots(
+        result,
+        period_matrix,
+        max_snapshot_dates=max_score_snapshot_dates,
+        max_symbols=max_score_snapshot_symbols,
+        max_factors_per_period=10,
+    )
     backtest_series = _factor_backtest_series(
         result,
         max_points=max_backtest_points,
@@ -2425,6 +2525,7 @@ def build_dashboard_payload(
             "factor_period_matrix": period_matrix,
             "holdings": holding_rows,
             "factor_score_snapshots": score_snapshots,
+            "factor_weight_snapshots": weight_snapshots,
             "scenario_available_dates": sorted(
                 {row["date"] for row in score_snapshots if isinstance(row, dict) and row.get("date")},
                 reverse=True,
@@ -3126,6 +3227,88 @@ def _factor_score_snapshots(
     return snapshots
 
 
+def _factor_weight_snapshots(
+    result: RunResult,
+    period_matrix: list[dict[str, Any]],
+    *,
+    max_snapshot_dates: int,
+    max_symbols: int,
+    max_factors_per_period: int,
+) -> list[dict[str, Any]]:
+    """Export active backtest holding weights for top factors by date/window.
+
+    These rows are intentionally separate from factor-score snapshots. Score
+    snapshots power the user-selected-factor browser scenario, while weight
+    snapshots preserve each factor portfolio's existing backtest allocation for
+    cross-factor ensemble diagnostics.
+    """
+
+    if not period_matrix or not result.backtests:
+        return []
+    dates = sorted({row["date"] for row in period_matrix if row.get("date")})[-max_snapshot_dates:]
+    score_indexes = {
+        factor: pd.DatetimeIndex(scores.index)
+        for factor, scores in result.factor_scores.items()
+        if not scores.empty
+    }
+    snapshots: list[dict[str, Any]] = []
+    for matrix_row in period_matrix:
+        date_text = matrix_row.get("date")
+        if date_text not in dates:
+            continue
+        factors = matrix_row.get("factors")
+        if not isinstance(factors, list) or not factors:
+            continue
+        returns = matrix_row.get("returns") if isinstance(matrix_row.get("returns"), list) else []
+        requested_date = pd.Timestamp(date_text)
+        for rank, factor in enumerate(factors[:max_factors_per_period], start=1):
+            factor_name = str(factor)
+            backtest = result.backtests.get(factor_name)
+            if backtest is None or backtest.weights.empty:
+                continue
+            weight_frame = backtest.weights
+            weight_index = pd.DatetimeIndex(weight_frame.index)
+            weight_date = _nearest_score_date(weight_index, requested_date)
+            if weight_date is None:
+                continue
+            weights = pd.to_numeric(weight_frame.loc[weight_date], errors="coerce").dropna()
+            active_weights = weights[weights > 1e-12].sort_values(ascending=False)
+            if active_weights.empty:
+                continue
+            score_index = score_indexes.get(factor_name)
+            score_date = _active_signal_date(backtest, weight_date, score_index) if score_index is not None else None
+            row_scores = pd.Series(dtype=float)
+            scores = result.factor_scores.get(factor_name)
+            if scores is not None and not scores.empty and score_date is not None and score_date in scores.index:
+                row_scores = pd.to_numeric(scores.loc[score_date], errors="coerce")
+            top_weights = active_weights.head(max_symbols)
+            rows = [
+                [
+                    str(symbol),
+                    _rounded_float(weight, digits=8),
+                    _rounded_float(row_scores.get(symbol), digits=6) if not row_scores.empty else None,
+                ]
+                for symbol, weight in top_weights.items()
+            ]
+            snapshots.append(
+                {
+                    "date": str(date_text),
+                    "window": str(matrix_row.get("window") or ""),
+                    "window_label": str(matrix_row.get("window_label") or matrix_row.get("window") or ""),
+                    "factor": factor_name,
+                    "factor_rank": rank,
+                    "period_return": _float_or_none(returns[rank - 1]) if rank - 1 < len(returns) else None,
+                    "weight_date": _date_str(weight_date),
+                    "score_date": _date_str(score_date) if score_date is not None else None,
+                    "available_count": int(active_weights.size),
+                    "exported_count": int(len(rows)),
+                    "weight_source": "백테스트 일별 보유 비중",
+                    "rows": rows,
+                }
+            )
+    return snapshots
+
+
 def _factor_backtest_series(result: RunResult, *, max_points: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for factor in sorted(result.backtests):
@@ -3626,18 +3809,27 @@ def _fit_dashboard_payload(payload: dict[str, Any], *, max_bytes: int) -> dict[s
         {
             "max_payload_bytes": max_bytes,
             "max_score_snapshot_symbols": MAX_SCORE_SNAPSHOT_SYMBOLS,
+            "max_weight_snapshot_symbols": MAX_SCORE_SNAPSHOT_SYMBOLS,
             "max_backtest_points": MAX_BACKTEST_POINTS,
-            "snapshot_trim_policy": "가장 오래된 점수 스냅샷 날짜부터 줄입니다.",
+            "snapshot_trim_policy": "가장 오래된 점수/비중 스냅샷 날짜부터 줄입니다.",
         }
     )
-    while _json_payload_size(payload) > max_bytes and payload.get("factor_score_snapshots"):
-        dates = sorted({row.get("date") for row in payload["factor_score_snapshots"] if row.get("date")})
+    while _json_payload_size(payload) > max_bytes and (
+        payload.get("factor_score_snapshots") or payload.get("factor_weight_snapshots")
+    ):
+        dates = sorted(
+            {
+                row.get("date")
+                for key in ("factor_score_snapshots", "factor_weight_snapshots")
+                for row in payload.get(key, [])
+                if isinstance(row, dict) and row.get("date")
+            }
+        )
         if not dates:
             break
         oldest = dates[0]
-        payload["factor_score_snapshots"] = [
-            row for row in payload["factor_score_snapshots"] if row.get("date") != oldest
-        ]
+        for key in ("factor_score_snapshots", "factor_weight_snapshots"):
+            payload[key] = [row for row in payload.get(key, []) if row.get("date") != oldest]
     while _json_payload_size(payload) > max_bytes and payload.get("factor_backtest_series"):
         changed = False
         for series in payload["factor_backtest_series"]:
@@ -3656,6 +3848,9 @@ def _fit_dashboard_payload(payload: dict[str, Any], *, max_bytes: int) -> dict[s
     )
     payload["payload_limits"]["actual_payload_bytes"] = _json_payload_size(payload)
     payload["payload_limits"]["score_snapshot_dates_exported"] = len(payload["scenario_available_dates"])
+    payload["payload_limits"]["weight_snapshot_dates_exported"] = len(
+        {row.get("date") for row in payload.get("factor_weight_snapshots", []) if row.get("date")}
+    )
     return payload
 
 
