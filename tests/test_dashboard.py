@@ -326,6 +326,9 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "팩터 수익률 막대 차트" in html
     assert "선택 팩터와 기간 최고 팩터 누적 성과 비교" in html
     assert "상위 N개 모형 비중 시각화" in html
+    assert "상위 10개 팩터 동일가중 합산" in html
+    assert "기존 결과물 기준 · 해당 날짜 최고 팩터 추천/연구 신호" in html
+    assert "기준 팩터" in html
     assert "데이터 품질 · 유동성 · 매매 가능성 게이트" in html
     assert "경제적 의미 · 중복도 · Forward Rank-IC" in html
     assert "후보 종목, 가격 적격, 유동성 적격 종목 수" in html
@@ -334,7 +337,7 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "최신 출력" in html
     assert "매일 실행 입력값" in html
     assert "팩터 점수가 높은 종목에 더 큰 비중" in html
-    assert "동일가중" not in html
+    assert "동일가중" in html
     assert "Top-N" not in html
     assert 'id="factor-select"' in html
     assert 'id="max-weight-input"' in html
@@ -344,6 +347,9 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "매일 실행 input" not in html
     assert "renderFactorReturnChart" in js
     assert "renderWeightChart" in js
+    assert "renderEnsembleWeightChart" in js
+    assert "topFactorEnsembleAllocation" in js
+    assert "bestFactorSignalRows" in js
     assert "renderBacktestChart" in js
     assert "computeScenarioAllocation" in js
     assert "renderDiagnostics" in js
@@ -427,6 +433,33 @@ const a = computeScenarioAllocation([['AAA', 3], ['BBB', 2], ['CCC', 1]], 3, 0.1
 const b = computeScenarioAllocation([['ZZZ', 9], ['YYY', 8]], 2, 0.40);
 const c = computeScenarioAllocation([['AAA', 5], ['BBB', 4], ['CCC', 3], ['DDD', 2], ['EEE', 1]], 5, 0.50);
 const d = computeScenarioAllocation([['HIGH', 0.01], ['ZERO', 0], ['NEG', -10]], 3, 0.90);
+const run = {{
+  summary: {{
+    recommendation_output_key: 'research_signals',
+    research_only: true,
+    recommendation_output_available: false,
+    tradable_output_available: false,
+    current_recommendations_available: false,
+    tradable_recommendations_available: false,
+    same_run_factor_selection_blocked_for_tradable: false,
+    same_sample_selection_blocked_for_tradable: false,
+  }},
+  periods: [{{ key: '1M', label: '최근 1개월' }}],
+  factor_period_matrix: [{{
+    date: '2026-01-10',
+    window: '1M',
+    window_label: '최근 1개월',
+    factors: ['best_factor', 'second_factor'],
+    returns: [0.2, 0.1],
+    factor_count: 2,
+  }}],
+  factor_score_snapshots: [
+    {{ date: '2026-01-10', factor: 'best_factor', score_date: '2026-01-10', rows: [['AAA', 9], ['BBB', 8]] }},
+    {{ date: '2026-01-10', factor: 'second_factor', score_date: '2026-01-10', rows: [['BBB', 7], ['CCC', 6]] }},
+  ],
+}};
+const ensemble = topFactorEnsembleAllocation(run, '2026-01-10', '1M', 2, 10);
+const bestRows = bestFactorSignalRows(run, '2026-01-10', '1M', 2, 0.5);
 let equity = 1;
 const perfPoints = Array.from({{ length: 45 }}, (_, index) => {{
   equity *= index % 7 === 0 ? 0.985 : 1.006;
@@ -445,6 +478,13 @@ if (Math.abs(b.cashTotal - 0.20) > 1e-12) throw new Error('factor B cash failed'
 if (!(c.weighted[0].display_weight > 0.39 && c.weighted[0].display_weight < 0.41)) throw new Error('score-proportional weight failed');
 if (!(c.weighted[0].display_weight > c.weighted[1].display_weight && c.weighted[1].display_weight > c.weighted[2].display_weight)) throw new Error('score ordering was not reflected in weights');
 if (!(d.weighted[0].display_weight > d.weighted[1].display_weight && d.weighted[1].display_weight > d.weighted[2].display_weight)) throw new Error('mixed sign score ordering was not reflected in weights');
+if (ensemble.weighted[0].symbol !== 'BBB') throw new Error('top-factor equal sleeve aggregation failed');
+if (Math.abs(ensemble.weighted[0].display_weight - 0.5) > 1e-12) throw new Error('ensemble duplicate symbol weight was not summed');
+if (ensemble.factorsUsedCount !== 2) throw new Error('ensemble did not include the best and second factor sleeves');
+if (bestRows.best.factor !== 'best_factor') throw new Error('best-factor signal did not use period best factor');
+if (bestRows.rows[0].symbol !== 'AAA') throw new Error('best-factor signal ranking failed');
+if (bestRows.rows[0].weight !== 0) throw new Error('research-only best-factor output must fail closed to zero final weight');
+if (bestRows.rows[0].pre_cap_weight <= 0) throw new Error('best-factor diagnostic pre-gate weight missing');
 if (!ticks.includes(0) || !ticks.includes(0.5)) throw new Error('clean return tick marks missing');
 if (dateTicks.length < 4) throw new Error('date tick marks are too sparse');
 if (!Number.isFinite(perf.cumulativeReturn)) throw new Error('performance return missing');
