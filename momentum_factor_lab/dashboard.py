@@ -690,6 +690,8 @@ function humanProvider(value) {
   const text = textValue(value);
   const labels = {
     'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'yahoo-chart-fallback': 'Yahoo chart 조정종가 보강 데이터',
+    'nasdaq-latest-repair': 'Nasdaq 최신 종가 보강 데이터',
     'stooq-fallback': 'Stooq 무료 일별 종가 대체 데이터',
     'finance-datareader-fallback': 'FinanceDataReader 무료 종가 대체 데이터',
     'no-live-price-provider': '사용 가능한 실시간 가격 제공자 없음',
@@ -1208,6 +1210,47 @@ function formatCounts(counts, labels = {}) {
     .join(' · ');
 }
 
+function humanSourceName(value) {
+  const text = textValue(value);
+  const labels = {
+    'yfinance-adjusted-daily': 'yfinance 조정가격',
+    'yahoo-chart-adjusted-daily-fallback': 'Yahoo chart 보강',
+    'nasdaq-latest-close-repair': 'Nasdaq 최신일 보강',
+    'stooq-daily-close-fallback': 'Stooq 대체',
+    'finance-datareader-close-fallback': 'FinanceDataReader 대체',
+    'yfinance-fast-info-market-cap': '시가총액 보강',
+    'live-run-summary': '전체 실행 요약',
+    'packaged-default-universe': '패키지 유니버스',
+  };
+  return labels[text] || text;
+}
+
+function formatCoverageMetric(ratio, numerator, denominator) {
+  const ratioText = formatPercent(ratio);
+  const num = Number(numerator);
+  const den = Number(denominator);
+  if (Number.isFinite(num) && Number.isFinite(den) && den > 0) {
+    return `${ratioText} (${formatInteger(num)} / ${formatInteger(den)})`;
+  }
+  return ratioText;
+}
+
+function formatSourceHealth(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '-';
+  return rows
+    .filter((row) => row && row.source)
+    .slice(0, 8)
+    .map((row) => {
+      const parts = [];
+      if (Number(row.success_rows) > 0) parts.push(`성공 ${formatInteger(row.success_rows)}`);
+      if (Number(row.no_newer_rows) > 0) parts.push(`추가 없음 ${formatInteger(row.no_newer_rows)}`);
+      if (Number(row.failed_rows) > 0) parts.push(`실패 ${formatInteger(row.failed_rows)}`);
+      if (!parts.length) parts.push(`행 ${formatInteger(row.row_count)}`);
+      return `${humanSourceName(row.source)}: ${parts.join(', ')}`;
+    })
+    .join(' · ');
+}
+
 function setStatusMessage(message) {
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
@@ -1435,12 +1478,65 @@ function renderDiagnostics() {
   appendDefinition(dataSummary, '후보 종목', formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size));
   appendDefinition(dataSummary, '가격 적격 종목', formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size));
   appendDefinition(dataSummary, '유동성 적격 종목', formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size));
-  appendDefinition(dataSummary, '가격 수집 종목', formatCount(quality.fetched_price_symbol_count));
+  appendDefinition(dataSummary, '모형 가격 보유 종목', formatCount(quality.fetched_price_symbol_count));
   appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
+  appendDefinition(
+    dataSummary,
+    '요청 가격 커버리지',
+    formatCoverageMetric(
+      quality.price_coverage_ratio,
+      quality.provider_returned_symbol_count,
+      quality.provider_requested_symbol_count,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '모형 가격 보유 비율',
+    formatCoverageMetric(
+      quality.model_price_universe_ratio,
+      quality.fetched_price_symbol_count,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '가격 적격 비율',
+    formatCoverageMetric(
+      quality.eligible_price_ratio,
+      summary.eligible_price_universe_size ?? quality.eligible_price_universe_size,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '유동성 적격 비율',
+    formatCoverageMetric(
+      quality.liquidity_eligible_ratio,
+      summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '신선 가격 비율',
+    formatCoverageMetric(quality.fresh_price_ratio, quality.fresh_price_rows, quality.price_quality_rows),
+  );
   appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
   appendDefinition(dataSummary, '최근 실행 시각', formatKoreanDateTime(summary.run_timestamp_utc));
   appendDefinition(dataSummary, '실행 결과 생성 시각', formatKoreanDateTime(runPayloadGeneratedAt(run)));
   appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
+  appendDefinition(dataSummary, '소스별 수집 상태', formatSourceHealth(quality.source_health));
+  appendDefinition(
+    dataSummary,
+    '가격 소스 분포',
+    formatCounts(quality.price_source_counts, {
+      'yfinance-adjusted-daily': 'yfinance',
+      'yahoo-chart-adjusted-daily-fallback': 'Yahoo chart',
+      'nasdaq-latest-close-repair': 'Nasdaq 보강',
+      'stooq-daily-close-fallback': 'Stooq',
+      'finance-datareader-close-fallback': 'FinanceDataReader',
+    }),
+  );
   appendDefinition(
     dataSummary,
     '품질 상태',
@@ -2982,27 +3078,156 @@ def _tradability_gate_rows(metadata: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _data_quality_summary(result: RunResult) -> dict[str, Any]:
+def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
+    try:
+        num = float(numerator)
+        den = float(denominator)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(num) or not np.isfinite(den) or den <= 0:
+        return None
+    return num / den
+
+
+def _numeric_group_series(group: pd.DataFrame, column: str) -> pd.Series:
+    if column not in group.columns:
+        return pd.Series(0.0, index=group.index, dtype=float)
+    return pd.to_numeric(group[column], errors="coerce").fillna(0)
+
+
+def _data_source_health_rows(data_sources: pd.DataFrame) -> list[dict[str, Any]]:
+    if data_sources.empty or "source" not in data_sources:
+        return []
+    provider_order = {
+        "yfinance-adjusted-daily": 0,
+        "yahoo-chart-adjusted-daily-fallback": 1,
+        "nasdaq-latest-close-repair": 2,
+        "stooq-daily-close-fallback": 3,
+        "finance-datareader-close-fallback": 4,
+        "yfinance-fast-info-market-cap": 5,
+        "live-run-summary": 6,
+    }
+    rows: list[dict[str, Any]] = []
+    for source, group in data_sources.groupby("source", sort=False):
+        source_text = str(source)
+        records = _numeric_group_series(group, "records")
+        statuses = group.get("status", pd.Series(index=group.index, dtype=object)).fillna("unknown").astype(str)
+        requested = _numeric_group_series(group, "requested_price_symbols")
+        returned = _numeric_group_series(group, "returned_price_symbols")
+        failed_mask = statuses.str.contains("failed|unavailable|invalid", case=False, regex=True)
+        no_newer_mask = statuses.eq("no_newer_rows")
+        success_mask = records.gt(0)
+        if not success_mask.any() and not failed_mask.any() and not no_newer_mask.any() and source_text not in provider_order:
+            continue
+        rows.append(
+            {
+                "source": source_text,
+                "row_count": int(len(group)),
+                "success_rows": int(success_mask.sum()),
+                "failed_rows": int(failed_mask.sum()),
+                "no_newer_rows": int(no_newer_mask.sum()),
+                "cache_hit_rows": int(statuses.str.contains("cache_hit", case=False, regex=False).sum()),
+                "records_sum": float(records.sum()),
+                "requested_price_symbols_sum": float(requested.sum()) if requested.sum() else None,
+                "returned_price_symbols_sum": float(returned.sum()) if returned.sum() else None,
+            }
+        )
+    return sorted(rows, key=lambda row: (provider_order.get(str(row["source"]), 99), str(row["source"])))
+
+
+def _provider_coverage_counts(data_sources: pd.DataFrame) -> tuple[float | None, float | None]:
+    if data_sources.empty or "source" not in data_sources:
+        return None, None
+    summary_rows = data_sources[data_sources["source"].astype(str).eq("live-run-summary")]
+    if summary_rows.empty:
+        return None, None
+    row = summary_rows.iloc[-1]
+    requested = pd.to_numeric(pd.Series([row.get("requested_price_symbols")]), errors="coerce").iloc[0]
+    returned = pd.to_numeric(pd.Series([row.get("returned_price_symbols")]), errors="coerce").iloc[0]
+    requested_value = float(requested) if pd.notna(requested) else None
+    returned_value = float(returned) if pd.notna(returned) else None
+    return requested_value, returned_value
+
+
+def _data_quality_summary_from_components(
+    *,
+    summary: dict[str, Any],
+    data_sources: pd.DataFrame,
+    data_quality: pd.DataFrame,
+    price_sources: pd.DataFrame | None,
+    stale_after_days: int,
+) -> dict[str, Any]:
     source_counts = {}
-    if not result.data_sources.empty and "source" in result.data_sources:
-        source_counts = result.data_sources["source"].value_counts().to_dict()
+    if not data_sources.empty and "source" in data_sources:
+        source_counts = data_sources["source"].value_counts().to_dict()
     status_counts = {}
-    if not result.data_quality.empty and "data_quality_status" in result.data_quality:
-        status_counts = result.data_quality["data_quality_status"].value_counts().to_dict()
-    summary = result.metadata
+    if not data_quality.empty and "data_quality_status" in data_quality:
+        status_counts = data_quality["data_quality_status"].value_counts().to_dict()
+    price_source_counts = {}
+    if isinstance(price_sources, pd.DataFrame) and not price_sources.empty and "price_source" in price_sources:
+        price_source_counts = price_sources["price_source"].value_counts().to_dict()
+    elif not data_quality.empty and "price_source" in data_quality:
+        price_source_counts = data_quality["price_source"].value_counts().to_dict()
+    candidate_count = summary.get("candidate_universe_size")
+    fetched_count = summary.get("fetched_price_symbol_count")
+    eligible_count = summary.get("eligible_price_universe_size")
+    liquidity_count = summary.get("liquidity_eligible_universe_size")
+    excluded_count = summary.get("excluded_symbols")
+    provider_requested_count, provider_returned_count = _provider_coverage_counts(data_sources)
+    if provider_requested_count is None:
+        provider_requested_count = candidate_count
+    if provider_returned_count is None:
+        provider_returned_count = fetched_count
+    quality_rows = len(data_quality) if not data_quality.empty else 0
+    quality_pass_count = 0
+    if not data_quality.empty and "data_quality_pass" in data_quality:
+        quality_pass_count = int(data_quality["data_quality_pass"].fillna(False).astype(bool).sum())
+    fresh_price_rows = None
+    fresh_price_ratio = None
+    if not data_quality.empty and "stale_days" in data_quality:
+        stale_days = pd.to_numeric(data_quality["stale_days"], errors="coerce")
+        fresh_price_rows = int(stale_days.le(stale_after_days).fillna(False).sum())
+        fresh_price_ratio = _safe_ratio(fresh_price_rows, quality_rows)
     return {
-        "candidate_universe_size": summary.get("candidate_universe_size"),
-        "eligible_price_universe_size": summary.get("eligible_price_universe_size"),
-        "liquidity_eligible_universe_size": summary.get("liquidity_eligible_universe_size"),
-        "fetched_price_symbol_count": summary.get("fetched_price_symbol_count"),
-        "excluded_symbols": summary.get("excluded_symbols"),
+        "candidate_universe_size": candidate_count,
+        "eligible_price_universe_size": eligible_count,
+        "liquidity_eligible_universe_size": liquidity_count,
+        "fetched_price_symbol_count": fetched_count,
+        "excluded_symbols": excluded_count,
         "provider": summary.get("provider"),
         "data_as_of": summary.get("data_as_of"),
+        "provider_requested_symbol_count": provider_requested_count,
+        "provider_returned_symbol_count": provider_returned_count,
+        "price_coverage_ratio": _safe_ratio(provider_returned_count, provider_requested_count),
+        "model_price_universe_ratio": _safe_ratio(fetched_count, candidate_count),
+        "eligible_price_ratio": _safe_ratio(eligible_count, candidate_count),
+        "liquidity_eligible_ratio": _safe_ratio(liquidity_count, candidate_count),
+        "excluded_ratio": _safe_ratio(excluded_count, candidate_count),
+        "price_quality_rows": quality_rows,
+        "data_quality_pass_count": quality_pass_count,
+        "data_quality_pass_ratio": _safe_ratio(quality_pass_count, quality_rows),
+        "fresh_price_rows": fresh_price_rows,
+        "fresh_price_ratio": fresh_price_ratio,
         "data_quality_status_counts": status_counts,
+        "price_source_counts": price_source_counts,
         "source_counts": source_counts,
+        "source_health": _data_source_health_rows(data_sources),
         "liquidity_status_counts": summary.get("recommendation_liquidity_status_counts", {}),
         "capacity_status_counts": summary.get("recommendation_capacity_status_counts", {}),
     }
+
+
+def _data_quality_summary(result: RunResult) -> dict[str, Any]:
+    price_sources = getattr(result, "price_sources", None)
+    if price_sources is None and getattr(result, "market_data", None) is not None:
+        price_sources = getattr(result.market_data, "price_sources", None)
+    return _data_quality_summary_from_components(
+        summary=result.metadata,
+        data_sources=result.data_sources,
+        data_quality=result.data_quality,
+        price_sources=price_sources,
+        stale_after_days=result.config.stale_after_days,
+    )
 
 
 def _factor_diagnostics_payload(result: RunResult) -> dict[str, Any]:
@@ -3458,11 +3683,20 @@ def _payload_from_run_json(path: Path) -> dict[str, Any]:
         dashboard = payload["dashboard"]
         dashboard.setdefault("source_json", str(path))
         metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        config = payload.get("config", {}) if isinstance(payload.get("config"), dict) else {}
         summary = dashboard.setdefault("summary", {})
         if not isinstance(summary, dict):
             summary = {}
             dashboard["summary"] = summary
         _copy_summary_safety_fields(summary, metadata)
+        if isinstance(payload.get("data_quality"), list) and isinstance(payload.get("data_sources"), list):
+            dashboard["data_quality_summary"] = _data_quality_summary_from_components(
+                summary=metadata,
+                data_sources=pd.DataFrame(payload.get("data_sources") or []),
+                data_quality=pd.DataFrame(payload.get("data_quality") or []),
+                price_sources=pd.DataFrame(payload.get("price_sources") or []),
+                stale_after_days=int(config.get("stale_after_days") or 7),
+            )
         dashboard.setdefault(
             "scenario_available_dates",
             sorted(

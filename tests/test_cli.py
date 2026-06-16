@@ -87,6 +87,10 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
             "--recommendation-rank-floor",
             "0.04",
             "--disable-recommendation-market-cap-lookup",
+            "--yahoo-chart-fallback-limit",
+            "10",
+            "--nasdaq-fallback-limit",
+            "13",
             "--stooq-fallback-limit",
             "11",
             "--finance-datareader-fallback-limit",
@@ -140,6 +144,8 @@ def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
     assert config.recommendation_liquidity_weight == 0.2
     assert config.recommendation_rank_floor == 0.04
     assert not config.recommendation_market_cap_lookup
+    assert config.yahoo_chart_fallback_limit == 10
+    assert config.nasdaq_fallback_limit == 13
     assert config.stooq_fallback_limit == 11
     assert config.finance_datareader_fallback_limit == 12
     assert config.point_in_time_universe_provenance == "source=test-cli as_of=2026-06-05 symbol_count=6 hash=fixture"

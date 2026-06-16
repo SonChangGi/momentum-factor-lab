@@ -36,6 +36,8 @@ RUN_DEFAULTS: dict[str, Any] = {
     "disable_recommendation_market_cap_lookup": False,
     "max_price_symbols": None,
     "price_chunk_size": 150,
+    "yahoo_chart_fallback_limit": None,
+    "nasdaq_fallback_limit": None,
     "stooq_fallback_limit": None,
     "finance_datareader_fallback_limit": None,
     "retry_count": 1,
@@ -107,6 +109,18 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
     )
     run.add_argument("--max-price-symbols", type=int, default=RUN_DEFAULTS["max_price_symbols"], help="Optional live/smoke cap; reports are marked subset when used")
     run.add_argument("--price-chunk-size", type=int, default=RUN_DEFAULTS["price_chunk_size"])
+    run.add_argument(
+        "--yahoo-chart-fallback-limit",
+        type=int,
+        default=RUN_DEFAULTS["yahoo_chart_fallback_limit"],
+        help="Maximum stale/missing symbols to retry through Yahoo chart adjusted-close endpoint; omitted retries all, 0 disables",
+    )
+    run.add_argument(
+        "--nasdaq-fallback-limit",
+        type=int,
+        default=RUN_DEFAULTS["nasdaq_fallback_limit"],
+        help="Maximum stale symbols to repair through Nasdaq historical latest-close endpoint; omitted retries all, 0 disables",
+    )
     run.add_argument(
         "--stooq-fallback-limit",
         type=int,
@@ -262,6 +276,8 @@ def config_from_args(args: argparse.Namespace) -> RunConfig:
         recommendation_market_cap_lookup=not args.disable_recommendation_market_cap_lookup,
         max_price_symbols=args.max_price_symbols,
         price_chunk_size=args.price_chunk_size,
+        yahoo_chart_fallback_limit=args.yahoo_chart_fallback_limit,
+        nasdaq_fallback_limit=args.nasdaq_fallback_limit,
         stooq_fallback_limit=args.stooq_fallback_limit,
         finance_datareader_fallback_limit=args.finance_datareader_fallback_limit,
         retry_count=args.retry_count,
@@ -639,6 +655,8 @@ def _wizard_namespace() -> argparse.Namespace:
             values["disable_recommendation_market_cap_lookup"],
         )
         values["price_chunk_size"] = _ask_value("Price chunk size", "Symbols per yfinance batch.", values["price_chunk_size"], int, lambda value: value >= 1, "enter an integer >= 1")
+        values["yahoo_chart_fallback_limit"] = _ask_optional("Yahoo chart fallback limit", "Stale/missing symbols to retry via Yahoo chart adjusted-close endpoint; 0 disables; blank retries all.", values["yahoo_chart_fallback_limit"], int, lambda value: value >= 0, "enter an integer >= 0 or blank/none")
+        values["nasdaq_fallback_limit"] = _ask_optional("Nasdaq latest-close repair limit", "Stale symbols to repair via Nasdaq historical latest-close endpoint; 0 disables; blank retries all.", values["nasdaq_fallback_limit"], int, lambda value: value >= 0, "enter an integer >= 0 or blank/none")
         values["stooq_fallback_limit"] = _ask_optional("Stooq fallback limit", "Missing symbols to retry via Stooq; 0 disables; blank retries all.", values["stooq_fallback_limit"], int, lambda value: value >= 0, "enter an integer >= 0 or blank/none")
         values["finance_datareader_fallback_limit"] = _ask_optional("FinanceDataReader fallback limit", "Still-missing symbols to retry via optional FinanceDataReader; 0 disables; blank retries all.", values["finance_datareader_fallback_limit"], int, lambda value: value >= 0, "enter an integer >= 0 or blank/none")
         values["retry_count"] = _ask_value("Retry count", "Network retry attempts for public data providers.", values["retry_count"], int, lambda value: value >= 0, "enter an integer >= 0")

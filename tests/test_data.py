@@ -9,12 +9,18 @@ import pytest
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import (
     _apply_finance_datareader_fallback,
+    _apply_nasdaq_latest_repair,
     _apply_stooq_fallback,
+    _apply_yahoo_chart_fallback,
+    _download_nasdaq_symbol,
     _download_finance_datareader_symbol,
     _download_stooq_symbol,
+    _download_yahoo_chart_symbol,
     _eligible_filter,
     _finance_datareader_cache_path,
+    _nasdaq_cache_path,
     _stooq_cache_path,
+    _yahoo_chart_cache_path,
     build_data_quality_frame,
     download_live_data,
 )
@@ -373,6 +379,129 @@ def test_stooq_fallback_replaces_unusable_existing_column(monkeypatch, tmp_path)
     assert sources.iloc[0]["symbol"] == "BAD"
 
 
+def test_yahoo_chart_fallback_repairs_stale_yfinance_column(monkeypatch, tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    prices = pd.DataFrame({"STALE": list(np.linspace(20, 26, 7)) + [np.nan, np.nan, np.nan]}, index=dates)
+    volumes = pd.DataFrame({"STALE": [1_000_000] * 7 + [np.nan, np.nan, np.nan]}, index=dates)
+    config = RunConfig(
+        cache_dir=tmp_path,
+        min_history_days=5,
+        min_liquidity_observations=3,
+        yahoo_chart_fallback_limit=None,
+    )
+
+    def fake_download(symbol, cfg):
+        price = pd.Series(np.linspace(30, 39, len(dates)), index=dates, name=symbol)
+        volume = pd.Series(2_000_000, index=dates, name=symbol)
+        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
+
+    monkeypatch.setattr("momentum_factor_lab.data._download_yahoo_chart_symbol", fake_download)
+
+    fixed_prices, fixed_volumes, sources = _apply_yahoo_chart_fallback(prices, volumes, ["STALE"], config)
+
+    assert fixed_prices["STALE"].iloc[-1] == 39.0
+    assert fixed_prices["STALE"].notna().sum() == len(dates)
+    assert fixed_volumes["STALE"].notna().sum() == len(dates)
+    row = sources.iloc[0]
+    assert row["symbol"] == "STALE"
+    assert row["source"] == "yahoo-chart-adjusted-daily-fallback"
+    assert row["status"] == "fetched"
+    assert "adjusted close" in row["note"]
+
+
+def test_yahoo_chart_cache_rejects_invalid_adjusted_close_payload(tmp_path):
+    config = RunConfig(cache_dir=tmp_path)
+    cache = _yahoo_chart_cache_path(config, "BAD")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("Date,Close,Volume\nnot-a-date,abc,1000\n", encoding="utf-8")
+
+    price, _, error, status, _, _ = _download_yahoo_chart_symbol("BAD", config)
+
+    assert price is None
+    assert status == "cache_hit_invalid"
+    assert "no numeric close prices" in str(error)
+
+
+def test_nasdaq_latest_repair_fills_only_missing_tail_dates(monkeypatch, tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    prices = pd.DataFrame(
+        {
+            "FRESH": np.linspace(100, 109, len(dates)),
+            "TAIL": [20.0, 21.0, np.nan, 23.0, 24.0, 25.0, 26.0, np.nan, np.nan, np.nan],
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame(
+        {
+            "FRESH": 2_000_000,
+            "TAIL": [1_000_000, 1_000_000, np.nan, 1_000_000, 1_000_000, 1_000_000, 1_000_000, np.nan, np.nan, np.nan],
+        },
+        index=dates,
+    )
+    config = RunConfig(
+        cache_dir=tmp_path,
+        min_history_days=5,
+        min_liquidity_observations=3,
+        stale_after_days=0,
+        nasdaq_fallback_limit=None,
+    )
+
+    def fake_download(symbol, cfg):
+        assert symbol == "TAIL"
+        price = pd.Series(np.linspace(30, 39, len(dates)), index=dates, name=symbol)
+        volume = pd.Series(3_000_000, index=dates, name=symbol)
+        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
+
+    monkeypatch.setattr("momentum_factor_lab.data._download_nasdaq_symbol", fake_download)
+
+    fixed_prices, fixed_volumes, sources = _apply_nasdaq_latest_repair(prices, volumes, ["TAIL"], config)
+
+    assert fixed_prices["TAIL"].iloc[0] == 20.0
+    assert np.isnan(fixed_prices["TAIL"].iloc[2])
+    assert fixed_prices["TAIL"].iloc[-1] == 39.0
+    assert fixed_prices["TAIL"].notna().sum() == len(dates) - 1
+    assert fixed_volumes["TAIL"].iloc[0] == 1_000_000
+    assert np.isnan(fixed_volumes["TAIL"].iloc[2])
+    assert fixed_volumes["TAIL"].iloc[-1] == 3_000_000
+    row = sources.iloc[0]
+    assert row["symbol"] == "TAIL"
+    assert row["source"] == "nasdaq-latest-close-repair"
+    assert row["status"] == "fetched"
+    assert row["records"] == 3
+    assert "historical adjusted prices were preserved" in row["provider_adjustment_note"]
+
+
+def test_nasdaq_latest_repair_requires_existing_adjusted_history(monkeypatch, tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    prices = pd.DataFrame({"FRESH": np.linspace(100, 109, len(dates))}, index=dates)
+    volumes = pd.DataFrame({"FRESH": 2_000_000}, index=dates)
+    config = RunConfig(cache_dir=tmp_path, min_history_days=5, stale_after_days=0, nasdaq_fallback_limit=None)
+
+    def unexpected_download(symbol, cfg):  # pragma: no cover - assertion path
+        raise AssertionError(f"Nasdaq full-history replacement should not run for {symbol}")
+
+    monkeypatch.setattr("momentum_factor_lab.data._download_nasdaq_symbol", unexpected_download)
+
+    fixed_prices, fixed_volumes, sources = _apply_nasdaq_latest_repair(prices, volumes, ["MISSING"], config)
+
+    pd.testing.assert_frame_equal(fixed_prices, prices)
+    pd.testing.assert_frame_equal(fixed_volumes, volumes.reindex(index=prices.index))
+    assert sources.empty
+
+
+def test_nasdaq_cache_rejects_invalid_close_payload(tmp_path):
+    config = RunConfig(cache_dir=tmp_path)
+    cache = _nasdaq_cache_path(config, "BAD")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("Date,Close,Volume\n2024-01-02,not-a-number,1000\n", encoding="utf-8")
+
+    price, _, error, status, _, _ = _download_nasdaq_symbol("BAD", config)
+
+    assert price is None
+    assert status == "cache_hit_invalid"
+    assert "no numeric close prices" in str(error)
+
+
 def test_finance_datareader_fallback_records_symbol_provider(monkeypatch, tmp_path):
     dates = pd.bdate_range("2024-01-01", periods=5)
     config = RunConfig(cache_dir=tmp_path, finance_datareader_fallback_limit=None)
@@ -437,7 +566,7 @@ def test_provider_caches_reject_nonnumeric_close_values(tmp_path):
     assert "no numeric close prices" in str(fdr_error)
 
 
-def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeypatch, tmp_path):
+def test_live_download_preserves_yfinance_yahoo_chart_stooq_finance_datareader_order(monkeypatch, tmp_path):
     dates = pd.bdate_range("2024-01-01", periods=8)
     config = RunConfig(
         cache_dir=tmp_path,
@@ -448,14 +577,14 @@ def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeyp
         min_avg_dollar_volume=0,
         min_liquidity_observations=2,
         stale_after_days=10_000,
-        universe=["YF", "STQ", "FDRX"],
+        universe=["YF", "YCH", "STQ", "FDRX"],
     )
-    candidate = _candidate_frame(["YF", "STQ", "FDRX"])
+    candidate = _candidate_frame(["YF", "YCH", "STQ", "FDRX"])
     monkeypatch.setattr(
         "momentum_factor_lab.data._candidate_universe",
         lambda _: (
             candidate,
-            pd.DataFrame([{"source": "fixture-universe", "status": "loaded", "records": 3}]),
+            pd.DataFrame([{"source": "fixture-universe", "status": "loaded", "records": 4}]),
         ),
     )
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace())
@@ -477,9 +606,21 @@ def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeyp
                     "records": 2,
                     "requested_symbols": ",".join(symbols),
                     "returned_symbols": "SPY,YF",
-                    "missing_symbols": "STQ,FDRX",
+                    "missing_symbols": "YCH,STQ,FDRX",
                 }
             ]
+        )
+
+    def fake_yahoo_chart(symbol, cfg):
+        if symbol != "YCH":
+            return None, None, "not found", "failed", "cache", 0
+        return (
+            pd.Series(np.linspace(15, 23, len(dates)), index=dates, name=symbol),
+            pd.Series(1_500_000, index=dates, name=symbol),
+            None,
+            "fetched",
+            "cache",
+            0,
         )
 
     def fake_stooq(symbol, cfg):
@@ -507,20 +648,23 @@ def test_live_download_preserves_yfinance_stooq_finance_datareader_order(monkeyp
         )
 
     monkeypatch.setattr("momentum_factor_lab.data._download_yfinance", fake_yfinance)
+    monkeypatch.setattr("momentum_factor_lab.data._download_yahoo_chart_symbol", fake_yahoo_chart)
     monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_stooq)
     monkeypatch.setattr("momentum_factor_lab.data._download_finance_datareader_symbol", fake_fdr)
 
     result = download_live_data(config)
 
     sources = result.data_sources["source"].tolist()
+    assert sources.index("yfinance-adjusted-daily") < sources.index("yahoo-chart-adjusted-daily-fallback")
+    assert sources.index("yahoo-chart-adjusted-daily-fallback") < sources.index("stooq-daily-close-fallback")
     assert sources.index("yfinance-adjusted-daily") < sources.index("stooq-daily-close-fallback")
     assert sources.index("stooq-daily-close-fallback") < sources.index("finance-datareader-close-fallback")
-    assert {"YF", "STQ", "FDRX"}.issubset(set(result.prices.columns))
+    assert {"YF", "YCH", "STQ", "FDRX"}.issubset(set(result.prices.columns))
     summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
-    assert int(summary["requested_price_symbols"]) == 3
-    assert int(summary["returned_price_symbols"]) == 3
-    assert int(summary["eligible_price_symbols"]) == 3
-    assert int(summary["liquidity_eligible_symbols"]) == 3
+    assert int(summary["requested_price_symbols"]) == 4
+    assert int(summary["returned_price_symbols"]) == 4
+    assert int(summary["eligible_price_symbols"]) == 4
+    assert int(summary["liquidity_eligible_symbols"]) == 4
 
 
 def test_live_download_attempts_free_fallback_when_yfinance_unavailable(monkeypatch, tmp_path):
@@ -535,6 +679,7 @@ def test_live_download_attempts_free_fallback_when_yfinance_unavailable(monkeypa
         min_liquidity_observations=2,
         stale_after_days=10_000,
         universe=["AAA"],
+        yahoo_chart_fallback_limit=0,
         finance_datareader_fallback_limit=0,
     )
     candidate = _candidate_frame(["AAA"])
@@ -692,6 +837,22 @@ def test_provider_summary_marks_cached_stooq_as_mixed():
     assert (
         _provider_label_from_sources(stooq_sources, fdr_sources)
         == "yfinance-free-public-data+stooq-fallback+finance-datareader-fallback"
+    )
+    yahoo_chart_sources = pd.DataFrame(
+        [{"source": "yahoo-chart-adjusted-daily-fallback", "symbol": "YCH", "status": "fetched", "records": 1}]
+    )
+    nasdaq_sources = pd.DataFrame(
+        [{"source": "nasdaq-latest-close-repair", "symbol": "TAIL", "status": "fetched", "records": 2}]
+    )
+    assert (
+        _provider_label_from_sources(
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame([{"source": "yfinance-adjusted-daily", "records": 1}]),
+            yahoo_chart_sources,
+            nasdaq_sources,
+        )
+        == "yfinance-free-public-data+yahoo-chart-fallback+nasdaq-latest-repair"
     )
     assert _provider_label_from_sources(pd.DataFrame()) == "yfinance-free-public-data"
 

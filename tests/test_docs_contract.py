@@ -20,12 +20,15 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "--max-extreme-daily-return" in readme
     assert "source=... as_of=YYYY-MM-DD symbol_count=... hash=..." in readme
     assert "Stooq fallback rows" in methodology
+    assert "Yahoo chart adjusted-close fallback" in readme
     assert "factor_validation" in combined
     assert "factor_score_history_top20" in combined
     assert "primary `recommendations`" in combined
     assert "row-level liquidity/capacity" in combined
     assert "`--max-price-symbols` is still available for explicit smoke/debug runs" in readme
     assert "FinanceDataReader fallback" in readme
+    assert "Nasdaq historical latest-close repair" in readme
+    assert "per-source success/failure health" in readme
     assert "point-in-time universe evidence" in readme
     assert "liquidity evidence" in readme
     assert "capacity warnings" in combined
@@ -35,8 +38,11 @@ def test_readme_and_methodology_qualify_recommendations_as_research_or_fresh_liv
     assert "no explicit price-symbol cap" in methodology
     assert "complete provider price coverage" in methodology
     assert "hard price-integrity checks" in methodology
-    assert "Stooq daily CSV is the first fallback" in methodology
-    assert "FinanceDataReader is an optional second fallback" in methodology
+    assert "Yahoo chart adjusted close is the first fallback" in methodology
+    assert "Nasdaq latest-close repair runs after Yahoo chart" in methodology
+    assert "Stooq daily CSV is the next fallback" in methodology
+    assert "FinanceDataReader is an optional final fallback" in methodology
+    assert "per-source success/failure/no-newer health" in methodology
     assert "docs/factor-catalog.md" in readme
     assert "Total factors: **56**" in factor_catalog
     assert "Full factor definitions" in factor_catalog

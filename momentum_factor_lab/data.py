@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -232,6 +232,7 @@ DATA_QUALITY_COLUMNS = [
 ]
 
 YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
+YAHOO_CHART_TIMEOUT_SECONDS = 20
 
 
 def _exclusion_status(reason: object) -> str:
@@ -675,6 +676,16 @@ def _stooq_cache_path(config: RunConfig, symbol: str) -> Path:
     return config.cache_dir / "prices" / "stooq" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
 
 
+def _yahoo_chart_cache_path(config: RunConfig, symbol: str) -> Path:
+    safe = symbol.replace("/", "_").replace("-", "_").replace("^", "INDEX_")
+    return config.cache_dir / "prices" / "yahoo_chart" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
+
+
+def _nasdaq_cache_path(config: RunConfig, symbol: str) -> Path:
+    safe = symbol.replace("/", "_").replace("-", "_").replace("^", "INDEX_")
+    return config.cache_dir / "prices" / "nasdaq" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
+
+
 def _finance_datareader_cache_path(config: RunConfig, symbol: str) -> Path:
     safe = symbol.replace("/", "_").replace("-", "_")
     return config.cache_dir / "prices" / "finance_datareader" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
@@ -767,6 +778,359 @@ def _download_yfinance(symbols: list[str], config: RunConfig) -> tuple[pd.DataFr
     prices = prices.loc[:, ~prices.columns.duplicated()].sort_index()
     volumes = volumes.loc[:, ~volumes.columns.duplicated()].reindex(index=prices.index, columns=prices.columns)
     return prices, volumes, pd.DataFrame(rows)
+
+
+def _unix_seconds_for_date(value: str, *, add_days: int = 0) -> int:
+    timestamp = pd.Timestamp(value).normalize() + pd.Timedelta(days=add_days)
+    return int(timestamp.tz_localize(UTC).timestamp())
+
+
+def _yahoo_chart_symbol(symbol: str) -> str:
+    # Yahoo chart expects Yahoo-style tickers. The project stores normalized
+    # tickers, so only slash-class shares need translation back to Yahoo's dash
+    # form here.
+    return quote(symbol.replace("/", "-"), safe="")
+
+
+def _frame_from_yahoo_chart_payload(payload: dict[str, object], symbol: str) -> tuple[pd.DataFrame | None, str | None]:
+    chart = payload.get("chart")
+    if not isinstance(chart, dict):
+        return None, "invalid Yahoo chart payload: missing chart object"
+    errors = chart.get("error")
+    if errors:
+        return None, f"Yahoo chart error: {errors}"
+    results = chart.get("result")
+    if not isinstance(results, list) or not results:
+        return None, "empty Yahoo chart response"
+    result = results[0]
+    if not isinstance(result, dict):
+        return None, "invalid Yahoo chart response"
+    timestamps = result.get("timestamp")
+    indicators = result.get("indicators")
+    if not isinstance(timestamps, list) or not timestamps or not isinstance(indicators, dict):
+        return None, "empty Yahoo chart timestamp/indicator response"
+    quotes = indicators.get("quote")
+    adjcloses = indicators.get("adjclose")
+    if not isinstance(quotes, list) or not quotes or not isinstance(quotes[0], dict):
+        return None, "Yahoo chart response missing quote data"
+    if not isinstance(adjcloses, list) or not adjcloses or not isinstance(adjcloses[0], dict):
+        return None, "Yahoo chart response missing adjusted close data"
+    adjusted = adjcloses[0].get("adjclose")
+    if not isinstance(adjusted, list) or not adjusted:
+        return None, "Yahoo chart response missing adjusted close values"
+    volume = quotes[0].get("volume", [])
+    if not isinstance(volume, list):
+        volume = []
+    dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None).normalize()
+    frame = pd.DataFrame(
+        {
+            "Date": dates,
+            "Close": pd.to_numeric(pd.Series(adjusted), errors="coerce"),
+            "Volume": pd.to_numeric(pd.Series(volume), errors="coerce"),
+        }
+    )
+    frame = frame.dropna(subset=["Date", "Close"])
+    if frame.empty:
+        return None, f"Yahoo chart response for {symbol} had no numeric adjusted close rows"
+    return frame, None
+
+
+def _download_yahoo_chart_symbol(
+    symbol: str,
+    config: RunConfig,
+) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
+    cache_path = _yahoo_chart_cache_path(config, symbol)
+    if cache_path.exists():
+        try:
+            frame = pd.read_csv(cache_path)
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "Yahoo chart cache")
+            if price is None:
+                return None, None, error, "cache_hit_invalid", str(cache_path), 0
+            return price, volume, None, "cache_hit", str(cache_path), 0
+        except Exception as exc:
+            return None, None, f"invalid Yahoo chart cache: {exc}", "cache_hit_invalid", str(cache_path), 0
+
+    params = urlencode(
+        {
+            "period1": _unix_seconds_for_date(config.start_date),
+            "period2": _unix_seconds_for_date(config.effective_end_date, add_days=1),
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        }
+    )
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{_yahoo_chart_symbol(symbol)}?{params}"
+    last_error = None
+    for attempt in range(config.retry_count + 1):
+        try:
+            with urlopen(Request(url, headers={"User-Agent": "momentum-factor-lab/0.1"}), timeout=YAHOO_CHART_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            frame, error = _frame_from_yahoo_chart_payload(payload, symbol)
+            if frame is None:
+                return None, None, error, "failed", str(cache_path), attempt
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "Yahoo chart response")
+            if price is None:
+                return None, None, error, "failed", str(cache_path), attempt
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            frame.to_csv(cache_path, index=False)
+            return price, volume, None, "fetched", str(cache_path), attempt
+        except Exception as exc:  # pragma: no cover - network dependent
+            last_error = exc
+            if attempt < config.retry_count:
+                time.sleep(config.retry_backoff_seconds)
+    return None, None, str(last_error), "failed", str(cache_path), config.retry_count
+
+
+def _apply_yahoo_chart_fallback(
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    symbols: list[str],
+    config: RunConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    missing_all = _fallback_candidate_symbols(prices, volumes, symbols, config)
+    limit = len(missing_all) if config.yahoo_chart_fallback_limit is None else config.yahoo_chart_fallback_limit
+    missing = missing_all[:limit]
+    rows = []
+    for symbol in missing:
+        price, volume, error, status, cache_path, retries = _download_yahoo_chart_symbol(symbol, config)
+        if price is None:
+            rows.append(
+                {
+                    "source": "yahoo-chart-adjusted-daily-fallback",
+                    "symbol": symbol,
+                    "status": "failed" if not status.startswith("cache") else status,
+                    "records": 0,
+                    "requested_price_symbols": 1,
+                    "requested_symbols": symbol,
+                    "returned_symbols": "",
+                    "missing_symbols": symbol,
+                    "cache_hit": status.startswith("cache"),
+                    "cache_path": cache_path,
+                    "retries": retries,
+                    "error": error,
+                    "provider_adjustment_note": "Yahoo chart fallback returned no usable adjusted-close series.",
+                    "note": symbol,
+                }
+            )
+            continue
+        prices = prices.drop(columns=[symbol], errors="ignore").join(price, how="outer")
+        volumes = volumes.drop(columns=[symbol], errors="ignore").join(volume, how="outer")
+        rows.append(
+            {
+                "source": "yahoo-chart-adjusted-daily-fallback",
+                "symbol": symbol,
+                "status": status,
+                "records": 1,
+                "requested_price_symbols": 1,
+                "requested_symbols": symbol,
+                "returned_symbols": symbol,
+                "missing_symbols": "",
+                "as_of_min": str(price.dropna().index.min().date()) if not price.dropna().empty else None,
+                "as_of_max": str(price.dropna().index.max().date()) if not price.dropna().empty else None,
+                "cache_hit": status == "cache_hit",
+                "cache_path": cache_path,
+                "retries": retries,
+                "error": None,
+                "provider_adjustment_note": "Yahoo chart adjusted-close fallback; used when yfinance bulk data was stale, sparse, or missing.",
+                "note": f"{symbol}; adjusted close from Yahoo chart endpoint",
+            }
+        )
+    return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
+
+
+def _parse_nasdaq_number(value: object) -> float:
+    text = str(value or "").strip().replace("$", "").replace(",", "")
+    if not text or text.lower() in {"n/a", "nan", "none", "--"}:
+        return np.nan
+    try:
+        return float(text)
+    except ValueError:
+        return np.nan
+
+
+def _frame_from_nasdaq_payload(payload: dict[str, object], symbol: str) -> tuple[pd.DataFrame | None, str | None]:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None, "invalid Nasdaq payload: missing data object"
+    table = data.get("tradesTable")
+    if not isinstance(table, dict):
+        return None, "invalid Nasdaq payload: missing tradesTable"
+    rows = table.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None, "empty Nasdaq historical response"
+    parsed_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        parsed_rows.append(
+            {
+                "Date": pd.to_datetime(row.get("date"), errors="coerce"),
+                "Close": _parse_nasdaq_number(row.get("close")),
+                "Volume": _parse_nasdaq_number(row.get("volume")),
+            }
+        )
+    frame = pd.DataFrame(parsed_rows).dropna(subset=["Date", "Close"])
+    if frame.empty:
+        return None, f"Nasdaq historical response for {symbol} had no numeric close rows"
+    return frame.sort_values("Date"), None
+
+
+def _download_nasdaq_symbol(
+    symbol: str,
+    config: RunConfig,
+) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
+    cache_path = _nasdaq_cache_path(config, symbol)
+    if cache_path.exists():
+        try:
+            frame = pd.read_csv(cache_path)
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "Nasdaq cache")
+            if price is None:
+                return None, None, error, "cache_hit_invalid", str(cache_path), 0
+            return price, volume, None, "cache_hit", str(cache_path), 0
+        except Exception as exc:
+            return None, None, f"invalid Nasdaq cache: {exc}", "cache_hit_invalid", str(cache_path), 0
+
+    params = urlencode(
+        {
+            "assetclass": "stocks",
+            "fromdate": config.start_date,
+            "todate": config.effective_end_date,
+            "limit": "9999",
+        }
+    )
+    url = f"https://api.nasdaq.com/api/quote/{quote(symbol, safe='')}/historical?{params}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://www.nasdaq.com",
+        "Referer": "https://www.nasdaq.com/",
+    }
+    last_error = None
+    for attempt in range(config.retry_count + 1):
+        try:
+            with urlopen(Request(url, headers=headers), timeout=YAHOO_CHART_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            frame, error = _frame_from_nasdaq_payload(payload, symbol)
+            if frame is None:
+                return None, None, error, "failed", str(cache_path), attempt
+            price, volume, error = _validated_provider_close_volume(frame, symbol, "Nasdaq historical response")
+            if price is None:
+                return None, None, error, "failed", str(cache_path), attempt
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            frame.to_csv(cache_path, index=False)
+            return price, volume, None, "fetched", str(cache_path), attempt
+        except Exception as exc:  # pragma: no cover - network dependent
+            last_error = exc
+            if attempt < config.retry_count:
+                time.sleep(config.retry_backoff_seconds)
+    return None, None, str(last_error), "failed", str(cache_path), config.retry_count
+
+
+def _apply_nasdaq_latest_repair(
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    symbols: list[str],
+    config: RunConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    fallback_all = [
+        symbol
+        for symbol in _fallback_candidate_symbols(prices, volumes, symbols, config)
+        if symbol in prices.columns and not pd.to_numeric(prices[symbol], errors="coerce").dropna().empty
+    ]
+    limit = len(fallback_all) if config.nasdaq_fallback_limit is None else config.nasdaq_fallback_limit
+    candidates = fallback_all[:limit]
+    rows = []
+    for symbol in candidates:
+        before_price_full = pd.to_numeric(prices[symbol], errors="coerce").rename(symbol)
+        before_price = before_price_full.dropna()
+        before_last = before_price.index.max() if not before_price.empty else None
+        before_volume = (
+            pd.to_numeric(volumes[symbol], errors="coerce").rename(symbol)
+            if symbol in volumes.columns
+            else pd.Series(index=before_price_full.index, dtype=float, name=symbol)
+        )
+        price, volume, error, status, cache_path, retries = _download_nasdaq_symbol(symbol, config)
+        if price is None:
+            rows.append(
+                {
+                    "source": "nasdaq-latest-close-repair",
+                    "symbol": symbol,
+                    "status": "failed" if not status.startswith("cache") else status,
+                    "records": 0,
+                    "requested_price_symbols": 1,
+                    "requested_symbols": symbol,
+                    "returned_symbols": "",
+                    "missing_symbols": symbol,
+                    "cache_hit": status.startswith("cache"),
+                    "cache_path": cache_path,
+                    "retries": retries,
+                    "error": error,
+                    "provider_adjustment_note": "Nasdaq latest-close repair returned no usable close rows.",
+                    "note": symbol,
+                }
+            )
+            continue
+        tail_price = price[price.index > before_last].dropna() if before_last is not None else pd.Series(dtype=float, name=symbol)
+        tail_volume = (
+            volume.reindex(tail_price.index)
+            if volume is not None and not tail_price.empty
+            else pd.Series(index=tail_price.index, dtype=float, name=symbol)
+        )
+        repaired_price = before_price_full.combine_first(tail_price).sort_index().rename(symbol)
+        repaired_volume = before_volume.combine_first(tail_volume).sort_index().rename(symbol)
+        after_last = repaired_price.dropna().index.max() if not repaired_price.dropna().empty else None
+        added_dates = list(tail_price.index)
+        if after_last is None or before_last is None or after_last <= before_last or not added_dates:
+            rows.append(
+                {
+                    "source": "nasdaq-latest-close-repair",
+                    "symbol": symbol,
+                    "status": "no_newer_rows",
+                    "records": 0,
+                    "requested_price_symbols": 1,
+                    "requested_symbols": symbol,
+                    "returned_symbols": "",
+                    "missing_symbols": symbol,
+                    "as_of_min": str(price.dropna().index.min().date()) if not price.dropna().empty else None,
+                    "as_of_max": str(price.dropna().index.max().date()) if not price.dropna().empty else None,
+                    "cache_hit": status == "cache_hit",
+                    "cache_path": cache_path,
+                    "retries": retries,
+                    "error": None,
+                    "provider_adjustment_note": "Nasdaq response did not extend the existing adjusted-price history.",
+                    "note": f"{symbol}; no fresher Nasdaq rows than existing series",
+                }
+            )
+            continue
+        prices = prices.drop(columns=[symbol], errors="ignore").join(repaired_price, how="outer")
+        volumes = volumes.drop(columns=[symbol], errors="ignore").join(repaired_volume, how="outer")
+        rows.append(
+            {
+                "source": "nasdaq-latest-close-repair",
+                "symbol": symbol,
+                "status": status,
+                "records": int(len(added_dates)),
+                "requested_price_symbols": 1,
+                "requested_symbols": symbol,
+                "returned_symbols": symbol,
+                "missing_symbols": "",
+                "as_of_min": str(repaired_price.dropna().index.min().date()),
+                "as_of_max": str(repaired_price.dropna().index.max().date()),
+                "cache_hit": status == "cache_hit",
+                "cache_path": cache_path,
+                "retries": retries,
+                "error": None,
+                "provider_adjustment_note": (
+                    "Nasdaq historical close filled only dates missing from an existing Yahoo adjusted-price series; "
+                    "historical adjusted prices were preserved."
+                ),
+                "note": f"{symbol}; added {len(added_dates)} newer close row(s) after {before_last.date()}",
+            }
+        )
+    return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
 
 
 def _stooq_symbol(symbol: str) -> str:
@@ -1183,10 +1547,20 @@ def _provider_label_from_sources(
     stooq_sources: pd.DataFrame,
     finance_datareader_sources: pd.DataFrame | None = None,
     yfinance_sources: pd.DataFrame | None = None,
+    yahoo_chart_sources: pd.DataFrame | None = None,
+    nasdaq_sources: pd.DataFrame | None = None,
 ) -> str:
     providers: list[str] = []
     if yfinance_sources is None or _has_positive_records(yfinance_sources):
         providers.append("yfinance-free-public-data")
+    yahoo_chart = yahoo_chart_sources if yahoo_chart_sources is not None else pd.DataFrame()
+    yahoo_chart_records = yahoo_chart.get("records", pd.Series(dtype=float)) if not yahoo_chart.empty else pd.Series(dtype=float)
+    if not yahoo_chart.empty and yahoo_chart_records.fillna(0).astype(int).gt(0).any():
+        providers.append("yahoo-chart-fallback")
+    nasdaq = nasdaq_sources if nasdaq_sources is not None else pd.DataFrame()
+    nasdaq_records = nasdaq.get("records", pd.Series(dtype=float)) if not nasdaq.empty else pd.Series(dtype=float)
+    if not nasdaq.empty and nasdaq_records.fillna(0).astype(int).gt(0).any():
+        providers.append("nasdaq-latest-repair")
     records = stooq_sources.get("records", pd.Series(dtype=float)) if not stooq_sources.empty else pd.Series(dtype=float)
     if not stooq_sources.empty and records.fillna(0).astype(int).gt(0).any():
         providers.append("stooq-fallback")
@@ -1243,6 +1617,14 @@ def download_live_data(config: RunConfig) -> MarketData:
             )
 
     try:
+        if config.yahoo_chart_fallback_limit != 0:
+            prices, volumes, yahoo_chart_sources = _apply_yahoo_chart_fallback(prices, volumes, symbols, config)
+        else:
+            yahoo_chart_sources = pd.DataFrame()
+        if config.nasdaq_fallback_limit != 0:
+            prices, volumes, nasdaq_sources = _apply_nasdaq_latest_repair(prices, volumes, symbols, config)
+        else:
+            nasdaq_sources = pd.DataFrame()
         if config.stooq_fallback_limit != 0:
             prices, volumes, stooq_sources = _apply_stooq_fallback(prices, volumes, symbols, config)
         else:
@@ -1285,6 +1667,22 @@ def download_live_data(config: RunConfig) -> MarketData:
     stooq_symbols = set()
     if not stooq_sources.empty and "symbol" in stooq_sources:
         stooq_symbols = set(stooq_sources.loc[stooq_sources["records"].fillna(0).astype(int).gt(0), "symbol"].astype(str))
+    yahoo_chart_symbols = set()
+    if not yahoo_chart_sources.empty and "symbol" in yahoo_chart_sources:
+        yahoo_chart_symbols = set(
+            yahoo_chart_sources.loc[
+                yahoo_chart_sources["records"].fillna(0).astype(int).gt(0),
+                "symbol",
+            ].astype(str)
+        )
+    nasdaq_symbols = set()
+    if not nasdaq_sources.empty and "symbol" in nasdaq_sources:
+        nasdaq_symbols = set(
+            nasdaq_sources.loc[
+                nasdaq_sources["records"].fillna(0).astype(int).gt(0),
+                "symbol",
+            ].astype(str)
+        )
     finance_datareader_symbols = set()
     if not finance_datareader_sources.empty and "symbol" in finance_datareader_sources:
         finance_datareader_symbols = set(
@@ -1295,7 +1693,16 @@ def download_live_data(config: RunConfig) -> MarketData:
         )
     price_source_rows = []
     for symbol in downloaded_prices.columns:
-        if symbol in stooq_symbols:
+        if symbol in nasdaq_symbols:
+            source = "nasdaq-latest-close-repair"
+            note = (
+                "Nasdaq historical close filled only dates missing from an existing Yahoo adjusted-price series; "
+                "historical adjusted prices were preserved."
+            )
+        elif symbol in yahoo_chart_symbols:
+            source = "yahoo-chart-adjusted-daily-fallback"
+            note = "Yahoo chart adjusted-close fallback; used when yfinance bulk data was stale, sparse, or missing."
+        elif symbol in stooq_symbols:
             source = "stooq-daily-close-fallback"
             note = "Stooq close-price fallback; adjusted-price compatibility may differ from yfinance."
         elif symbol in finance_datareader_symbols:
@@ -1320,12 +1727,24 @@ def download_live_data(config: RunConfig) -> MarketData:
         symbols,
         candidate,
         config,
-        provider=_provider_label_from_sources(stooq_sources, finance_datareader_sources, yf_sources),
+        provider=_provider_label_from_sources(
+            stooq_sources,
+            finance_datareader_sources,
+            yf_sources,
+            yahoo_chart_sources,
+            nasdaq_sources,
+        ),
         price_sources=price_sources,
         exclusions=exclusions,
         as_of=downloaded_prices.dropna(how="all").index.max() if not downloaded_prices.empty else None,
     )
-    provider = _provider_label_from_sources(stooq_sources, finance_datareader_sources, yf_sources)
+    provider = _provider_label_from_sources(
+        stooq_sources,
+        finance_datareader_sources,
+        yf_sources,
+        yahoo_chart_sources,
+        nasdaq_sources,
+    )
     returned_symbols = [symbol for symbol in symbols if symbol in downloaded_prices.columns]
     returned_candidate_symbols = [symbol for symbol in requested_candidate_symbols if symbol in downloaded_prices.columns]
     missing_symbols = [symbol for symbol in symbols if symbol not in downloaded_prices.columns]
@@ -1368,7 +1787,7 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "point_in_time_universe": False,
                 "tradable_universe_approved": False,
                 "provider_adjustment_note": (
-                    "yfinance auto_adjust=True; Stooq and FinanceDataReader close fallback rows are separately labeled when used."
+                    "yfinance auto_adjust=True; Yahoo chart adjusted-close, Nasdaq latest-close repair, Stooq close, and FinanceDataReader close fallback rows are separately labeled when used."
                 ),
                 "note": (
                     "Model-portfolio outputs are based only on eligible stock candidate price symbols after history, "
@@ -1382,6 +1801,8 @@ def download_live_data(config: RunConfig) -> MarketData:
         [
             universe_sources,
             yf_sources,
+            yahoo_chart_sources,
+            nasdaq_sources,
             stooq_sources,
             finance_datareader_sources,
             summary,

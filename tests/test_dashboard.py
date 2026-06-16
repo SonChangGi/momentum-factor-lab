@@ -55,7 +55,13 @@ def test_dashboard_payload_contains_period_leaders_and_holdings(tmp_path):
     assert payload["holdings"]
     assert {"symbol", "score", "default_weight", "window", "weight_source"}.issubset(payload["holdings"][0])
     assert payload["holdings"][0]["weight_source"] == "백테스트 일별 보유 비중"
-    assert payload["data_quality_summary"]["candidate_universe_size"] >= 2000
+    quality = payload["data_quality_summary"]
+    assert quality["candidate_universe_size"] >= 2000
+    assert quality["price_coverage_ratio"] is not None
+    assert quality["eligible_price_ratio"] is not None
+    assert quality["data_quality_pass_ratio"] is not None
+    assert quality["source_health"]
+    assert {"source", "success_rows", "failed_rows", "records_sum"}.issubset(quality["source_health"][0])
     assert payload["tradability_gate"]
     assert {"key", "label_ko", "description_ko", "passed"}.issubset(payload["tradability_gate"][0])
     assert payload["factor_diagnostics"]["category_summary"]

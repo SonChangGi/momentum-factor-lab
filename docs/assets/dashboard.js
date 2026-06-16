@@ -87,6 +87,8 @@ function humanProvider(value) {
   const text = textValue(value);
   const labels = {
     'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'yahoo-chart-fallback': 'Yahoo chart 조정종가 보강 데이터',
+    'nasdaq-latest-repair': 'Nasdaq 최신 종가 보강 데이터',
     'stooq-fallback': 'Stooq 무료 일별 종가 대체 데이터',
     'finance-datareader-fallback': 'FinanceDataReader 무료 종가 대체 데이터',
     'no-live-price-provider': '사용 가능한 실시간 가격 제공자 없음',
@@ -605,6 +607,47 @@ function formatCounts(counts, labels = {}) {
     .join(' · ');
 }
 
+function humanSourceName(value) {
+  const text = textValue(value);
+  const labels = {
+    'yfinance-adjusted-daily': 'yfinance 조정가격',
+    'yahoo-chart-adjusted-daily-fallback': 'Yahoo chart 보강',
+    'nasdaq-latest-close-repair': 'Nasdaq 최신일 보강',
+    'stooq-daily-close-fallback': 'Stooq 대체',
+    'finance-datareader-close-fallback': 'FinanceDataReader 대체',
+    'yfinance-fast-info-market-cap': '시가총액 보강',
+    'live-run-summary': '전체 실행 요약',
+    'packaged-default-universe': '패키지 유니버스',
+  };
+  return labels[text] || text;
+}
+
+function formatCoverageMetric(ratio, numerator, denominator) {
+  const ratioText = formatPercent(ratio);
+  const num = Number(numerator);
+  const den = Number(denominator);
+  if (Number.isFinite(num) && Number.isFinite(den) && den > 0) {
+    return `${ratioText} (${formatInteger(num)} / ${formatInteger(den)})`;
+  }
+  return ratioText;
+}
+
+function formatSourceHealth(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '-';
+  return rows
+    .filter((row) => row && row.source)
+    .slice(0, 8)
+    .map((row) => {
+      const parts = [];
+      if (Number(row.success_rows) > 0) parts.push(`성공 ${formatInteger(row.success_rows)}`);
+      if (Number(row.no_newer_rows) > 0) parts.push(`추가 없음 ${formatInteger(row.no_newer_rows)}`);
+      if (Number(row.failed_rows) > 0) parts.push(`실패 ${formatInteger(row.failed_rows)}`);
+      if (!parts.length) parts.push(`행 ${formatInteger(row.row_count)}`);
+      return `${humanSourceName(row.source)}: ${parts.join(', ')}`;
+    })
+    .join(' · ');
+}
+
 function setStatusMessage(message) {
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
@@ -832,12 +875,65 @@ function renderDiagnostics() {
   appendDefinition(dataSummary, '후보 종목', formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size));
   appendDefinition(dataSummary, '가격 적격 종목', formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size));
   appendDefinition(dataSummary, '유동성 적격 종목', formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size));
-  appendDefinition(dataSummary, '가격 수집 종목', formatCount(quality.fetched_price_symbol_count));
+  appendDefinition(dataSummary, '모형 가격 보유 종목', formatCount(quality.fetched_price_symbol_count));
   appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
+  appendDefinition(
+    dataSummary,
+    '요청 가격 커버리지',
+    formatCoverageMetric(
+      quality.price_coverage_ratio,
+      quality.provider_returned_symbol_count,
+      quality.provider_requested_symbol_count,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '모형 가격 보유 비율',
+    formatCoverageMetric(
+      quality.model_price_universe_ratio,
+      quality.fetched_price_symbol_count,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '가격 적격 비율',
+    formatCoverageMetric(
+      quality.eligible_price_ratio,
+      summary.eligible_price_universe_size ?? quality.eligible_price_universe_size,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '유동성 적격 비율',
+    formatCoverageMetric(
+      quality.liquidity_eligible_ratio,
+      summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '신선 가격 비율',
+    formatCoverageMetric(quality.fresh_price_ratio, quality.fresh_price_rows, quality.price_quality_rows),
+  );
   appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
   appendDefinition(dataSummary, '최근 실행 시각', formatKoreanDateTime(summary.run_timestamp_utc));
   appendDefinition(dataSummary, '실행 결과 생성 시각', formatKoreanDateTime(runPayloadGeneratedAt(run)));
   appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
+  appendDefinition(dataSummary, '소스별 수집 상태', formatSourceHealth(quality.source_health));
+  appendDefinition(
+    dataSummary,
+    '가격 소스 분포',
+    formatCounts(quality.price_source_counts, {
+      'yfinance-adjusted-daily': 'yfinance',
+      'yahoo-chart-adjusted-daily-fallback': 'Yahoo chart',
+      'nasdaq-latest-close-repair': 'Nasdaq 보강',
+      'stooq-daily-close-fallback': 'Stooq',
+      'finance-datareader-close-fallback': 'FinanceDataReader',
+    }),
+  );
   appendDefinition(
     dataSummary,
     '품질 상태',

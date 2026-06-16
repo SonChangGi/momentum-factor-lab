@@ -7,8 +7,8 @@ Practical momentum factor research/backtesting lab for broad US individual stock
 - Builds a source-aware candidate universe of **2,900+ US-listed individual stocks** by default from packaged public-source seeds; ETFs are excluded from candidate holdings.
 - Supports optional public-source refresh from SEC company tickers and Nasdaq Trader symbol directories.
 - User-supplied `--universe` symbols are fail-closed: they are intersected with packaged/public stock metadata, so unknown symbol-only inputs are not assumed to be individual stocks.
-- Downloads daily adjusted prices from yfinance in chunks, with bounded Stooq fallback and source/provenance reporting; benchmark ETF prices may be fetched only for benchmark-relative metrics.
-- Compares **55 explainable momentum factors** across traditional, recent, composite, trend, risk-adjusted, drawdown, breakout, reversal, acceleration, consistency, and robust-return families. The full formula/definition catalog is maintained in [`docs/factor-catalog.md`](docs/factor-catalog.md) and mirrored into the `factor_definitions` report sheet.
+- Downloads daily adjusted prices from yfinance in chunks, with Yahoo chart adjusted-close repair, Nasdaq latest-close tail repair, bounded Stooq/FinanceDataReader fallbacks, and source/provenance reporting; benchmark ETF prices may be fetched only for benchmark-relative metrics.
+- Compares **56 explainable momentum factors** across traditional, recent, composite, trend, risk-adjusted, drawdown, breakout, reversal, acceleration, consistency, and robust-return families. The full formula/definition catalog is maintained in [`docs/factor-catalog.md`](docs/factor-catalog.md) and mirrored into the `factor_definitions` report sheet.
 - Backtests each factor as a long-only **top-20 portfolio** at each rebalance with one-day execution delay and transaction/slippage assumptions.
 - Selects a best factor using validation-first risk-adjusted scoring, not in-sample return alone.
 - Generates a readable PDF report and Excel workbook with data-source coverage, symbol-level data-quality diagnostics, factor formulas, validation audit, benchmark-relative metrics, sensitivity, robustness, and gated model-portfolio recommendations or zero-weight research signals with explicit fail-closed limitations, row-level data-quality, liquidity, and capacity evidence.
@@ -123,12 +123,15 @@ Generated artifacts are ignored by git:
 - `reports/...pdf` — narrative report with charts, tables, assumptions, factor comparison, selected factor, data coverage, symbol-level data-quality diagnostics, formula validation, recommendation output type, execution limitations, row-level liquidity/capacity diagnostics, and caveats.
 - `reports/...xlsx` — workbook with config/assumptions, universe, data sources, `data_quality`, factor definitions, factor validation, latest factor scores with eligibility scope, eligibility-aware top-20 historical factor scores, metrics, benchmark-relative metrics, recomputed cost-stress metrics, primary `recommendations` sheet when tradable, otherwise `research_signals`, exclusions, robustness, and sensitivity.
 - `outputs/...json` — canonical strict JSON run-results object used to keep PDF and Excel aligned; non-finite values are converted to JSON nulls rather than NaN/Infinity.
+- `docs/data/dashboard.json` — compact web payload with data-quality coverage ratios, freshness ratios, per-source success/failure health, price-source distribution, tradability gates, and visualization-ready factor/holding snapshots.
 
 ## Public/free data sources
 
 - SEC company tickers exchange JSON: `https://www.sec.gov/files/company_tickers_exchange.json`
 - Nasdaq Trader symbol directories: `https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt`, `https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt`
 - yfinance free/public daily adjusted prices.
+- Yahoo chart adjusted-close fallback for stale, sparse, or missing yfinance-bulk symbols; omitted `--yahoo-chart-fallback-limit` retries all fallback candidates, while `--yahoo-chart-fallback-limit 0` disables this repair step.
+- Nasdaq historical latest-close repair for symbols whose existing Yahoo-adjusted history is usable but missing the newest trading dates; it fills only absent tail dates after the adjusted-history cutoff, preserves the existing adjusted history, and is controlled by `--nasdaq-fallback-limit`. The appended tail is still Nasdaq close data, so corporate-action-sensitive rows remain source-labeled for review.
 - Stooq daily CSV fallback for missing-symbol attempts; omitted `--stooq-fallback-limit` retries all missing symbols, while `--stooq-fallback-limit 0` disables this fallback.
 - Optional FinanceDataReader fallback for still-missing symbols when installed via `.[live]`; omitted `--finance-datareader-fallback-limit` retries all remaining missing symbols, while `0` disables it.
 

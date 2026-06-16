@@ -30,6 +30,8 @@ class RunConfig:
     cache_dir: Path = Path(".cache/momentum_factor_lab")
     max_price_symbols: int | None = None
     price_chunk_size: int = 150
+    yahoo_chart_fallback_limit: int | None = None
+    nasdaq_fallback_limit: int | None = None
     stooq_fallback_limit: int | None = None
     finance_datareader_fallback_limit: int | None = None
     retry_count: int = 1
@@ -83,6 +85,10 @@ class RunConfig:
             raise ValueError("max_price_symbols must be at least 1 when provided")
         if self.price_chunk_size < 1:
             raise ValueError("price_chunk_size must be at least 1")
+        if self.yahoo_chart_fallback_limit is not None and self.yahoo_chart_fallback_limit < 0:
+            raise ValueError("yahoo_chart_fallback_limit must be non-negative")
+        if self.nasdaq_fallback_limit is not None and self.nasdaq_fallback_limit < 0:
+            raise ValueError("nasdaq_fallback_limit must be non-negative")
         if self.stooq_fallback_limit is not None and self.stooq_fallback_limit < 0:
             raise ValueError("stooq_fallback_limit must be non-negative")
         if self.finance_datareader_fallback_limit is not None and self.finance_datareader_fallback_limit < 0:

@@ -12,6 +12,8 @@ def test_config_defaults_to_top_20_and_large_stock_only_universe():
     assert config.factor_selection_mode == "research_validation"
     assert config.effective_factor_selection_mode == "research_validation"
     assert config.max_price_symbols is None
+    assert config.yahoo_chart_fallback_limit is None
+    assert config.nasdaq_fallback_limit is None
     assert config.stooq_fallback_limit is None
     assert config.finance_datareader_fallback_limit is None
     assert len(config.universe) >= 2000
@@ -31,6 +33,8 @@ def test_config_defaults_to_top_20_and_large_stock_only_universe():
         ({"start_date": "2025-01-02", "end_date": "2025-01-01"}, "start_date"),
         ({"max_price_symbols": 0}, "max_price_symbols"),
         ({"price_chunk_size": 0}, "price_chunk_size"),
+        ({"yahoo_chart_fallback_limit": -1}, "yahoo_chart_fallback_limit"),
+        ({"nasdaq_fallback_limit": -1}, "nasdaq_fallback_limit"),
         ({"stooq_fallback_limit": -1}, "stooq_fallback_limit"),
         ({"finance_datareader_fallback_limit": -1}, "finance_datareader_fallback_limit"),
         ({"retry_count": -1}, "retry_count"),
