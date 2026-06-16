@@ -476,6 +476,9 @@ function currentWeightedHoldings() {
     selectedFactor: factor || '-',
     windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
     scoreDate: snapshot?.score_date || null,
+    scoreScope: snapshot?.score_scope || null,
+    rawAvailableCount: snapshot?.raw_available_count ?? null,
+    eligibilityFilterApplied: snapshot?.eligibility_filter_applied === true,
     missingReason: snapshot
       ? null
       : availableDates.length && !availableDates.includes(date)
@@ -757,6 +760,8 @@ function renderHoldingsTable() {
     scoreDate,
     unusedCandidateCount,
     maxWeight,
+    rawAvailableCount,
+    eligibilityFilterApplied,
     missingReason,
   } = currentWeightedHoldings();
   const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
@@ -767,13 +772,16 @@ function renderHoldingsTable() {
   const capNote = topN * maxWeight < 1
     ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
     : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
+  const scopeNote = eligibilityFilterApplied
+    ? `현재 모델 편입 가능 필터를 통과한 ${formatInteger(availableCount)}개 후보를 사용합니다${rawAvailableCount && rawAvailableCount !== availableCount ? ` (원점수 후보 ${formatInteger(rawAvailableCount)}개 중 실무 필터 통과분)` : ''}.`
+    : `편입 가능 필터 정보가 없어 원점수 후보 ${formatInteger(availableCount)}개를 연구 진단용으로 표시합니다.`;
   setText(
     '#holdings-availability',
     missingReason
       ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
       : run.history_payload_type === 'summary'
       ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
-      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. 전체 ${formatInteger(availableCount)}개 후보 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
+      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();

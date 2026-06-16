@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from .data import build_eligibility_mask
 from .universe import normalize_symbol
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1067,6 +1068,9 @@ function currentWeightedHoldings() {
     selectedFactor: factor || '-',
     windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
     scoreDate: snapshot?.score_date || null,
+    scoreScope: snapshot?.score_scope || null,
+    rawAvailableCount: snapshot?.raw_available_count ?? null,
+    eligibilityFilterApplied: snapshot?.eligibility_filter_applied === true,
     missingReason: snapshot
       ? null
       : availableDates.length && !availableDates.includes(date)
@@ -1348,6 +1352,8 @@ function renderHoldingsTable() {
     scoreDate,
     unusedCandidateCount,
     maxWeight,
+    rawAvailableCount,
+    eligibilityFilterApplied,
     missingReason,
   } = currentWeightedHoldings();
   const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
@@ -1358,13 +1364,16 @@ function renderHoldingsTable() {
   const capNote = topN * maxWeight < 1
     ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
     : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
+  const scopeNote = eligibilityFilterApplied
+    ? `현재 모델 편입 가능 필터를 통과한 ${formatInteger(availableCount)}개 후보를 사용합니다${rawAvailableCount && rawAvailableCount !== availableCount ? ` (원점수 후보 ${formatInteger(rawAvailableCount)}개 중 실무 필터 통과분)` : ''}.`
+    : `편입 가능 필터 정보가 없어 원점수 후보 ${formatInteger(availableCount)}개를 연구 진단용으로 표시합니다.`;
   setText(
     '#holdings-availability',
     missingReason
       ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
       : run.history_payload_type === 'summary'
       ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
-      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. 전체 ${formatInteger(availableCount)}개 후보 중 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
+      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
@@ -2121,6 +2130,38 @@ fetch('data/dashboard.json')
 """
 
 
+
+def _score_columns(result: RunResult) -> list[str]:
+    if not getattr(result, "factor_scores", None):
+        return []
+    columns: list[str] = []
+    for scores in result.factor_scores.values():
+        for column in scores.columns:
+            if column not in columns:
+                columns.append(column)
+    return columns
+
+
+def _score_eligibility_mask(result: RunResult) -> pd.DataFrame | None:
+    columns = _score_columns(result)
+    prices = getattr(result.market_data, "prices", pd.DataFrame())
+    volumes = getattr(result.market_data, "volumes", pd.DataFrame())
+    if not columns or prices is None or prices.empty:
+        return None
+    reference_index = next(iter(result.factor_scores.values())).index
+    price_frame = prices.reindex(index=reference_index, columns=columns)
+    if volumes is None or volumes.empty:
+        volume_frame = pd.DataFrame(index=reference_index, columns=columns, dtype=float)
+    else:
+        volume_frame = volumes.reindex(index=reference_index, columns=columns)
+    return build_eligibility_mask(price_frame, volume_frame, result.config)
+
+
+def _eligibility_row(mask: pd.DataFrame | None, date: pd.Timestamp, symbols: pd.Index) -> pd.Series:
+    if mask is None or mask.empty or date not in mask.index:
+        return pd.Series(pd.NA, index=symbols, dtype="object")
+    return mask.loc[date].reindex(symbols).fillna(False).astype(bool)
+
 def build_dashboard_payload(
     result: RunResult,
     *,
@@ -2165,6 +2206,7 @@ def build_dashboard_payload(
         leader_rows,
         max_snapshot_dates=max_score_snapshot_dates,
         max_symbols=max_score_snapshot_symbols,
+        eligibility_mask=_score_eligibility_mask(result),
     )
     backtest_series = _factor_backtest_series(
         result,
@@ -2843,6 +2885,7 @@ def _factor_score_snapshots(
     *,
     max_snapshot_dates: int,
     max_symbols: int,
+    eligibility_mask: pd.DataFrame | None = None,
 ) -> list[dict[str, Any]]:
     if not result.factor_scores or not leader_rows:
         return []
@@ -2858,7 +2901,17 @@ def _factor_score_snapshots(
             score_date = _nearest_score_date(score_index, requested_date)
             if score_date is None:
                 continue
-            ranked = scores.loc[score_date].dropna().sort_values(ascending=False)
+            raw_scores = scores.loc[score_date].dropna()
+            if raw_scores.empty:
+                continue
+            eligible = _eligibility_row(eligibility_mask, score_date, raw_scores.index)
+            eligibility_available = not eligible.isna().all()
+            if eligibility_available:
+                ranked = raw_scores.where(eligible.astype(bool)).dropna().sort_values(ascending=False)
+                score_scope = "eligible_current_model_portfolio"
+            else:
+                ranked = raw_scores.sort_values(ascending=False)
+                score_scope = "raw_research_diagnostic_eligibility_not_available"
             if ranked.empty:
                 continue
             top = ranked.head(max_symbols)
@@ -2868,6 +2921,9 @@ def _factor_score_snapshots(
                     "factor": str(factor),
                     "score_date": _date_str(score_date),
                     "available_count": int(ranked.size),
+                    "raw_available_count": int(raw_scores.size),
+                    "eligibility_filter_applied": bool(eligibility_available),
+                    "score_scope": score_scope,
                     "rows": [[str(symbol), _rounded_float(score)] for symbol, score in top.items()],
                 }
             )

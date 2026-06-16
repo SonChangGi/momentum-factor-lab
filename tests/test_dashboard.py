@@ -9,7 +9,13 @@ import pytest
 
 from momentum_factor_lab import cli
 from momentum_factor_lab.config import RunConfig
-from momentum_factor_lab.dashboard import ASSET_VERSION, _holding_rows, build_dashboard_payload, write_dashboard_site
+from momentum_factor_lab.dashboard import (
+    ASSET_VERSION,
+    _factor_score_snapshots,
+    _holding_rows,
+    build_dashboard_payload,
+    write_dashboard_site,
+)
 from momentum_factor_lab.report import write_reports
 from momentum_factor_lab.workflow import run_analysis
 
@@ -95,6 +101,48 @@ def test_holding_rows_use_active_backtest_weights_and_signal_date():
     assert [row["symbol"] for row in rows] == ["AAA", "BBB"]
     assert [row["score_date"] for row in rows] == ["2026-01-01", "2026-01-01"]
     assert [row["default_weight"] for row in rows] == [0.61, 0.39]
+
+
+def test_factor_score_snapshots_use_model_eligibility_for_scenario_rows():
+    scores = pd.DataFrame(
+        {
+            "RAW_HIGH": [10.0],
+            "ELIGIBLE": [8.0],
+            "ALSO_OK": [5.0],
+        },
+        index=pd.to_datetime(["2026-01-10"]),
+    )
+    eligibility = pd.DataFrame(
+        {
+            "RAW_HIGH": [False],
+            "ELIGIBLE": [True],
+            "ALSO_OK": [True],
+        },
+        index=pd.to_datetime(["2026-01-10"]),
+    )
+    result = SimpleNamespace(factor_scores={"mom_test": scores})
+    leaders = [
+        {
+            "date": "2026-01-10",
+            "window": "1M",
+            "window_label": "최근 1개월",
+            "best_factor": "mom_test",
+        }
+    ]
+
+    snapshots = _factor_score_snapshots(
+        result,
+        leaders,
+        max_snapshot_dates=1,
+        max_symbols=10,
+        eligibility_mask=eligibility,
+    )
+
+    assert snapshots[0]["eligibility_filter_applied"] is True
+    assert snapshots[0]["score_scope"] == "eligible_current_model_portfolio"
+    assert snapshots[0]["available_count"] == 2
+    assert snapshots[0]["raw_available_count"] == 3
+    assert [row[0] for row in snapshots[0]["rows"]] == ["ELIGIBLE", "ALSO_OK"]
 
 
 def test_run_results_json_includes_dashboard_payload(tmp_path):
