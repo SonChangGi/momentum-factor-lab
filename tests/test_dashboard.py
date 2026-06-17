@@ -12,7 +12,9 @@ from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.dashboard import (
     ASSET_VERSION,
     _factor_score_snapshots,
+    _fit_dashboard_payload,
     _holding_rows,
+    _json_payload_size,
     build_dashboard_payload,
     write_dashboard_site,
 )
@@ -151,6 +153,90 @@ def test_factor_score_snapshots_use_model_eligibility_for_scenario_rows():
     assert snapshots[0]["available_count"] == 2
     assert snapshots[0]["raw_available_count"] == 3
     assert [row[0] for row in snapshots[0]["rows"]] == ["ELIGIBLE", "ALSO_OK"]
+
+
+def test_payload_fit_preserves_latest_scenario_snapshots_under_size_pressure():
+    dates = [f"2026-06-{day:02d}" for day in range(1, 5)]
+    score_snapshots = []
+    weight_snapshots = []
+    for date_text in dates:
+        for factor_index in range(12):
+            score_snapshots.append(
+                {
+                    "date": date_text,
+                    "factor": f"factor_{factor_index}",
+                    "score_date": date_text,
+                    "available_count": 30,
+                    "raw_available_count": 30,
+                    "rows": [[f"SYM{symbol_index:03d}", 100 - symbol_index] for symbol_index in range(30)],
+                }
+            )
+        for factor_index in range(4):
+            weight_snapshots.append(
+                {
+                    "date": date_text,
+                    "window": "1M",
+                    "factor": f"factor_{factor_index}",
+                    "weight_date": date_text,
+                    "rows": [[f"SYM{symbol_index:03d}", 0.03, 2.0] for symbol_index in range(30)],
+                }
+            )
+    line_dates = [f"2026-01-{(index % 28) + 1:02d}" for index in range(180)]
+    payload = {
+        "schema_version": 1,
+        "summary": {"selected_factor": "factor_0"},
+        "factor_score_snapshots": score_snapshots,
+        "factor_weight_snapshots": weight_snapshots,
+        "scenario_available_dates": dates,
+        "scenario_available_dates_by_factor": {},
+        "factor_backtest_series": [
+            {
+                "factor": f"factor_{factor_index}",
+                "dates": list(line_dates),
+                "equity": [1 + index / 1000 for index in range(180)],
+                "drawdown": [-index / 10000 for index in range(180)],
+            }
+            for factor_index in range(12)
+        ],
+        "benchmark_backtest_series": {
+            "symbol": "^IXIC",
+            "dates": list(line_dates),
+            "equity": [1 + index / 1200 for index in range(180)],
+            "drawdown": [-index / 12000 for index in range(180)],
+        },
+    }
+
+    fitted = _fit_dashboard_payload(payload, max_bytes=80_000)
+
+    assert _json_payload_size(fitted) <= 80_000
+    assert fitted["scenario_available_dates"] == ["2026-06-04"]
+    assert {snapshot["date"] for snapshot in fitted["factor_score_snapshots"]} == {"2026-06-04"}
+    assert {snapshot["date"] for snapshot in fitted["factor_weight_snapshots"]} == {"2026-06-04"}
+    assert all(len(snapshot["rows"]) >= 10 for snapshot in fitted["factor_score_snapshots"])
+    assert fitted["scenario_available_dates_by_factor"]["factor_0"] == ["2026-06-04"]
+
+
+def test_payload_fit_recovers_selected_factor_snapshot_from_latest_output_rows():
+    payload = {
+        "schema_version": 1,
+        "summary": {"selected_factor": "mom_9_1", "data_as_of": "2026-06-16"},
+        "factor_score_snapshots": [],
+        "factor_weight_snapshots": [],
+        "latest_output_rows": [
+            {"rank": 1, "symbol": "AAA", "score": 3.2, "signal_date": "2026-06-16"},
+            {"rank": 2, "symbol": "BBB", "score": 2.1, "signal_date": "2026-06-16"},
+        ],
+    }
+
+    fitted = _fit_dashboard_payload(payload, max_bytes=50_000)
+
+    assert fitted["scenario_available_dates"] == ["2026-06-16"]
+    assert fitted["scenario_available_dates_by_factor"] == {"mom_9_1": ["2026-06-16"]}
+    snapshot = fitted["factor_score_snapshots"][0]
+    assert snapshot["factor"] == "mom_9_1"
+    assert snapshot["score_scope"] == "latest_output_rows_recovery_partial"
+    assert snapshot["rows"] == [["AAA", 3.2], ["BBB", 2.1]]
+    assert any("latest_output_rows" in note for note in fitted["notes_ko"])
 
 
 def test_run_results_json_includes_dashboard_payload(tmp_path):
@@ -376,6 +462,8 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "runPayloadGeneratedAt" in js
     assert "사이트 빌드 시각" in js
     assert "renderCurrentOutputTable" in js
+    assert "latest_output_rows_fallback" in js
+    assert "저장된 latest_output_rows" in js
     assert "renderWithBusy" in js
     assert "팩터 점수 비례 배분" in js
     assert "종목/비중 가능" in js
@@ -469,10 +557,24 @@ const run = {{
     {{ date: '2026-01-10', window: '1M', factor: 'best_factor', weight_date: '2026-01-10', rows: [['AAA', 0.9, 9], ['BBB', 0.1, 8]] }},
     {{ date: '2026-01-10', window: '1M', factor: 'second_factor', weight_date: '2026-01-10', rows: [['CCC', 0.9, 6], ['BBB', 0.1, 7]] }},
   ],
+  latest_output_rows: [
+    {{ rank: 1, symbol: 'FALLBACK', score: 5, weight: 0, pre_cap_weight: 0.5, selected_factor: 'saved_factor', signal_date: '2026-01-11' }},
+    {{ rank: 2, symbol: 'FALLBACK2', score: 4, weight: 0, pre_cap_weight: 0.25, selected_factor: 'saved_factor', signal_date: '2026-01-11' }},
+  ],
 }};
 const ensemble = topFactorEnsembleAllocation(run, '2026-01-10', '1M', 3, 0.5, 10);
 const cappedEnsemble = topFactorEnsembleAllocation(run, '2026-01-10', '1M', 3, 0.3, 10);
 const bestRows = bestFactorSignalRows(run, '2026-01-10', '1M', 2, 0.5);
+const fallbackRows = bestFactorSignalRows({{ ...run, factor_score_snapshots: [] }}, '2026-01-10', '1M', 2, 0.5);
+const savedFactorRows = latestOutputSignalRows(run, 2, 'saved_factor');
+const mismatchedFactorRows = latestOutputSignalRows(run, 2, 'other_factor');
+const fallbackDateRun = {{
+  ...run,
+  summary: {{ ...run.summary, selected_factor: 'saved_factor', data_as_of: '2026-01-11' }},
+  factor_score_snapshots: [],
+  scenario_available_dates: ['2026-01-11'],
+  scenario_available_dates_by_factor: {{ saved_factor: ['2026-01-11'] }},
+}};
 let equity = 1;
 const perfPoints = Array.from({{ length: 45 }}, (_, index) => {{
   equity *= index % 7 === 0 ? 0.985 : 1.006;
@@ -500,11 +602,187 @@ if (bestRows.best.factor !== 'best_factor') throw new Error('best-factor signal 
 if (bestRows.rows[0].symbol !== 'AAA') throw new Error('best-factor signal ranking failed');
 if (bestRows.rows[0].weight !== 0) throw new Error('research-only best-factor output must fail closed to zero final weight');
 if (bestRows.rows[0].pre_cap_weight <= 0) throw new Error('best-factor diagnostic pre-gate weight missing');
+if (fallbackRows.signalSource !== 'latest_output_rows_fallback') throw new Error('latest output fallback not reported');
+if (fallbackRows.rows[0].symbol !== 'FALLBACK') throw new Error('latest output fallback row missing');
+if (fallbackRows.rows.length !== 2) throw new Error('latest output fallback must respect requested top N');
+if (savedFactorRows.length !== 2) throw new Error('matching latest output factor fallback missing');
+if (mismatchedFactorRows.length !== 0) throw new Error('mismatched latest output factor must not fallback');
+if (!factorAvailableDates(fallbackDateRun, 'saved_factor').has('2026-01-11')) throw new Error('matching latest output factor date fallback missing');
+if (factorAvailableDates(fallbackDateRun, 'other_factor').has('2026-01-11')) throw new Error('mismatched latest output factor date must not be available');
 if (!ticks.includes(0) || !ticks.includes(0.5)) throw new Error('clean return tick marks missing');
 if (dateTicks.length < 4) throw new Error('date tick marks are too sparse');
 if (!Number.isFinite(perf.cumulativeReturn)) throw new Error('performance return missing');
 if (!Number.isFinite(perf.volatility)) throw new Error('performance volatility missing');
 if (!Number.isFinite(perf.maxDrawdown) || perf.maxDrawdown > 0) throw new Error('performance MDD invalid');
+`, sandbox);
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(["node", str(node_script)], check=False, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_dashboard_js_render_all_survives_zero_snapshot_latest_output_payload(tmp_path):
+    run_json = tmp_path / "run.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard_payload": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-17T00:00:00Z",
+                    "summary": {
+                        "data_as_of": "2026-06-16",
+                        "run_timestamp_utc": "2026-06-17T00:19:34Z",
+                        "selected_factor": "mom_9_1",
+                        "default_top_n": 10,
+                        "default_max_weight": 0.1,
+                        "research_only": True,
+                        "recommendation_output_key": "research_signals",
+                        "tradability_blockers": ["실전 매매 게이트 미통과"],
+                    },
+                    "periods": [{"key": "1M", "label": "최근 1개월"}],
+                    "factor_options": [
+                        {"factor": "mom_9_1", "category": "traditional", "description_ko": "9개월-1개월 모멘텀"},
+                        {"factor": "mom_12_1", "category": "traditional", "description_ko": "12개월-1개월 모멘텀"},
+                    ],
+                    "factor_leaders": [{"date": "2026-06-16", "window": "1M", "best_factor": "mom_9_1", "best_return": 0.12}],
+                    "factor_period_matrix": [
+                        {
+                            "date": "2026-06-16",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "factors": ["mom_9_1", "mom_12_1"],
+                            "returns": [0.12, 0.08],
+                            "factor_count": 2,
+                        }
+                    ],
+                    "factor_score_snapshots": [],
+                    "factor_weight_snapshots": [],
+                    "scenario_available_dates": [],
+                    "scenario_available_dates_by_factor": {},
+                    "factor_backtest_series": [],
+                    "latest_output_rows": [
+                        {
+                            "rank": 1,
+                            "symbol": "AAA",
+                            "score": 2.5,
+                            "weight": 0,
+                            "pre_cap_weight": 0.12,
+                            "selected_factor": "mom_9_1",
+                            "signal_date": "2026-06-16",
+                        },
+                        {
+                            "rank": 2,
+                            "symbol": "BBB",
+                            "score": 1.8,
+                            "weight": 0,
+                            "pre_cap_weight": 0.08,
+                            "selected_factor": "mom_9_1",
+                            "signal_date": "2026-06-16",
+                        },
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    js_path = Path(paths["js"])
+    node_script = tmp_path / "render-all-smoke.mjs"
+    node_script.write_text(
+        f"""
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source = fs.readFileSync({str(js_path)!r}, 'utf8').replace(/fetch\\('data\\/dashboard\\.json'\\)[\\s\\S]*$/u, '');
+class FakeElement {{
+  constructor(selector) {{
+    this.selector = selector;
+    this.value = '';
+    this.textContent = '';
+    this.children = [];
+    this.attributes = {{}};
+    this.style = {{ setProperty: (key, value) => {{ this.style[key] = value; }} }};
+    this.classList = {{ add() {{}}, remove() {{}}, toggle() {{}} }};
+  }}
+  replaceChildren(...nodes) {{ this.children = nodes; }}
+  appendChild(node) {{ this.children.push(node); return node; }}
+  append(...nodes) {{ this.children.push(...nodes); }}
+  setAttribute(key, value) {{ this.attributes[key] = value; }}
+  removeAttribute(key) {{ delete this.attributes[key]; }}
+  addEventListener() {{}}
+}}
+const elements = new Map();
+function elementFor(selector) {{
+  if (!elements.has(selector)) elements.set(selector, new FakeElement(selector));
+  return elements.get(selector);
+}}
+const document = {{
+  querySelector: elementFor,
+  querySelectorAll: () => [],
+  createElement: (tag) => new FakeElement(tag),
+  createElementNS: (_ns, tag) => new FakeElement(tag),
+  addEventListener() {{}},
+}};
+const sandbox = {{
+  console,
+  document,
+  window: {{ setTimeout: (fn) => fn(), location: {{ search: '' }}, addEventListener() {{}} }},
+  localStorage: {{ getItem() {{ return null; }}, setItem() {{}} }},
+  URLSearchParams,
+}};
+vm.runInNewContext(source + `
+state.data = {{
+  schema_version: 1,
+  latest_run_index: 0,
+  runs: [{{
+    summary: {{
+      data_as_of: '2026-06-16',
+      run_timestamp_utc: '2026-06-17T00:19:34Z',
+      selected_factor: 'mom_9_1',
+      default_top_n: 10,
+      default_max_weight: 0.1,
+      research_only: true,
+      recommendation_output_key: 'research_signals',
+      tradability_blockers: ['실전 매매 게이트 미통과'],
+    }},
+    periods: [{{ key: '1M', label: '최근 1개월' }}],
+    factor_options: [
+      {{ factor: 'mom_9_1', category: 'traditional', description_ko: '9개월-1개월 모멘텀' }},
+      {{ factor: 'mom_12_1', category: 'traditional', description_ko: '12개월-1개월 모멘텀' }},
+    ],
+    factor_leaders: [{{ date: '2026-06-16', window: '1M', best_factor: 'mom_9_1', best_return: 0.12 }}],
+    factor_period_matrix: [{{
+      date: '2026-06-16',
+      window: '1M',
+      window_label: '최근 1개월',
+      factors: ['mom_9_1', 'mom_12_1'],
+      returns: [0.12, 0.08],
+      factor_count: 2,
+    }}],
+    factor_score_snapshots: [],
+    factor_weight_snapshots: [],
+    scenario_available_dates: [],
+    scenario_available_dates_by_factor: {{}},
+    factor_backtest_series: [],
+    latest_output_rows: [
+      {{ rank: 1, symbol: 'AAA', score: 2.5, weight: 0, pre_cap_weight: 0.12, selected_factor: 'mom_9_1', signal_date: '2026-06-16' }},
+      {{ rank: 2, symbol: 'BBB', score: 1.8, weight: 0, pre_cap_weight: 0.08, selected_factor: 'mom_9_1', signal_date: '2026-06-16' }},
+    ],
+  }}],
+}};
+state.activeRunIndex = 0;
+document.querySelector('#date-select').value = '2026-06-16';
+document.querySelector('#window-select').value = '1M';
+document.querySelector('#factor-select').value = 'mom_9_1';
+document.querySelector('#topn-input').value = '10';
+document.querySelector('#max-weight-input').value = '10';
+renderAll();
+if (!document.querySelector('#holdings-availability').textContent.includes('latest_output_rows')) throw new Error('matching fallback explanation was not rendered');
+document.querySelector('#factor-select').value = 'mom_12_1';
+renderAll();
+if (!document.querySelector('#holdings-availability').textContent.includes('mom_9_1 기준')) throw new Error('mismatched factor explanation was not rendered');
 `, sandbox);
 """,
         encoding="utf-8",

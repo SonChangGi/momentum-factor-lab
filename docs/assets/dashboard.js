@@ -558,12 +558,43 @@ function topFactorEnsembleAllocation(run, date, windowKey, topN, maxWeight, fact
   };
 }
 
+function latestOutputFactor(run) {
+  const rows = Array.isArray(run.latest_output_rows) ? run.latest_output_rows : [];
+  if (!rows.length) return '';
+  const rowFactors = [...new Set(rows.map((row) => row?.selected_factor).filter(Boolean))];
+  if (rowFactors.length === 1) return rowFactors[0];
+  if (rowFactors.length === 0) return run.summary?.selected_factor || '';
+  return '';
+}
+
+function latestOutputMatchesFactor(run, factor) {
+  const outputFactor = latestOutputFactor(run);
+  return Boolean(outputFactor && factor && outputFactor === factor);
+}
+
+function latestOutputSignalRows(run, topN, factor = null) {
+  if (factor && !latestOutputMatchesFactor(run, factor)) return [];
+  const rows = Array.isArray(run.latest_output_rows) ? run.latest_output_rows : [];
+  const count = Math.max(1, Math.min(50, Math.round(Number(topN) || 20), rows.length || 1));
+  return rows.slice(0, count).map((row, index) => ({
+    rank: row.rank || index + 1,
+    symbol: row.symbol,
+    score: optionalNumber(row.score),
+    weight: optionalNumber(row.weight) || 0,
+    pre_cap_weight: optionalNumber(row.pre_cap_weight ?? row.proposed_weight ?? row.weight) || 0,
+    weighting_method: row.weighting_method || 'latest_output_rows',
+    signal_date: row.signal_date || run.summary?.data_as_of || '-',
+    selected_factor: row.selected_factor || run.summary?.selected_factor || '-',
+  })).filter((row) => row.symbol);
+}
+
 function bestFactorSignalRows(run, date, windowKey, topN, maxWeight) {
   const best = periodBestStats(run, date, windowKey);
   const snapshot = best?.factor ? factorScoreSnapshot(run, date, best.factor) : null;
   const allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
   const researchOnly = !isPracticalRun(run);
-  const rows = allocation.weighted.map((row) => ({
+  const requestedTopN = Math.max(1, Math.min(50, Math.round(Number(topN) || 20)));
+  let rows = allocation.weighted.map((row) => ({
     rank: row.display_rank,
     symbol: row.symbol,
     score: row.score,
@@ -573,13 +604,19 @@ function bestFactorSignalRows(run, date, windowKey, topN, maxWeight) {
     signal_date: snapshot?.score_date || date,
     selected_factor: best?.factor || '-',
   }));
+  let signalSource = 'best_factor_score_snapshot';
+  if (!rows.length && Array.isArray(run.latest_output_rows) && run.latest_output_rows.length) {
+    rows = latestOutputSignalRows(run, requestedTopN);
+    signalSource = 'latest_output_rows_fallback';
+  }
   return {
     rows,
     best,
     snapshot,
     allocation,
     researchOnly,
-    topN: allocation.topN,
+    signalSource,
+    topN: signalSource === 'latest_output_rows_fallback' ? requestedTopN : allocation.topN,
     maxWeight: allocation.maxWeight,
     windowLabel: best?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
   };
@@ -717,19 +754,56 @@ function currentWeightedHoldings() {
   const maxWeight = clampedMaxWeight();
   const snapshot = factorScoreSnapshot(run, date, factor);
   const availableDates = run.scenario_available_dates || [];
-  const allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
+  let allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
+  let fallbackSource = null;
+  const latestOutputRowsFactor = latestOutputFactor(run);
+  if (
+    !allocation.weighted.length
+    && Array.isArray(run.latest_output_rows)
+    && run.latest_output_rows.length
+    && latestOutputMatchesFactor(run, factor)
+  ) {
+    const fallbackRows = latestOutputSignalRows(run, topN, factor).map((row, index) => {
+      const displayWeight = Math.max(0, Math.min(maxWeight, optionalNumber(row.pre_cap_weight) || optionalNumber(row.weight) || 0));
+      return {
+        ...row,
+        display_rank: row.rank || index + 1,
+        display_weight: displayWeight,
+        scenario_weight: displayWeight,
+      };
+    });
+    const investedTotal = fallbackRows.reduce((sum, row) => sum + (Number(row.display_weight) || 0), 0);
+    allocation = {
+      weighted: fallbackRows,
+      investedTotal,
+      displayedTotal: investedTotal,
+      portfolioTotal: investedTotal,
+      cashTotal: Math.max(0, 1 - investedTotal),
+      unusedCandidateCount: Math.max(0, (run.latest_output_rows || []).length - fallbackRows.length),
+      weightingMethod: 'latest_output_rows_fallback',
+      topN: Math.max(1, Math.min(50, Math.round(Number(topN) || 20))),
+      maxWeight,
+      availableCount: fallbackRows.length,
+    };
+    fallbackSource = 'latest_output_rows_fallback';
+  }
   const stats = periodFactorStats(run, date, windowKey, factor);
   return {
     ...allocation,
     snapshot,
     selectedFactor: factor || '-',
     windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
-    scoreDate: snapshot?.score_date || null,
-    scoreScope: snapshot?.score_scope || null,
+    scoreDate: snapshot?.score_date || (fallbackSource ? run.summary?.data_as_of || null : null),
+    scoreScope: snapshot?.score_scope || fallbackSource,
+    latestOutputRowsFactor,
     rawAvailableCount: snapshot?.raw_available_count ?? null,
     eligibilityFilterApplied: snapshot?.eligibility_filter_applied === true,
     missingReason: snapshot
       ? null
+      : fallbackSource
+      ? null
+      : latestOutputRowsFactor && factor && latestOutputRowsFactor !== factor
+      ? `저장된 latest_output_rows는 ${latestOutputRowsFactor} 기준이라 선택 팩터 ${factor} 시나리오로 표시하지 않습니다.`
       : availableDates.length && !availableDates.includes(date)
       ? '선택한 기준일은 용량과 로딩 속도 제한 때문에 종목/비중 스냅샷 보관 범위 밖입니다.'
       : '선택한 기준일에 이 팩터의 점수 스냅샷이 없습니다.',
@@ -761,7 +835,11 @@ function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
 
 function factorAvailableDates(run, factor) {
   const byFactor = run.scenario_available_dates_by_factor || {};
-  const dates = byFactor[factor] || run.scenario_available_dates || [];
+  const hasFactorSpecificDates = Object.keys(byFactor).length > 0;
+  const dates = [...(hasFactorSpecificDates ? (byFactor[factor] || []) : (run.scenario_available_dates || []))];
+  if (!dates.length && latestOutputMatchesFactor(run, factor) && run.summary?.data_as_of) {
+    dates.push(run.summary.data_as_of);
+  }
   return new Set(dates);
 }
 
@@ -1060,6 +1138,7 @@ function renderHoldingsTable() {
     selectedFactor: factor,
     windowLabel,
     scoreDate,
+    scoreScope,
     unusedCandidateCount,
     maxWeight,
     rawAvailableCount,
@@ -1074,7 +1153,10 @@ function renderHoldingsTable() {
   const capNote = topN * maxWeight < 1
     ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
     : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
-  const scopeNote = eligibilityFilterApplied
+  const usingLatestOutputFallback = scoreScope === 'latest_output_rows_fallback';
+  const scopeNote = usingLatestOutputFallback
+    ? `점수 스냅샷이 없어 저장된 latest_output_rows ${formatInteger(availableCount)}개를 선택 팩터 시나리오 fallback으로 표시합니다.`
+    : eligibilityFilterApplied
     ? `현재 모델 편입 가능 필터를 통과한 ${formatInteger(availableCount)}개 후보를 사용합니다${rawAvailableCount && rawAvailableCount !== availableCount ? ` (원점수 후보 ${formatInteger(rawAvailableCount)}개 중 실무 필터 통과분)` : ''}.`
     : `편입 가능 필터 정보가 없어 원점수 후보 ${formatInteger(availableCount)}개를 연구 진단용으로 표시합니다.`;
   setText(
@@ -1083,6 +1165,8 @@ function renderHoldingsTable() {
       ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
       : run.history_payload_type === 'summary'
       ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
+      : usingLatestOutputFallback
+      ? `${windowLabel} 선택 팩터 ${factor}의 점수 스냅샷이 없어 기존 최신 출력 행 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, 저장된 게이트 전 비중을 종목당 최대 ${formatPercent(maxWeight)}로 제한해 표시합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`
       : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
@@ -1122,6 +1206,7 @@ function renderCurrentOutputTable() {
     snapshot,
     allocation,
     researchOnly,
+    signalSource,
     windowLabel,
   } = bestFactorSignalRows(run, date, windowKey, topN, maxWeight);
   const tbody = document.querySelector('#current-output-table tbody');
@@ -1132,10 +1217,15 @@ function renderCurrentOutputTable() {
     const candidateCount = formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size);
     const eligibleCount = formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size);
     const liquidityCount = formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size);
-    const scope = best?.factor
+    const usingLatestOutputFallback = signalSource === 'latest_output_rows_fallback';
+    const scope = usingLatestOutputFallback
+      ? `${run.summary?.data_as_of || date || '-'} · 기존 최신 출력 행`
+      : best?.factor
       ? `${date || '-'} · ${windowLabel} 최고 팩터 ${best.factor}`
       : `${date || '-'} · ${windowLabel} 최고 팩터 자료 없음`;
-    const availability = snapshot
+    const availability = usingLatestOutputFallback
+      ? `최고 팩터 점수 스냅샷이 없어 저장된 latest_output_rows ${formatInteger(rows.length)}개를 투명한 fallback으로 표시합니다.`
+      : snapshot
       ? `모델 편입 가능 후보 ${formatInteger(allocation.availableCount)}개 중 상위 ${rows.length}개를 표시합니다.`
       : '해당 최고 팩터의 종목 점수 스냅샷이 없어 행을 표시하지 못했습니다.';
     const bestFactorCaution = 'Best factor는 해당 기간의 과거 성과 1위 팩터이므로 미래 우위를 보장하지 않으며, 선택 팩터 드롭다운과 별개입니다.';
