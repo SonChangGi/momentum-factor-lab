@@ -2761,6 +2761,7 @@ def write_dashboard_site(
     css_path = assets_dir / "styles.css"
     js_path = assets_dir / "dashboard.js"
     data_path = data_dir / "dashboard.json"
+    summary_path = data_dir / "summary.json"
 
     payloads = _merge_dashboard_history(
         data_path,
@@ -2786,12 +2787,129 @@ def write_dashboard_site(
         json.dumps(combined, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
         encoding="utf-8",
     )
+    summary_path.write_text(
+        json.dumps(build_public_summary(combined), ensure_ascii=False, allow_nan=False, indent=2),
+        encoding="utf-8",
+    )
 
     return {
         "index": str(index_path),
         "css": str(css_path),
         "js": str(js_path),
         "data": str(data_path),
+        "summary": str(summary_path),
+    }
+
+
+def _first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def build_public_summary(combined_payload: dict[str, Any]) -> dict[str, Any]:
+    """Build the compact cross-project summary consumed by quant-dashboard."""
+
+    runs = combined_payload.get("runs") if isinstance(combined_payload.get("runs"), list) else []
+    latest_index = combined_payload.get("latest_run_index")
+    if not isinstance(latest_index, int) or latest_index < 0 or latest_index >= len(runs):
+        latest_index = len(runs) - 1
+    latest = runs[latest_index] if runs else {}
+    summary = latest.get("summary") if isinstance(latest.get("summary"), dict) else {}
+    quality = latest.get("data_quality_summary") if isinstance(latest.get("data_quality_summary"), dict) else {}
+    tradability_gate = latest.get("tradability_gate") if isinstance(latest.get("tradability_gate"), list) else []
+    output_rows = latest.get("latest_output_rows") if isinstance(latest.get("latest_output_rows"), list) else []
+    if not output_rows and isinstance(latest.get("holdings"), list):
+        output_rows = latest.get("holdings")
+    blockers = summary.get("tradability_blockers")
+    if not isinstance(blockers, list):
+        blockers = []
+    state = "degraded" if summary.get("fail_closed") or summary.get("research_only") or blockers else "ok"
+    data_as_of = summary.get("data_as_of") or summary.get("run_timestamp_utc")
+    primary_entities = []
+    for row in output_rows[:30]:
+        if not isinstance(row, dict):
+            continue
+        symbol = row.get("symbol") or row.get("ticker")
+        if not symbol:
+            continue
+        primary_entities.append(
+            {
+                "symbol": symbol,
+                "name": symbol,
+                "label": f"{symbol} · rank {row.get('rank', len(primary_entities) + 1)}",
+                "sector": "US Equity Momentum",
+                "sectorLabel": "미국 주식 모멘텀",
+                "themes": ["Momentum", "Factor", str(summary.get("selected_factor") or "")],
+                "metrics": {
+                    "rank": row.get("rank"),
+                    "signal": row.get("signal") if row.get("signal") is not None else row.get("score"),
+                    "displayWeight": _first_not_none(
+                        row.get("display_weight"),
+                        row.get("displayWeight"),
+                        row.get("proposed_weight"),
+                        row.get("pre_cap_weight"),
+                        row.get("default_weight"),
+                    ),
+                    "finalWeight": _first_not_none(row.get("final_weight"), row.get("weight"), row.get("default_weight")),
+                    "factor": row.get("selected_factor") or row.get("factor") or summary.get("selected_factor"),
+                    "dataAsOf": data_as_of,
+                },
+                "signals": ["모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."],
+                "warnings": list(blockers[:3]) or ["tradability gate를 원본에서 확인하세요."],
+            }
+        )
+    return {
+        "schemaVersion": 1,
+        "contract": "quant-research-summary",
+        "projectId": "momentum",
+        "projectName": "모멘텀 팩터 랩",
+        "generatedAt": combined_payload.get("generated_at_utc"),
+        "dataAsOf": data_as_of,
+        "timezone": "UTC",
+        "detailUrl": "https://sonchanggi.github.io/momentum-factor-lab/",
+        "detailDataUrl": "https://sonchanggi.github.io/momentum-factor-lab/data/dashboard.json",
+        "status": {
+            "state": state,
+            "label": summary.get("recommendation_output_label") or "Research signals",
+            "cadence": "daily KST after US market data with watchdog freshness checks",
+            "expectedFreshnessDays": 7,
+            "degradedReasons": [str(item) for item in blockers],
+        },
+        "coverage": {
+            "runCount": len(runs),
+            "candidateUniverseSize": summary.get("candidate_universe_size"),
+            "eligiblePriceUniverseSize": summary.get("eligible_price_universe_size"),
+            "liquidityEligibleUniverseSize": summary.get("liquidity_eligible_universe_size"),
+            "factorCount": summary.get("factor_count"),
+            "quality": quality,
+        },
+        "highlights": [
+            {"label": "Selected factor", "value": summary.get("selected_factor"), "description": summary.get("selected_reason")},
+            {"label": "Output", "value": summary.get("recommendation_output_label"), "description": "fail-closed일 때 zero-weight research signals"},
+            {"label": "Blockers", "value": len(blockers), "description": "tradability gate blockers"},
+        ],
+        "primaryEntities": primary_entities,
+        "limitations": [
+            "Signals are research-only unless every tradability requirement passes.",
+            "Fail-closed output uses zero final weights when practical tradability is not proven.",
+            "Point-in-time universe, complete price coverage, liquidity, and same-sample selection checks must be reviewed.",
+        ],
+        "sources": [
+            {"label": "Yahoo/yfinance free public data", "url": "https://finance.yahoo.com/"},
+        ],
+        "automation": {
+            "workflowUrl": "https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml",
+            "manualUpdateLabel": "GitHub Actions daily-dashboard 수동 실행",
+            "tokenPolicy": "Static page keeps no GitHub token.",
+        },
+        "payload": {
+            "summaryBytes": None,
+            "detailBytes": combined_payload.get("payload_limits", {}).get("actual_json_bytes")
+            if isinstance(combined_payload.get("payload_limits"), dict)
+            else None,
+        },
     }
 
 

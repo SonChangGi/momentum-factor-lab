@@ -16,6 +16,7 @@ from momentum_factor_lab.dashboard import (
     _holding_rows,
     _json_payload_size,
     build_dashboard_payload,
+    build_public_summary,
     write_dashboard_site,
 )
 from momentum_factor_lab.report import write_reports
@@ -263,6 +264,34 @@ def test_run_results_json_includes_dashboard_payload(tmp_path):
     assert len(json.dumps(payload["dashboard"], ensure_ascii=False).encode("utf-8")) < 5_000_000
 
 
+def test_public_summary_preserves_zero_weights_for_fail_closed_rows():
+    summary = build_public_summary({
+        "generated_at_utc": "2026-06-09T00:00:00Z",
+        "runs": [{
+            "summary": {
+                "data_as_of": "2026-06-08",
+                "selected_factor": "mom_1m",
+                "research_only": True,
+                "fail_closed": True,
+                "tradability_blockers": ["fixture blocker"],
+            },
+            "latest_output_rows": [{
+                "rank": 1,
+                "symbol": "ZERO",
+                "score": 1.0,
+                "proposed_weight": 0.0,
+                "weight": 0.0,
+                "selected_factor": "mom_1m",
+            }],
+        }],
+        "latest_run_index": 0,
+    })
+
+    metrics = summary["primaryEntities"][0]["metrics"]
+    assert metrics["displayWeight"] == 0.0
+    assert metrics["finalWeight"] == 0.0
+
+
 def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     run_payload = {
         "metadata": {"run_timestamp_utc": "2026-06-09T00:00:00Z", "data_as_of": "2026-06-08"},
@@ -364,6 +393,15 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
 
     assert Path(paths["index"]).exists()
     assert Path(paths["data"]).exists()
+    assert Path(paths["summary"]).exists()
+    summary = json.loads(Path(paths["summary"]).read_text(encoding="utf-8"))
+    assert summary["contract"] == "quant-research-summary"
+    assert summary["projectId"] == "momentum"
+    assert summary["primaryEntities"]
+    first_metrics = summary["primaryEntities"][0]["metrics"]
+    assert first_metrics["displayWeight"] == 0.1
+    assert first_metrics["finalWeight"] == 0.1
+    assert any("research-only" in item for item in summary["limitations"])
     html = Path(paths["index"]).read_text(encoding="utf-8")
     css = Path(paths["css"]).read_text(encoding="utf-8")
     js = Path(paths["js"]).read_text(encoding="utf-8")
