@@ -3,7 +3,7 @@
   "contract": "quant-research-summary",
   "projectId": "momentum",
   "projectName": "모멘텀 팩터 랩",
-  "generatedAt": "2026-06-20T00:51:56+00:00",
+  "generatedAt": "2026-06-20T02:03:56+00:00",
   "dataAsOf": "2026-06-18",
   "timezone": "UTC",
   "detailUrl": "https://sonchanggi.github.io/momentum-factor-lab/",
@@ -56,9 +56,9 @@
         "missing_price": 1
       },
       "price_source_counts": {
-        "yfinance-adjusted-daily": 2740,
+        "yfinance-adjusted-daily": 2640,
         "nasdaq-latest-close-repair": 118,
-        "yahoo-chart-adjusted-daily-fallback": 8
+        "yahoo-chart-adjusted-daily-fallback": 108
       },
       "source_counts": {
         "yahoo-chart-adjusted-daily-fallback": 227,
@@ -84,11 +84,11 @@
         {
           "source": "yahoo-chart-adjusted-daily-fallback",
           "row_count": 227,
-          "success_rows": 15,
-          "failed_rows": 212,
+          "success_rows": 226,
+          "failed_rows": 1,
           "no_newer_rows": 0,
           "cache_hit_rows": 0,
-          "records_sum": 15.0,
+          "records_sum": 226.0,
           "requested_price_symbols_sum": 227.0,
           "returned_price_symbols_sum": null
         },
@@ -403,7 +403,7 @@
       ],
       "metrics": {
         "rank": 9,
-        "signal": 4.663730246259821,
+        "signal": 4.663729896008672,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
@@ -733,6 +733,6 @@
   },
   "payload": {
     "summaryBytes": null,
-    "detailBytes": 4585005
+    "detailBytes": 4622234
   }
 }
