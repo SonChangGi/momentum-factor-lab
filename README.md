@@ -68,22 +68,21 @@ python -m momentum_factor_lab.cli scheduled-dashboard \
   --site-dir docs
 ```
 
-The committed workflow `.github/workflows/daily-dashboard.yml` has both
-`workflow_dispatch` and scheduled runs. To reduce GitHub Actions schedule drops,
-it uses a KST morning retry band at 08:13, 08:37, 09:07, 09:37, 10:07, and
-10:37 KST. Each scheduled retry skips automatically only when the dashboard already
-executed after 08:00 KST for that Korean calendar day and its `data_as_of`
-covers the expected most recent U.S. close date. A lightweight watchdog
-workflow, `.github/workflows/daily-dashboard-watchdog.yml`, runs at 11:11,
-11:41, and 12:11 KST; if the dashboard is still stale, it dispatches the main
+The committed workflow `.github/workflows/daily-dashboard.yml` is manual-only
+after the 2026-06-20 data-contraction rollback. Historical KST retry schedules
+and the watchdog schedule are intentionally suspended so a reviewed operator can
+inspect the publication safety gate before replacing `docs/data/dashboard.json`.
+The lightweight watchdog workflow,
+`.github/workflows/daily-dashboard-watchdog.yml`, also remains manual-only; when
+explicitly dispatched, it can still check freshness and dispatch the main
 `daily-dashboard.yml` workflow using GitHub's explicit `workflow_dispatch` path.
 The pipeline rebuilds `docs/` so GitHub Pages can serve the latest dashboard.
 Website controls such as recent period, Top-N, selected factor, and max
-position weight are client-side viewing controls; the next scheduled run inputs
-are stored in `.github/momentum-dashboard-config.json`.
+position weight are client-side viewing controls; manual live-run inputs are
+stored in `.github/momentum-dashboard-config.json`.
 
-If the scheduled automation fails or GitHub Actions is delayed, use the
-dashboard's **최신 데이터 업데이트 실행** button. The public static page does
+When a reviewed refresh is needed, use the dashboard's **최신 데이터 업데이트 실행**
+button. The public static page does
 not embed a GitHub token; it opens the authenticated GitHub Actions manual-run
 screen instead. Sign in with a GitHub account that has repository write access
 (저장소 쓰기 권한), press **Run workflow**, and the same pipeline will rerun
@@ -96,11 +95,12 @@ price collection, factor backtest, stock/weight calculation,
 gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main
 ```
 
-Manual runs never skip because of the 08:00 KST freshness guard, but they can
-still finish with no `docs/` diff when providers have not published a newer
-close or the regenerated dashboard is identical. In that case the workflow exits
-without a new commit; confirm the Actions status plus the dashboard 기준일 and
-최근 실행 시각 on the page.
+Manual runs never skip because of the historical 08:00 KST freshness guard, but
+they can still finish with no `docs/` diff when providers have not published a
+newer close, the regenerated dashboard is identical, or the monotonic publication
+gate rejects a collapsed candidate. In that case the workflow exits without a
+new commit; confirm the Actions status plus the dashboard 기준일 and 최근 실행
+시각 on the page.
 
 By default, live runs do **not** impose an absolute `--max-price-symbols` cap: the requested price universe is the full candidate universe for the selected profile, plus the benchmark comparator. `--max-price-symbols` is still available for explicit smoke/debug runs; when used, reports mark the subset coverage as an execution limitation rather than silently treating it as full-universe evidence.
 

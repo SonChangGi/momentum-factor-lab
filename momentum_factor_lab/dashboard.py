@@ -78,19 +78,18 @@ HTML_TEMPLATE = """<!doctype html>
   <main>
     <section class="notice">
       <strong>중요:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
-      다음 자동 실행 설정을 저장하지 않습니다. 매일 실행 입력값은 저장소의
+      다음 수동 실행 입력값을 저장하지 않습니다. 검토된 live-run 입력값은 저장소의
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
-      자동 실행은 GitHub Actions 예약 지연을 줄이기 위해 한국시간 08:13부터 10:37까지 여러 번 재시도하고,
-      11:11·11:41·12:11 감시 워크플로는 당일 08:00 이후 실행 기록이 없을 때 main workflow를 다시 호출합니다.
-      당일 08:00 이후 실행됐고 기대 기준일까지 반영된 경우에만 보강 실행을 자동으로 건너뜁니다.
+      2026-06-20 데이터 축소 롤백 이후 자동 예약 실행과 watchdog 예약은 중지되어 있으며,
+      새 데이터 반영은 <code>workflow_dispatch</code> 수동 실행 후 publication safety gate를 통과해야 합니다.
     </section>
 
     <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
       <div>
         <p class="eyebrow">수동 업데이트</p>
-        <h2>자동화 실패 시 그 시점의 최신 데이터로 다시 실행</h2>
+        <h2>검토 후 그 시점의 최신 데이터로 수동 실행</h2>
         <p>
-          자동 예약 실행이 실패했거나 지연되면 이 버튼으로 같은 GitHub Actions
+          자동 예약 실행은 현재 중지되어 있습니다. 검토 후 이 버튼으로 GitHub Actions
           <code>workflow_dispatch</code> 파이프라인을 수동 실행할 수 있습니다.
           저장소 쓰기 권한이 있는 GitHub 계정으로 로그인한 뒤 <strong>Run workflow</strong>를 누르면
           실행 시점에 무료 제공자가 제공하는 가장 최근 미국 일별 종가까지 다시 수집하고, 팩터 백테스트,
@@ -2727,8 +2726,8 @@ def build_dashboard_payload(
             "tradability_gate": _tradability_gate_rows(result.metadata),
             "factor_diagnostics": _factor_diagnostics_payload(result),
             "notes_ko": [
-                "웹사이트 입력값은 브라우저 표시용이며 다음 자동 실행 설정을 저장하지 않습니다.",
-                "자동 실행 입력값은 .github/momentum-dashboard-config.json에서 관리합니다.",
+                "웹사이트 입력값은 브라우저 표시용이며 수동 실행 설정을 저장하지 않습니다.",
+                "검토된 수동 실행 입력값은 .github/momentum-dashboard-config.json에서 관리합니다.",
                 "모든 결과는 연구/의사결정 보조용이며 투자 조언이 아닙니다.",
             ],
         }

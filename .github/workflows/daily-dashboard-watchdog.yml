@@ -2,14 +2,8 @@ name: Daily Momentum Dashboard Watchdog
 
 on:
   workflow_dispatch:
-  schedule:
-    # GitHub scheduled workflows can be delayed or occasionally dropped.
-    # Watchdog windows run after the main KST morning retry band and dispatch
-    # the daily dashboard workflow if no dashboard execution occurred after
-    # 08:00 KST for the current Korean calendar day.
-    - cron: '11 2 * * *'   # 11:11 KST
-    - cron: '41 2 * * *'   # 11:41 KST
-    - cron: '11 3 * * *'   # 12:11 KST
+    # Automatic watchdog schedule is suspended with the daily dashboard schedule.
+    # Manual dispatch remains available when a reviewed refresh is needed.
 
 concurrency:
   group: daily-momentum-dashboard-watchdog-${{ github.ref }}

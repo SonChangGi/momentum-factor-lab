@@ -2,19 +2,9 @@ name: Daily Momentum Dashboard
 
 on:
   workflow_dispatch:
-  schedule:
-    # GitHub Actions cron is UTC. Avoid :00 because scheduled workflows can be
-    # delayed or dropped during top-of-hour load. Morning KST retry band:
-    # 23:13/23:37 UTC = 08:13/08:37 KST; 00:07/00:37 UTC =
-    # 09:07/09:37 KST; 01:07/01:37 UTC = 10:07/10:37 KST.
-    - cron: '13 23 * * *'
-    - cron: '37 23 * * *'
-    - cron: '7 0 * * *'
-    - cron: '37 0 * * *'
-    - cron: '7 1 * * *'
-    - cron: '37 1 * * *'
-    # Fallback windows skip automatically if the dashboard already executed
-    # after 08:00 KST for the current Korean calendar day.
+    # Automatic schedule is intentionally suspended after the 2026-06-20
+    # data-contraction rollback. Run manually only after reviewing the
+    # publication safety gate output in dashboard_monotonic.
 
 concurrency:
   group: daily-momentum-dashboard-${{ github.ref }}
@@ -38,7 +28,7 @@ jobs:
           git fetch origin "${GITHUB_REF_NAME}" --depth=1
           git reset --hard "origin/${GITHUB_REF_NAME}"
 
-      - name: Decide whether scheduled fallback should run
+      - name: Decide whether dashboard refresh should run
         id: freshness
         continue-on-error: true
         env:
@@ -48,7 +38,7 @@ jobs:
             --event-name "${GITHUB_EVENT_NAME}" \
             --data-path docs/data/dashboard.json >> "$GITHUB_OUTPUT"
 
-      - name: Report skipped scheduled fallback
+      - name: Report skipped dashboard refresh
         if: steps.freshness.outputs.skip == 'true'
         run: |
           echo "${{ steps.freshness.outputs.reason }}"
@@ -114,9 +104,9 @@ jobs:
           git add docs
           commit_message="${RUNNER_TEMP}/dashboard-commit-message.txt"
           cat > "${commit_message}" <<'EOF'
-          Keep the published dashboard current after the daily data run
+          Keep the published dashboard current after the reviewed data run
 
-          Constraint: GitHub Actions updates only generated docs assets after a successful scheduled or manual dashboard run.
+          Constraint: Automatic schedules are suspended; GitHub Actions updates only generated docs assets after a reviewed manual dashboard run.
           Confidence: high
           Scope-risk: narrow
           Directive: Do not use this automated commit for source-code or policy changes; those require reviewed human/agent commits.

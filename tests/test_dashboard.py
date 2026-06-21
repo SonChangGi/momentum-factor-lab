@@ -411,7 +411,7 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert 'href="https://sonchanggi.github.io/quant-dashboard/"' in html
     assert "통합 대시보드로 돌아가기" in html
     assert "hero-link" in css
-    assert "다음 자동 실행 설정을 저장하지 않습니다" in html
+    assert "다음 수동 실행 입력값을 저장하지 않습니다" in html
     assert "최근 실행 시각" in html
     assert "X축: 날짜" in js
     assert "Y축: 누적 성과" in js
@@ -437,10 +437,10 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "칼마 지수" in js
     assert "CVaR(95%)" in js
     assert "최악 5% 일간 손실 평균" in js
-    assert "08:13부터 10:37까지" in html
-    assert "기대 기준일까지 반영된 경우" in html
+    assert "자동 예약 실행과 watchdog 예약은 중지" in html
+    assert "publication safety gate" in html
     assert "최신 데이터 업데이트 실행" in html
-    assert "자동화 실패 시 그 시점의 최신 데이터" in html
+    assert "검토 후 그 시점의 최신 데이터로 수동 실행" in html
     assert "GitHub Actions에서 최신 데이터 업데이트 실행" in html
     assert "저장소 쓰기 권한" in html
     assert "workflow_dispatch" in html
@@ -467,7 +467,7 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "JavaScript가 필요합니다" in html
     assert "산출 비중" in html
     assert "최신 출력" in html
-    assert "매일 실행 입력값" in html
+    assert "검토된 live-run 입력값" in html
     assert "팩터 점수가 높은 종목에 더 큰 비중" in html
     assert "동일비중" in html
     assert "Top-N" not in html
@@ -1395,23 +1395,15 @@ def test_dashboard_history_preserves_dedupes_sorts_and_caps(tmp_path):
     assert combined["runs"][1]["history_payload_type"] == "full"
     assert combined["latest_run_index"] == 1
 
-def test_daily_dashboard_workflow_documents_kst_schedule():
+def test_daily_dashboard_workflow_is_manual_only_after_rollback():
     workflow = Path(".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
     readme = Path("README.md").read_text(encoding="utf-8")
     config = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
 
-    for cron in [
-        "cron: '13 23 * * *'",
-        "cron: '37 23 * * *'",
-        "cron: '7 0 * * *'",
-        "cron: '37 0 * * *'",
-        "cron: '7 1 * * *'",
-        "cron: '37 1 * * *'",
-    ]:
-        assert cron in workflow
-    assert "08:13/08:37 KST" in workflow
-    assert "10:07/10:37 KST" in workflow
-    assert "08:00 KST" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "schedule:" not in workflow
+    assert "cron:" not in workflow
+    assert "Automatic schedule is intentionally suspended after the 2026-06-20" in workflow
     assert "concurrency:" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "Refresh checkout to latest branch head" in workflow
@@ -1419,15 +1411,15 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "continue-on-error: true" in workflow
     assert "Remote branch already has a dashboard execution after 08:00 KST" in workflow
     assert "dashboard_monotonic" in workflow
+    assert "--min-latest-output-rows" not in workflow
     assert "Push attempt ${attempt} failed" in workflow
-    assert "workflow_dispatch:" in workflow
 
     watchdog = Path(".github/workflows/daily-dashboard-watchdog.yml").read_text(encoding="utf-8")
     assert "Daily Momentum Dashboard Watchdog" in watchdog
     assert "workflow_dispatch:" in watchdog
-    assert "cron: '11 2 * * *'" in watchdog
-    assert "cron: '41 2 * * *'" in watchdog
-    assert "cron: '11 3 * * *'" in watchdog
+    assert "schedule:" not in watchdog
+    assert "cron:" not in watchdog
+    assert "Automatic watchdog schedule is suspended" in watchdog
     assert "actions: write" in watchdog
     assert "dashboard_freshness" in watchdog
     assert "DASHBOARD_FRESHNESS_EVENT_NAME: schedule" in watchdog
@@ -1436,10 +1428,10 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert "gh workflow run daily-dashboard.yml" in watchdog
     assert "steps.freshness.outputs.skip != 'true'" in watchdog
     assert "daily-dashboard-watchdog.yml" in readme
-    assert "11:11" in readme and "12:11 KST" in readme
-    assert "08:13, 08:37, 09:07, 09:37, 10:07, and" in readme
-    assert "10:37 KST" in readme
-    assert "covers the expected most recent U.S. close date" in readme
+    assert "manual-only" in readme
+    assert "2026-06-20 data-contraction rollback" in readme
+    assert "Historical KST retry schedules" in readme
+    assert "publication safety gate" in readme
     assert "workflow_dispatch" in readme
     assert "최신 데이터 업데이트 실행" in readme
     assert "저장소 쓰기 권한" in readme
@@ -1461,3 +1453,39 @@ def test_daily_dashboard_workflow_documents_kst_schedule():
     assert config["history_limit"] == 30
     mode_index = config["run_args"].index("--factor-selection-mode")
     assert config["run_args"][mode_index + 1] == "predeclared"
+
+
+def test_dashboard_monotonic_rejects_candidate_with_collapsed_publication_rows(tmp_path):
+    from momentum_factor_lab.dashboard_monotonic import decide_monotonic_dashboard, load_dashboard_snapshot
+
+    def payload(symbols: list[str], snapshot_rows: int, *, data_as_of: str = "2026-06-19") -> dict[str, object]:
+        return {
+            "generated_at_utc": f"{data_as_of}T10:00:00+00:00",
+            "latest_run_index": 0,
+            "runs": [{
+                "summary": {
+                    "data_as_of": data_as_of,
+                    "run_timestamp_utc": f"{data_as_of}T09:00:00+00:00",
+                    "selected_factor": "mom_9_1",
+                },
+                "latest_output_rows": [{"symbol": symbol, "rank": index + 1} for index, symbol in enumerate(symbols)],
+                "factor_score_snapshots": [{
+                    "date": data_as_of,
+                    "factor": "mom_9_1",
+                    "rows": [[f"S{index:02d}", 1.0 - index / 100] for index in range(snapshot_rows)],
+                }],
+            }],
+        }
+
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    baseline_path.write_text(json.dumps(payload([f"B{index:02d}" for index in range(20)], 35)), encoding="utf-8")
+    candidate_path.write_text(json.dumps(payload(["RSHGY", "GALDY", "TCNNF"], 3)), encoding="utf-8")
+
+    decision = decide_monotonic_dashboard(
+        load_dashboard_snapshot(baseline_path),
+        load_dashboard_snapshot(candidate_path),
+    )
+
+    assert not decision.passed
+    assert "collapsed" in decision.reason or "retained too little" in decision.reason

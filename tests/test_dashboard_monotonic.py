@@ -22,7 +22,16 @@ def _write_dashboard(path: Path, *, data_as_of: str, run_timestamp: str) -> Path
                         "summary": {
                             "data_as_of": data_as_of,
                             "run_timestamp_utc": run_timestamp,
-                        }
+                            "selected_factor": "mom_9_1",
+                        },
+                        "latest_output_rows": [{"symbol": f"S{index:02d}", "rank": index + 1} for index in range(12)],
+                        "factor_score_snapshots": [
+                            {
+                                "date": data_as_of,
+                                "factor": "mom_9_1",
+                                "rows": [[f"S{index:02d}", 1.0 - index / 100] for index in range(12)],
+                            }
+                        ],
                     }
                 ],
             }
