@@ -11,7 +11,7 @@
   "status": {
     "state": "degraded",
     "label": "Research signals (not tradable)",
-    "cadence": "daily KST after US market data with watchdog freshness checks",
+    "cadence": "manual workflow_dispatch after review",
     "expectedFreshnessDays": 7,
     "degradedReasons": [
       "complete_requested_price_coverage",

@@ -2872,7 +2872,7 @@ def build_public_summary(combined_payload: dict[str, Any]) -> dict[str, Any]:
         "status": {
             "state": state,
             "label": summary.get("recommendation_output_label") or "Research signals",
-            "cadence": "daily KST after US market data with watchdog freshness checks",
+            "cadence": "manual workflow_dispatch after review",
             "expectedFreshnessDays": 7,
             "degradedReasons": [str(item) for item in blockers],
         },
