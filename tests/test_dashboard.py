@@ -1490,3 +1490,22 @@ def test_dashboard_monotonic_rejects_candidate_with_collapsed_publication_rows(t
 
     assert not decision.passed
     assert "collapsed" in decision.reason or "retained too little" in decision.reason
+
+
+def test_dashboard_css_template_keeps_mobile_overflow_guards():
+    from momentum_factor_lab.dashboard import CSS_CONTENT
+
+    docs_css = (Path(__file__).resolve().parents[1] / "docs" / "assets" / "styles.css").read_text(encoding="utf-8")
+    required_guards = [
+        "html, body { max-width: 100%; overflow-x: hidden; }",
+        ".panel, .controls > *, .cards > *, .two-col > *, .viz-grid > *, .diagnostic-grid > *, .manual-update > * { min-width: 0; }",
+        ".viz-card {\n  min-width: 0; max-width: 100%;",
+        ".viz-card-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: .9rem; min-width: 0; }",
+        ".chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; overflow-wrap: anywhere; min-width: 0; }",
+        ".bar-chart { display: grid; gap: .62rem; min-width: 0; }",
+        ".bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; min-width: 0; }",
+        ".line-chart { min-height: 260px; max-width: 100%; min-width: 0;",
+    ]
+    for guard in required_guards:
+        assert guard in CSS_CONTENT
+        assert guard in docs_css

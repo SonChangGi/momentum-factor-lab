@@ -429,6 +429,7 @@ CSS_CONTENT = """:root {
   font-family: Inter, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
+html, body { max-width: 100%; overflow-x: hidden; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
   word-break: keep-all; overflow-wrap: anywhere;
@@ -456,6 +457,7 @@ body {
 main { padding: 1.5rem clamp(1rem, 4vw, 4rem) 3rem; }
 .notice, .panel, .disclaimer, .controls, .card { background: var(--panel); border: 1px solid var(--line); box-shadow: 0 12px 30px rgba(15, 23, 42, .06); }
 .notice { padding: 1rem 1.25rem; border-radius: 18px; margin-bottom: 1.25rem; color: #334155; }
+.panel, .controls > *, .cards > *, .two-col > *, .viz-grid > *, .diagnostic-grid > *, .manual-update > * { min-width: 0; }
 .manual-update {
   display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .6fr); gap: 1rem; align-items: center;
   padding: 1.25rem; border-radius: 22px; margin-bottom: 1.25rem;
@@ -523,15 +525,16 @@ tbody tr:hover { background: #f8fbff; }
 .gate-item small, .mini-item small { color: var(--muted); }
 .viz-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 .viz-card {
+  min-width: 0; max-width: 100%;
   border: 1px solid var(--line); border-radius: 22px; padding: 1rem;
   background: rgba(255,255,255,.86); box-shadow: 0 10px 24px rgba(15, 23, 42, .05);
 }
 .viz-card.wide { grid-column: 1 / -1; }
-.viz-card-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: .9rem; }
+.viz-card-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: .9rem; min-width: 0; }
 .viz-card h3 { margin: 0; font-size: 1.05rem; }
-.chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; }
-.bar-chart { display: grid; gap: .62rem; }
-.bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; }
+.chart-meta { color: var(--muted); font-size: .82rem; font-weight: 800; text-align: right; line-height: 1.4; overflow-wrap: anywhere; min-width: 0; }
+.bar-chart { display: grid; gap: .62rem; min-width: 0; }
+.bar-row { display: grid; grid-template-columns: minmax(0, .9fr) minmax(140px, 2fr) 88px; gap: .75rem; align-items: center; min-width: 0; }
 .bar-row.is-selected { padding: .35rem; border: 1px solid #b7c9ff; border-radius: 14px; background: #f2f6ff; }
 .bar-row.is-best:not(.is-selected) { padding: .35rem; border: 1px solid #b7ebd5; border-radius: 14px; background: #effcf7; }
 .bar-label { font-weight: 800; overflow-wrap: anywhere; line-height: 1.35; }
@@ -551,7 +554,7 @@ tbody tr:hover { background: #f8fbff; }
 .trend-fill { width: 18px; height: var(--bar-height, 0%); min-height: 3px; border-radius: 999px 999px 4px 4px; background: linear-gradient(180deg, #44b3ff, var(--accent)); }
 .trend-fill.negative { background: linear-gradient(180deg, #ff8787, #f03e3e); }
 .trend-label { color: var(--muted); font-size: .68rem; writing-mode: vertical-rl; max-height: 46px; overflow: hidden; }
-.line-chart { min-height: 260px; border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: .85rem; }
+.line-chart { min-height: 260px; max-width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: .85rem; }
 .line-chart svg { display: block; width: 100%; height: 260px; overflow: visible; }
 .line-grid { stroke: #e2e8f0; stroke-width: 1; }
 .axis-line { stroke: #94a3b8; stroke-width: 1.2; }
