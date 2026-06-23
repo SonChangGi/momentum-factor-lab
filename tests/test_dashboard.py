@@ -1395,15 +1395,15 @@ def test_dashboard_history_preserves_dedupes_sorts_and_caps(tmp_path):
     assert combined["runs"][1]["history_payload_type"] == "full"
     assert combined["latest_run_index"] == 1
 
-def test_daily_dashboard_workflow_is_manual_only_after_rollback():
+def test_daily_dashboard_workflow_has_scheduled_refresh_and_watchdog_fallbacks():
     workflow = Path(".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
     readme = Path("README.md").read_text(encoding="utf-8")
     config = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
 
     assert "workflow_dispatch:" in workflow
-    assert "schedule:" not in workflow
-    assert "cron:" not in workflow
-    assert "Automatic schedule is intentionally suspended after the 2026-06-20" in workflow
+    assert "schedule:" in workflow
+    assert 'cron: "0 0 * * 2-6"' in workflow
+    assert "09:00 KST Tue-Sat" in workflow
     assert "concurrency:" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "Refresh checkout to latest branch head" in workflow
@@ -1417,9 +1417,10 @@ def test_daily_dashboard_workflow_is_manual_only_after_rollback():
     watchdog = Path(".github/workflows/daily-dashboard-watchdog.yml").read_text(encoding="utf-8")
     assert "Daily Momentum Dashboard Watchdog" in watchdog
     assert "workflow_dispatch:" in watchdog
-    assert "schedule:" not in watchdog
-    assert "cron:" not in watchdog
-    assert "Automatic watchdog schedule is suspended" in watchdog
+    assert "schedule:" in watchdog
+    for cron in ['cron: "0 1 * * 2-6"', 'cron: "0 3 * * 2-6"', 'cron: "0 6 * * 2-6"', 'cron: "0 9 * * 2-6"']:
+        assert cron in watchdog
+    assert "freshness-gated fallback checks" in watchdog
     assert "actions: write" in watchdog
     assert "dashboard_freshness" in watchdog
     assert "DASHBOARD_FRESHNESS_EVENT_NAME: schedule" in watchdog
@@ -1428,9 +1429,9 @@ def test_daily_dashboard_workflow_is_manual_only_after_rollback():
     assert "gh workflow run daily-dashboard.yml" in watchdog
     assert "steps.freshness.outputs.skip != 'true'" in watchdog
     assert "daily-dashboard-watchdog.yml" in readme
-    assert "manual-only" in readme
-    assert "2026-06-20 data-contraction rollback" in readme
-    assert "Historical KST retry schedules" in readme
+    assert "09:00 KST Tue-Sat" in readme
+    assert "10:00/12:00/15:00/18:00 KST Tue-Sat" in readme
+    assert "freshness-gated fallback checks" in readme
     assert "publication safety gate" in readme
     assert "workflow_dispatch" in readme
     assert "최신 데이터 업데이트 실행" in readme

@@ -2,9 +2,10 @@ name: Daily Momentum Dashboard
 
 on:
   workflow_dispatch:
-    # Automatic schedule is intentionally suspended after the 2026-06-20
-    # data-contraction rollback. Run manually only after reviewing the
-    # publication safety gate output in dashboard_monotonic.
+    # Manual dispatch remains available for reviewed reruns.
+  schedule:
+    # 09:00 KST Tue-Sat: primary refresh after the prior U.S. regular session.
+    - cron: "0 0 * * 2-6"
 
 concurrency:
   group: daily-momentum-dashboard-${{ github.ref }}
@@ -104,9 +105,9 @@ jobs:
           git add docs
           commit_message="${RUNNER_TEMP}/dashboard-commit-message.txt"
           cat > "${commit_message}" <<'EOF'
-          Keep the published dashboard current after the reviewed data run
+          Keep the published dashboard current after the scheduled data run
 
-          Constraint: Automatic schedules are suspended; GitHub Actions updates only generated docs assets after a reviewed manual dashboard run.
+          Constraint: Scheduled and manual GitHub Actions updates only generated docs assets after freshness and monotonic publication gates.
           Confidence: high
           Scope-risk: narrow
           Directive: Do not use this automated commit for source-code or policy changes; those require reviewed human/agent commits.

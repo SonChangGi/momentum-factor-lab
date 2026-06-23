@@ -68,15 +68,15 @@ python -m momentum_factor_lab.cli scheduled-dashboard \
   --site-dir docs
 ```
 
-The committed workflow `.github/workflows/daily-dashboard.yml` is manual-only
-after the 2026-06-20 data-contraction rollback. Historical KST retry schedules
-and the watchdog schedule are intentionally suspended so a reviewed operator can
-inspect the publication safety gate before replacing `docs/data/dashboard.json`.
-The lightweight watchdog workflow,
-`.github/workflows/daily-dashboard-watchdog.yml`, also remains manual-only; when
-explicitly dispatched, it can still check freshness and dispatch the main
-`daily-dashboard.yml` workflow using GitHub's explicit `workflow_dispatch` path.
-The pipeline rebuilds `docs/` so GitHub Pages can serve the latest dashboard.
+The committed workflow `.github/workflows/daily-dashboard.yml` runs on a
+reviewed schedule again: 09:00 KST Tue-Sat after the prior U.S. regular session,
+plus explicit `workflow_dispatch` when an operator wants to rerun it. The
+lightweight watchdog workflow `.github/workflows/daily-dashboard-watchdog.yml`
+runs freshness-gated fallback checks at 10:00/12:00/15:00/18:00 KST Tue-Sat and
+dispatches the main `daily-dashboard.yml` workflow only when the committed
+dashboard is stale. Both paths preserve the freshness check and monotonic publication safety gate
+before replacing `docs/data/dashboard.json`. The pipeline rebuilds `docs/`
+so GitHub Pages can serve the latest dashboard.
 Website controls such as recent period, Top-N, selected factor, and max
 position weight are client-side viewing controls; manual live-run inputs are
 stored in `.github/momentum-dashboard-config.json`.
@@ -95,7 +95,7 @@ price collection, factor backtest, stock/weight calculation,
 gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main
 ```
 
-Manual runs never skip because of the historical 08:00 KST freshness guard, but
+Manual runs never skip because of the 08:00 KST freshness guard, but
 they can still finish with no `docs/` diff when providers have not published a
 newer close, the regenerated dashboard is identical, or the monotonic publication
 gate rejects a collapsed candidate. In that case the workflow exits without a

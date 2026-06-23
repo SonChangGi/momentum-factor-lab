@@ -2872,7 +2872,7 @@ def build_public_summary(combined_payload: dict[str, Any]) -> dict[str, Any]:
         "status": {
             "state": state,
             "label": summary.get("recommendation_output_label") or "Research signals",
-            "cadence": "manual workflow_dispatch after review",
+            "cadence": "scheduled 09:00 KST Tue-Sat with freshness-gated watchdog fallbacks; workflow_dispatch on demand",
             "expectedFreshnessDays": 7,
             "degradedReasons": [str(item) for item in blockers],
         },
@@ -2900,7 +2900,7 @@ def build_public_summary(combined_payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "automation": {
             "workflowUrl": "https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml",
-            "manualUpdateLabel": "GitHub Actions daily-dashboard 수동 실행",
+            "manualUpdateLabel": "GitHub Actions daily-dashboard 수동 실행 / scheduled refresh",
             "tokenPolicy": "Static page keeps no GitHub token.",
         },
         "payload": {
