@@ -1259,6 +1259,218 @@ button,
 }
 
 
+/* Visual Ralph readability pass — contrast, tables, charts, 2026-06-24. */
+:root {
+  --surface-cyan: rgba(14, 116, 144, 0.16);
+  --surface-teal: rgba(20, 184, 166, 0.13);
+  --surface-violet: rgba(139, 92, 246, 0.14);
+  --surface-amber: rgba(245, 158, 11, 0.13);
+  --surface-rose: rgba(244, 63, 94, 0.13);
+  --text-strong: #f8fafc;
+  --text-readable: #dce3ee;
+  --text-muted-readable: #b8c2d1;
+}
+
+.table-wrap,
+.table-scroll,
+.data-table-wrap,
+.performance-table-wrap,
+.signal-table-wrap,
+.sensitivity-wrap,
+.chart,
+.line-chart,
+.chart-card,
+.forecast-chart {
+  scrollbar-color: rgba(125, 211, 252, 0.58) rgba(255, 255, 255, 0.05);
+}
+
+.table-wrap,
+.table-scroll,
+.data-table-wrap,
+.performance-table-wrap,
+.signal-table-wrap {
+  background:
+    linear-gradient(90deg, rgba(125, 211, 252, 0.10), transparent 24px) left / 32px 100% no-repeat,
+    linear-gradient(270deg, rgba(196, 181, 253, 0.14), transparent 30px) right / 40px 100% no-repeat,
+    rgba(255, 255, 255, 0.025) !important;
+  border-color: rgba(226, 232, 240, 0.18) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 18px 50px rgba(0,0,0,0.24) !important;
+}
+
+.table-wrap table,
+.table-scroll table,
+.data-table-wrap table,
+.performance-table,
+.data-table,
+table {
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+  font-variant-numeric: tabular-nums lining-nums;
+  background: transparent !important;
+}
+
+th,
+td {
+  border-bottom-color: rgba(226, 232, 240, 0.13) !important;
+}
+
+th {
+  color: #dbeafe !important;
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.22), rgba(15, 23, 42, 0.42)) !important;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+td {
+  color: var(--text-readable) !important;
+}
+
+tbody tr:nth-child(even) {
+  background: rgba(125, 211, 252, 0.045) !important;
+}
+
+tbody tr:hover {
+  background: rgba(196, 181, 253, 0.10) !important;
+}
+
+td:not(:first-child),
+.value-cell,
+.sensitivity-cell,
+.metric-card strong,
+.card strong,
+.chart-summary-item em,
+.status-value,
+.bar-value {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.line-chart,
+.chart-card,
+.chart,
+.forecast-chart {
+  background:
+    radial-gradient(circle at 8% 0%, rgba(125, 211, 252, 0.08), transparent 20rem),
+    linear-gradient(180deg, rgba(18, 24, 36, 0.98), rgba(10, 13, 20, 0.96)) !important;
+  border-color: rgba(226, 232, 240, 0.18) !important;
+}
+
+.axis-label,
+.axis-title,
+.axis-range,
+.chart-card svg text,
+.line-chart svg text,
+.chart svg text,
+.line-end-label text {
+  fill: #dbe3ee !important;
+  color: #dbe3ee !important;
+  paint-order: stroke;
+  stroke: rgba(8, 10, 15, 0.78);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.grid,
+.line-grid,
+.chart-card .axis-row line,
+.chart-card .axis-column line,
+.line-chart .axis-line {
+  stroke: rgba(226, 232, 240, 0.18) !important;
+}
+
+.axis,
+.axis-line {
+  stroke: rgba(226, 232, 240, 0.34) !important;
+}
+
+.legend,
+.line-legend,
+.chart-legend,
+.chart-help,
+.chart-meta,
+.axis-note,
+.scale-legend,
+.scale-foot {
+  color: var(--text-muted-readable) !important;
+}
+
+.empty,
+.empty-state,
+.skeleton-line {
+  color: var(--text-readable) !important;
+  background: linear-gradient(135deg, rgba(125, 211, 252, 0.08), rgba(196, 181, 253, 0.07)) !important;
+  border-color: rgba(125, 211, 252, 0.24) !important;
+}
+
+.status-pill,
+.badge,
+.classification,
+.factor-pill,
+.marker-help,
+.rank-badge,
+.warn-badge {
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+}
+
+/* Momentum page: remove residual light cards and prevent chart label loss. */
+.notice,
+.manual-update,
+.diagnostic-card,
+.diagnostic-note,
+.scenario-note,
+.gate-item,
+.mini-item,
+.window-chip,
+.performance-period-card,
+.metric-tile,
+.rank-card,
+.explain,
+.disclaimer,
+.viz-card,
+.visual-panel,
+.performance-metrics-heading,
+.trend-bars {
+  color: var(--ink) !important;
+  background: linear-gradient(145deg, rgba(125,211,252,0.08), rgba(255,255,255,0.035)) !important;
+  border-color: rgba(226,232,240,0.14) !important;
+}
+.notice:nth-of-type(2n),
+.viz-card:nth-child(2n),
+.diagnostic-card:nth-child(2n),
+.performance-period-card:nth-child(2n) {
+  background: linear-gradient(145deg, rgba(196,181,253,0.10), rgba(255,255,255,0.035)) !important;
+}
+.manual-update,
+.controls { background: linear-gradient(135deg, rgba(14,116,144,0.16), rgba(139,92,246,0.10)) !important; }
+.manual-update p,
+.notice,
+.diagnostic-note,
+.scenario-note,
+.explain ul,
+.disclaimer,
+.gate-item small,
+.mini-item small,
+.window-chip small,
+.performance-metrics-heading p { color: var(--text-muted-readable) !important; }
+.bar-row.is-selected,
+.bar-row.is-best,
+.rank-card.is-selected {
+  background: linear-gradient(90deg, rgba(251,191,36,0.16), rgba(125,211,252,0.08)) !important;
+  border-color: rgba(251,191,36,0.36) !important;
+}
+.bar-label,
+.bar-value,
+.metric-name,
+.series-name,
+.window-chip strong,
+.performance-period-card h5 { color: var(--text-strong) !important; }
+.trend-bars { min-width: min(100%, 720px); padding-bottom: 0.75rem; }
+.trend-label { color: #c8d3e2 !important; font-size: 0.72rem !important; }
+.line-chart svg { min-width: 620px; }
+@media (max-width: 640px) {
+  .trend-chart,
+  .line-chart { overflow-x: auto; }
+  .bar-row, .compact-bars .bar-row { align-items: stretch; }
+}
 """
 
 
