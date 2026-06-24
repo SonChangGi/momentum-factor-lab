@@ -1471,6 +1471,55 @@ td:not(:first-child),
   .line-chart { overflow-x: auto; }
   .bar-row, .compact-bars .bar-row { align-items: stretch; }
 }
+
+/* Visual Ralph follow-up: nested labels, legends, and compact rows, 2026-06-25. */
+.bar-row,
+.compact-bars .bar-row,
+.chart-summary-item,
+.gate-item,
+.mini-item,
+.performance-period-card,
+.window-chip,
+.legend span,
+.line-legend span,
+.chart-legend span,
+.badge,
+.card-badge {
+  background: linear-gradient(135deg, rgba(15,23,42,0.82), rgba(30,41,59,0.64)) !important;
+  border-color: rgba(226,232,240,0.16) !important;
+  color: var(--text-readable) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.055) !important;
+}
+.bar-row:nth-child(3n+1),
+.chart-summary-item:nth-child(3n+1),
+.window-chip:nth-child(3n+1) {
+  background: linear-gradient(135deg, rgba(14,116,144,0.18), rgba(15,23,42,0.84)) !important;
+}
+.bar-row:nth-child(3n+2),
+.chart-summary-item:nth-child(3n+2),
+.window-chip:nth-child(3n+2) {
+  background: linear-gradient(135deg, rgba(139,92,246,0.16), rgba(15,23,42,0.84)) !important;
+}
+.bar-row strong,
+.compact-bars strong,
+.chart-summary-item strong,
+.gate-item strong,
+.mini-item strong,
+.performance-period-card h5,
+.window-chip strong { color: #f8fafc !important; }
+.bar-row small,
+.compact-bars small,
+.chart-summary-item small,
+.gate-item small,
+.mini-item small,
+.performance-period-card small,
+.window-chip small,
+.legend,
+.line-legend,
+.chart-legend { color: #bac7d7 !important; }
+.bar-track { background: rgba(148,163,184,0.20) !important; }
+.legend-dot,
+.chart-legend .legend-dot { box-shadow: 0 0 0 1px rgba(255,255,255,0.24), 0 0 14px currentColor !important; }
 """
 
 
