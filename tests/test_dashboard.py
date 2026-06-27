@@ -417,7 +417,10 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "Y축: 누적 성과" in js
     assert "나스닥 벤치마크" in js
     assert 'id="performance-metrics-table"' in html
-    assert "기간별 성과 지표 비교" in js
+    assert "기간별 프록시 성과 지표 비교" in js
+    assert "브라우저 프록시" in js
+    assert "새 백엔드 재백테스트가 아니라" in js
+    assert "실제 일별 구성종목 재매매 결과로 해석하지 마세요" in js
     assert "각 기간 카드에서 같은 지표" in js
     assert "performance-period-grid" in js
     assert "performance-period-card" in js
@@ -454,6 +457,14 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "선택 팩터 시나리오" in html
     assert "브라우저 시나리오 종목당 최대 비중" in html
     assert "표시용 가정" in html
+    assert 'id="lookback-months-select"' in html
+    assert 'id="topn-input" type="number" min="1" max="50" value="20"' in html
+    assert 'id="max-weight-input" type="number" min="1" max="50" step="1" value="50"' in html
+    assert 'id="rebalance-select"' in html
+    assert 'id="transaction-cost-input"' in html
+    assert 'id="slippage-input"' in html
+    assert 'id="daily-weight-analysis-panel"' in html
+    assert "선택 팩터 일별 투자 비중" in html
     assert "사후 비교 분석" in html
     assert "팩터 수익률 막대 차트" in html
     assert "선택 팩터와 기간 최고 팩터 누적 성과 비교" in html
@@ -483,6 +494,11 @@ def test_write_dashboard_site_writes_korean_static_files(tmp_path):
     assert "topFactorEnsembleAllocation" in js
     assert "bestFactorSignalRows" in js
     assert "renderBacktestChart" in js
+    assert "DASHBOARD_INPUT_DEFAULTS" in js
+    assert "scenarioAdjustedSeriesPoints" in js
+    assert "renderDailyWeightsAnalysis" in js
+    assert "미표시 후보 합계" in js
+    assert "appendBarRow(target, '미표시 후보 합계'" not in js
     assert "computeScenarioAllocation" in js
     assert "renderDiagnostics" in js
     assert "후보 종목" in js
@@ -622,6 +638,16 @@ const perfPoints = Array.from({{ length: 45 }}, (_, index) => {{
 const ticks = niceReturnTicks(-0.08, 0.55);
 const dateTicks = dateTickMarks(perfPoints.map((point) => point.date));
 const perf = performanceMetrics(perfPoints, PERFORMANCE_PERIODS.find((period) => period.key === '1M'));
+const risingSeries = {{
+  dates: ['2026-01-02', '2026-01-31', '2026-02-27', '2026-03-31'],
+  equity: [1, 1.05, 1.12, 1.20],
+  drawdown: [0, 0, 0, 0],
+}};
+const lowCapAllocation = computeScenarioAllocation([['AAA', 9], ['BBB', 8], ['CCC', 7]], 3, 0.10);
+const highCapAllocation = computeScenarioAllocation([['AAA', 9], ['BBB', 8], ['CCC', 7]], 3, 0.50);
+const monthlyParams = {{ lookbackMonths: 12, topN: 3, maxWeight: 0.10, rebalanceFrequency: 'ME', transactionCostBps: 0, slippageBps: 0, totalCostRate: 0 }};
+const lowCapSeries = scenarioAdjustedSeriesPoints(risingSeries, '2026-03-31', monthlyParams, lowCapAllocation);
+const highCapSeries = scenarioAdjustedSeriesPoints(risingSeries, '2026-03-31', {{ ...monthlyParams, maxWeight: 0.50 }}, highCapAllocation);
 if (a.weighted[0].symbol !== 'AAA') throw new Error('factor A ranking failed');
 if (b.weighted[0].symbol !== 'ZZZ') throw new Error('factor B ranking failed');
 if (Math.abs(a.weighted[0].display_weight - 0.10) > 1e-12) throw new Error('max cap was not applied');
@@ -652,6 +678,168 @@ if (dateTicks.length < 4) throw new Error('date tick marks are too sparse');
 if (!Number.isFinite(perf.cumulativeReturn)) throw new Error('performance return missing');
 if (!Number.isFinite(perf.volatility)) throw new Error('performance volatility missing');
 if (!Number.isFinite(perf.maxDrawdown) || perf.maxDrawdown > 0) throw new Error('performance MDD invalid');
+if (!(highCapSeries.at(-1).equity > lowCapSeries.at(-1).equity)) throw new Error('max-weight scenario did not affect backtest series');
+`, sandbox);
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(["node", str(node_script)], check=False, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_dashboard_js_defaults_to_best_factor_and_requested_input_defaults(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node is required for dashboard JavaScript behavior smoke test")
+
+    run_json = tmp_path / "run_results_test.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "summary": {
+                        "run_timestamp_utc": "2026-06-09T00:00:00Z",
+                        "data_as_of": "2026-06-08",
+                        "selected_factor": "mom_9_1",
+                        "default_top_n": 2,
+                        "default_max_weight": 0.1,
+                    },
+                    "periods": [
+                        {"key": "1M", "label": "최근 1개월", "trading_days": 21},
+                        {"key": "1Y", "label": "최근 1년", "trading_days": 252},
+                    ],
+                    "factor_options": [
+                        {"factor": "mom_9_1", "category": "traditional", "description_ko": "9개월-1개월"},
+                        {"factor": "mom_12_1", "category": "traditional", "description_ko": "12개월-1개월"},
+                    ],
+                    "factor_leaders": [
+                        {"date": "2026-06-08", "window": "1M", "best_factor": "mom_9_1", "best_return": 0.03},
+                        {"date": "2026-06-08", "window": "1Y", "best_factor": "mom_12_1", "best_return": 0.22},
+                    ],
+                    "factor_period_matrix": [
+                        {
+                            "date": "2026-06-08",
+                            "window": "1Y",
+                            "window_label": "최근 1년",
+                            "factors": ["mom_12_1", "mom_9_1"],
+                            "returns": [0.22, 0.11],
+                            "factor_count": 2,
+                        }
+                    ],
+                    "factor_period_rankings": [],
+                    "holdings": [],
+                    "factor_score_snapshots": [
+                        {"date": "2026-06-08", "factor": "mom_12_1", "score_date": "2026-06-07", "rows": [["AAA", 9]]}
+                    ],
+                    "factor_backtest_series": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    js_path = Path(paths["js"])
+    node_script = tmp_path / "defaults-test.mjs"
+    node_script.write_text(
+        f"""
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source = fs.readFileSync({str(js_path)!r}, 'utf8').replace(/fetch\\('data\\/dashboard\\.json'\\)[\\s\\S]*$/u, '');
+class FakeElement {{
+  constructor(selector) {{
+    this.selector = selector;
+    this.value = '';
+    this.textContent = '';
+    this.children = [];
+    this.disabled = false;
+    this.classList = {{ add() {{}}, remove() {{}} }};
+  }}
+  replaceChildren(...nodes) {{ this.children = nodes; }}
+  appendChild(node) {{ this.children.push(node); return node; }}
+  append(...nodes) {{ this.children.push(...nodes); }}
+  setAttribute() {{}}
+  removeAttribute() {{}}
+  addEventListener() {{}}
+}}
+const elements = new Map();
+function elementFor(selector) {{
+  if (!elements.has(selector)) elements.set(selector, new FakeElement(selector));
+  return elements.get(selector);
+}}
+const document = {{
+  querySelector: elementFor,
+  querySelectorAll: () => [],
+  createElement: (tag) => new FakeElement(tag),
+  createElementNS: (_ns, tag) => new FakeElement(tag),
+  addEventListener() {{}},
+}};
+const sandbox = {{
+  console,
+  document,
+  window: {{ setTimeout: (fn) => fn(), location: {{ search: '' }}, addEventListener() {{}} }},
+  localStorage: {{ getItem() {{ return null; }}, setItem() {{}} }},
+  URLSearchParams,
+}};
+vm.runInNewContext(source + `
+renderWithBusy('preload preset guard');
+if (!document.querySelector('#run-status').textContent.includes('데이터를 불러오는 중')) throw new Error('preload render guard did not explain loading state');
+state.data = {{
+  latest_run_index: 0,
+  runs: [{{
+    summary: {{
+      run_timestamp_utc: '2026-06-09T00:00:00Z',
+      data_as_of: '2026-06-08',
+      selected_factor: 'mom_9_1',
+      default_top_n: 2,
+      default_max_weight: 0.1,
+    }},
+    periods: [
+      {{ key: '1M', label: '최근 1개월', trading_days: 21 }},
+      {{ key: '1Y', label: '최근 1년', trading_days: 252 }},
+    ],
+    factor_options: [
+      {{ factor: 'mom_9_1', category: 'traditional', description_ko: '9개월-1개월' }},
+      {{ factor: 'mom_12_1', category: 'traditional', description_ko: '12개월-1개월' }},
+    ],
+    factor_leaders: [
+      {{ date: '2026-06-08', window: '1M', best_factor: 'mom_9_1', best_return: 0.03 }},
+      {{ date: '2026-06-08', window: '1Y', best_factor: 'mom_12_1', best_return: 0.22 }},
+    ],
+    factor_period_matrix: [{{
+      date: '2026-06-08',
+      window: '1Y',
+      window_label: '최근 1년',
+      factors: ['mom_12_1', 'mom_9_1'],
+      returns: [0.22, 0.11],
+      factor_count: 2,
+    }}],
+    factor_period_rankings: [],
+    factor_score_snapshots: [
+      {{ date: '2026-06-08', factor: 'mom_12_1', score_date: '2026-06-07', rows: [['AAA', 9]] }},
+    ],
+    holdings: [],
+    factor_backtest_series: [],
+  }}],
+}};
+fillControls();
+if (document.querySelector('#window-select').value !== '1Y') throw new Error('default window is not recent 12 months');
+if (document.querySelector('#factor-select').value !== 'mom_12_1') throw new Error('default factor did not follow current best factor');
+if (String(document.querySelector('#topn-input').value) !== '20') throw new Error('default top N is not 20');
+if (String(document.querySelector('#max-weight-input').value) !== '50') throw new Error('default max weight is not 50 percent');
+if (document.querySelector('#lookback-months-select').value !== '12') throw new Error('default lookback is not 12 months');
+if (document.querySelector('#rebalance-select').value !== 'ME') throw new Error('default rebalance is not monthly');
+if (document.querySelector('#transaction-cost-input').value !== '5') throw new Error('default transaction cost is not 5 bps');
+if (document.querySelector('#slippage-input').value !== '5') throw new Error('default slippage is not 5 bps');
+document.querySelector('#window-select').value = '1M';
+syncDefaultFactorToCurrentBasis();
+if (document.querySelector('#factor-select').value !== 'mom_9_1') throw new Error('basis/window change did not refresh best-factor default');
+state.hasUserSelectedFactor = true;
+document.querySelector('#factor-select').value = 'mom_9_1';
+document.querySelector('#window-select').value = '1Y';
+syncDefaultFactorToCurrentBasis();
+if (document.querySelector('#factor-select').value !== 'mom_9_1') throw new Error('manual factor selection was overwritten');
 `, sandbox);
 """,
         encoding="utf-8",

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>모멘텀 팩터 데일리 대시보드</title>
-  <link rel="stylesheet" href="assets/styles.css?v=20260617-visible-signal-fallback" />
+  <link rel="stylesheet" href="assets/styles.css?v=20260626-readable-dark-scenario-inputs" />
 </head>
 <body>
   <header class="hero">
@@ -62,28 +62,75 @@
       </div>
     </section>
 
-    <section class="controls" aria-label="대시보드 입력값">
-      <label>실행 결과
-        <select id="run-select"></select>
-      </label>
-      <label>기준일
-        <select id="date-select"></select>
-      </label>
-      <label>최근 기간
-        <select id="window-select"></select>
-      </label>
-      <label>선택 팩터 시나리오
-        <select id="factor-select"></select>
-        <span class="control-hint">기간 최고 팩터와 별도로 비교할 표시용 팩터입니다.</span>
-      </label>
-      <label>상위 N개 표시
-        <input id="topn-input" type="number" min="1" max="50" value="20" />
-      </label>
-      <label>브라우저 시나리오 종목당 최대 비중
-        <input id="max-weight-input" type="number" min="1" max="50" step="1" value="10" />
-        <span class="unit">%</span>
-        <span class="control-hint">표시용 가정이며 자동 실행 설정을 저장하지 않습니다.</span>
-      </label>
+    <section class="controls controls-enhanced" aria-label="대시보드 입력값">
+      <div class="control-group control-group-run">
+        <div class="control-group-heading">
+          <p class="eyebrow">분석 기준</p>
+          <h2>기준일 · 기간 · 선택 팩터</h2>
+        </div>
+        <label>실행 결과
+          <select id="run-select"></select>
+        </label>
+        <label>기준일
+          <select id="date-select"></select>
+        </label>
+        <label>최근 기간
+          <select id="window-select"></select>
+          <span class="control-hint">기본값은 최근 12개월입니다.</span>
+        </label>
+        <label>선택 팩터 시나리오
+          <select id="factor-select"></select>
+          <span class="control-hint">초기값은 현재 기준일·기간의 최고 팩터입니다.</span>
+        </label>
+      </div>
+      <div class="control-group control-group-backtest">
+        <div class="control-group-heading">
+          <p class="eyebrow">백테스트 민감도 조건</p>
+          <h2>브라우저 프록시 시나리오 입력</h2>
+          <p class="control-hint">저장된 팩터 백테스트 곡선을 현재 입력값으로 조정한 민감도 뷰입니다. 새 백엔드 재백테스트나 저장된 매매 조건은 아닙니다.</p>
+        </div>
+        <label>최근 분석 기간
+          <select id="lookback-months-select">
+            <option value="3">최근 3개월</option>
+            <option value="6">최근 6개월</option>
+            <option value="12" selected>최근 12개월</option>
+            <option value="24">최근 24개월</option>
+          </select>
+        </label>
+        <label>상위 N개 종목
+          <input id="topn-input" type="number" min="1" max="50" value="20" />
+          <span class="control-hint">기본값 20개. 점수 스냅샷 범위 내에서 계산합니다.</span>
+        </label>
+        <label>브라우저 시나리오 종목당 최대 비중
+          <input id="max-weight-input" type="number" min="1" max="50" step="1" value="50" />
+          <span class="unit">%</span>
+          <span class="control-hint">표시용 가정 기본값 50%. 변경 시 비중·백테스트 시나리오가 함께 갱신됩니다.</span>
+        </label>
+        <label>리밸런싱 주기
+          <select id="rebalance-select">
+            <option value="W">주간</option>
+            <option value="ME" selected>월간</option>
+            <option value="QE">분기</option>
+          </select>
+        </label>
+        <label>거래 비용
+          <input id="transaction-cost-input" type="number" min="0" max="200" step="1" value="5" />
+          <span class="unit">bps</span>
+        </label>
+        <label>슬리피지
+          <input id="slippage-input" type="number" min="0" max="200" step="1" value="5" />
+          <span class="unit">bps</span>
+        </label>
+        <div class="preset-row" aria-label="빠른 입력 프리셋">
+          <button type="button" data-topn-preset="10">상위 10</button>
+          <button type="button" data-topn-preset="20">상위 20</button>
+          <button type="button" data-topn-preset="30">상위 30</button>
+          <button type="button" data-max-weight-preset="10">최대 10%</button>
+          <button type="button" data-max-weight-preset="20">최대 20%</button>
+          <button type="button" data-max-weight-preset="50">최대 50%</button>
+        </div>
+        <p id="scenario-live-summary" class="scenario-live-summary" aria-live="polite">선택값을 불러오는 중입니다.</p>
+      </div>
     </section>
 
     <section class="cards" aria-label="요약 카드">
@@ -323,6 +370,32 @@
       </div>
     </section>
 
+    <section class="panel analysis-panel" id="daily-weight-analysis-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">추가 분석</p>
+          <h2>선택 팩터 일별 투자 비중</h2>
+        </div>
+        <p id="daily-weight-analysis-note">선택한 기준일·팩터의 백테스트 일별 보유 비중과 브라우저 입력값으로 재계산한 시나리오 비중을 함께 확인합니다.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="daily-weights-table">
+          <thead>
+            <tr>
+              <th>순위</th>
+              <th>종목</th>
+              <th>백테스트 일별 비중</th>
+              <th>시나리오 비중</th>
+              <th>모멘텀 신호</th>
+              <th>비중 기준일</th>
+              <th>신호일</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel two-col">
       <div>
         <p class="eyebrow">최신 팩터 랭킹</p>
@@ -362,6 +435,6 @@
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v=20260617-visible-signal-fallback"></script>
+  <script src="assets/dashboard.js?v=20260626-readable-dark-scenario-inputs"></script>
 </body>
 </html>

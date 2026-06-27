@@ -42,7 +42,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260617-visible-signal-fallback"
+ASSET_VERSION = "20260626-readable-dark-scenario-inputs"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -109,28 +109,75 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
     </section>
 
-    <section class="controls" aria-label="대시보드 입력값">
-      <label>실행 결과
-        <select id="run-select"></select>
-      </label>
-      <label>기준일
-        <select id="date-select"></select>
-      </label>
-      <label>최근 기간
-        <select id="window-select"></select>
-      </label>
-      <label>선택 팩터 시나리오
-        <select id="factor-select"></select>
-        <span class="control-hint">기간 최고 팩터와 별도로 비교할 표시용 팩터입니다.</span>
-      </label>
-      <label>상위 N개 표시
-        <input id="topn-input" type="number" min="1" max="50" value="20" />
-      </label>
-      <label>브라우저 시나리오 종목당 최대 비중
-        <input id="max-weight-input" type="number" min="1" max="50" step="1" value="10" />
-        <span class="unit">%</span>
-        <span class="control-hint">표시용 가정이며 자동 실행 설정을 저장하지 않습니다.</span>
-      </label>
+    <section class="controls controls-enhanced" aria-label="대시보드 입력값">
+      <div class="control-group control-group-run">
+        <div class="control-group-heading">
+          <p class="eyebrow">분석 기준</p>
+          <h2>기준일 · 기간 · 선택 팩터</h2>
+        </div>
+        <label>실행 결과
+          <select id="run-select"></select>
+        </label>
+        <label>기준일
+          <select id="date-select"></select>
+        </label>
+        <label>최근 기간
+          <select id="window-select"></select>
+          <span class="control-hint">기본값은 최근 12개월입니다.</span>
+        </label>
+        <label>선택 팩터 시나리오
+          <select id="factor-select"></select>
+          <span class="control-hint">초기값은 현재 기준일·기간의 최고 팩터입니다.</span>
+        </label>
+      </div>
+      <div class="control-group control-group-backtest">
+        <div class="control-group-heading">
+          <p class="eyebrow">백테스트 민감도 조건</p>
+          <h2>브라우저 프록시 시나리오 입력</h2>
+          <p class="control-hint">저장된 팩터 백테스트 곡선을 현재 입력값으로 조정한 민감도 뷰입니다. 새 백엔드 재백테스트나 저장된 매매 조건은 아닙니다.</p>
+        </div>
+        <label>최근 분석 기간
+          <select id="lookback-months-select">
+            <option value="3">최근 3개월</option>
+            <option value="6">최근 6개월</option>
+            <option value="12" selected>최근 12개월</option>
+            <option value="24">최근 24개월</option>
+          </select>
+        </label>
+        <label>상위 N개 종목
+          <input id="topn-input" type="number" min="1" max="50" value="20" />
+          <span class="control-hint">기본값 20개. 점수 스냅샷 범위 내에서 계산합니다.</span>
+        </label>
+        <label>브라우저 시나리오 종목당 최대 비중
+          <input id="max-weight-input" type="number" min="1" max="50" step="1" value="50" />
+          <span class="unit">%</span>
+          <span class="control-hint">표시용 가정 기본값 50%. 변경 시 비중·백테스트 시나리오가 함께 갱신됩니다.</span>
+        </label>
+        <label>리밸런싱 주기
+          <select id="rebalance-select">
+            <option value="W">주간</option>
+            <option value="ME" selected>월간</option>
+            <option value="QE">분기</option>
+          </select>
+        </label>
+        <label>거래 비용
+          <input id="transaction-cost-input" type="number" min="0" max="200" step="1" value="5" />
+          <span class="unit">bps</span>
+        </label>
+        <label>슬리피지
+          <input id="slippage-input" type="number" min="0" max="200" step="1" value="5" />
+          <span class="unit">bps</span>
+        </label>
+        <div class="preset-row" aria-label="빠른 입력 프리셋">
+          <button type="button" data-topn-preset="10">상위 10</button>
+          <button type="button" data-topn-preset="20">상위 20</button>
+          <button type="button" data-topn-preset="30">상위 30</button>
+          <button type="button" data-max-weight-preset="10">최대 10%</button>
+          <button type="button" data-max-weight-preset="20">최대 20%</button>
+          <button type="button" data-max-weight-preset="50">최대 50%</button>
+        </div>
+        <p id="scenario-live-summary" class="scenario-live-summary" aria-live="polite">선택값을 불러오는 중입니다.</p>
+      </div>
     </section>
 
     <section class="cards" aria-label="요약 카드">
@@ -362,6 +409,32 @@ HTML_TEMPLATE = """<!doctype html>
               <th>모멘텀 신호</th>
               <th>시나리오 목표 비중</th>
               <th>팩터</th>
+              <th>신호일</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel analysis-panel" id="daily-weight-analysis-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">추가 분석</p>
+          <h2>선택 팩터 일별 투자 비중</h2>
+        </div>
+        <p id="daily-weight-analysis-note">선택한 기준일·팩터의 백테스트 일별 보유 비중과 브라우저 입력값으로 재계산한 시나리오 비중을 함께 확인합니다.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="daily-weights-table">
+          <thead>
+            <tr>
+              <th>순위</th>
+              <th>종목</th>
+              <th>백테스트 일별 비중</th>
+              <th>시나리오 비중</th>
+              <th>모멘텀 신호</th>
+              <th>비중 기준일</th>
               <th>신호일</th>
             </tr>
           </thead>
@@ -1520,15 +1593,364 @@ td:not(:first-child),
 .bar-track { background: rgba(148,163,184,0.20) !important; }
 .legend-dot,
 .chart-legend .legend-dot { box-shadow: 0 0 0 1px rgba(255,255,255,0.24), 0 0 14px currentColor !important; }
+
+/* Readable dark research cockpit refresh — 2026-06-26.
+   Keep the dark concept, but reduce over-black surfaces and raise text/chart contrast. */
+:root {
+  color-scheme: dark;
+  --bg: #111827;
+  --panel: #182235;
+  --card: #1d2940;
+  --surface: #182235;
+  --surface-soft: #24324c;
+  --ink: #f8fafc;
+  --muted: #c5d0df;
+  --line: rgba(203, 213, 225, 0.28);
+  --accent: #60a5fa;
+  --accent-2: #7dd3fc;
+  --accent-soft: rgba(96, 165, 250, 0.18);
+  --good: #74e0a3;
+  --warn: #f8c66a;
+  --danger: #fb7185;
+  --shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+}
+
+html { background: #111827 !important; }
+
+body {
+  color: var(--ink) !important;
+  background:
+    radial-gradient(circle at 14% -6%, rgba(96, 165, 250, 0.22), transparent 34rem),
+    radial-gradient(circle at 88% 4%, rgba(125, 211, 252, 0.14), transparent 30rem),
+    linear-gradient(180deg, #172033 0%, #111827 54%, #121a2a 100%) !important;
+}
+
+body::before {
+  opacity: .38;
+  background-size: 88px 88px;
+}
+
+.hero {
+  background:
+    radial-gradient(circle at 78% -12%, rgba(125, 211, 252, .22), transparent 28rem),
+    linear-gradient(135deg, #22304a 0%, #172033 58%, #132034 100%) !important;
+  border-bottom: 1px solid rgba(203, 213, 225, .22);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, .28) !important;
+}
+
+.hero-copy,
+.panel-heading p,
+.notice,
+.manual-update p,
+.card small,
+.control-hint,
+.chart-meta,
+#manual-update-status,
+.line-legend,
+.scenario-note,
+.diagnostic-note,
+.disclaimer,
+footer {
+  color: var(--muted) !important;
+}
+
+.hero-copy { opacity: 1 !important; }
+
+.status-card,
+.notice,
+.manual-update,
+.controls,
+.card,
+.panel,
+.disclaimer,
+.viz-card,
+.diagnostic-card,
+.performance-period-card,
+.window-chip,
+.explain {
+  background: linear-gradient(180deg, rgba(29, 41, 64, .98), rgba(24, 34, 53, .98)) !important;
+  border-color: var(--line) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.manual-update,
+.visual-panel {
+  background:
+    linear-gradient(180deg, rgba(34, 48, 74, .98), rgba(24, 34, 53, .98)) !important;
+}
+
+.controls-enhanced {
+  display: grid;
+  grid-template-columns: minmax(280px, .9fr) minmax(320px, 1.35fr);
+  gap: 1rem;
+  padding: 0;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.control-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .9rem;
+  padding: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(29, 41, 64, .98), rgba(24, 34, 53, .98));
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.control-group-heading {
+  grid-column: 1 / -1;
+}
+
+.control-group-heading h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+
+label { color: #d8e2ef !important; }
+
+select,
+input {
+  color: #f8fafc !important;
+  background: #111827 !important;
+  border-color: rgba(203, 213, 225, .34) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+}
+
+select:focus,
+input:focus,
+button:focus,
+a:focus {
+  outline: 3px solid rgba(125, 211, 252, .58) !important;
+  outline-offset: 2px;
+}
+
+.unit { color: #d8e2ef !important; font-weight: 900; }
+
+.preset-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+}
+
+.preset-row button {
+  border: 1px solid rgba(125, 211, 252, .35);
+  border-radius: 999px;
+  color: #dff6ff;
+  background: rgba(96, 165, 250, .14);
+  padding: .5rem .72rem;
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.preset-row button:hover { background: rgba(96, 165, 250, .26); }
+
+.scenario-live-summary {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: .78rem .9rem;
+  border: 1px solid rgba(125, 211, 252, .28);
+  border-radius: 16px;
+  color: #e0f2fe;
+  background: rgba(96, 165, 250, .12);
+  line-height: 1.6;
+  font-weight: 800;
+}
+
+.card strong,
+.panel-heading h2,
+.viz-card h3,
+.diagnostic-card h3,
+.performance-period-card h5,
+.metric-name,
+th,
+td,
+.window-chip strong {
+  color: var(--ink) !important;
+}
+
+table,
+.line-chart,
+.trend-bars,
+.window-chip,
+.performance-period-card,
+.performance-period-card h5,
+.gate-item,
+.mini-item,
+.empty-state,
+.scenario-note,
+.diagnostic-note,
+.code-pill {
+  background: #111827 !important;
+  border-color: var(--line) !important;
+}
+
+th {
+  background: #22304a !important;
+  color: #e5edf7 !important;
+}
+
+tbody tr:hover { background: rgba(96, 165, 250, .10) !important; }
+
+.bar-track { background: #334155 !important; }
+.bar-fill { background: linear-gradient(90deg, #60a5fa, #7dd3fc) !important; }
+.bar-fill.negative { background: linear-gradient(90deg, #fb7185, #fda4af) !important; }
+.bar-row.is-selected { background: rgba(96, 165, 250, .16) !important; border-color: rgba(96, 165, 250, .48) !important; }
+.bar-row.is-best:not(.is-selected) { background: rgba(116, 224, 163, .14) !important; border-color: rgba(116, 224, 163, .44) !important; }
+
+.line-chart svg { background: transparent !important; }
+.line-grid { stroke: rgba(203, 213, 225, .24) !important; }
+.axis-line { stroke: rgba(226, 232, 240, .54) !important; }
+.axis-label { fill: #d8e2ef !important; }
+.axis-title { fill: #eff6ff !important; }
+.line-path.selected { stroke: #7dd3fc !important; }
+.line-path.best { stroke: #74e0a3 !important; }
+.line-path.benchmark { stroke: #c4b5fd !important; }
+.legend-dot { background: #7dd3fc !important; }
+.legend-dot.best { background: #74e0a3 !important; }
+.legend-dot.benchmark { background: #c4b5fd !important; }
+.trend-fill { background: linear-gradient(180deg, #7dd3fc, #60a5fa) !important; }
+
+.positive { color: #86efac !important; }
+.negative { color: #fda4af !important; }
+.badge { background: rgba(96, 165, 250, .18) !important; color: #dff6ff !important; }
+.gate-item.pass { background: rgba(116, 224, 163, .12) !important; border-color: rgba(116, 224, 163, .34) !important; }
+.gate-item.block { background: rgba(248, 198, 106, .12) !important; border-color: rgba(248, 198, 106, .38) !important; }
+
+@media (max-width: 1180px) {
+  .controls-enhanced { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+  .control-group { grid-template-columns: 1fr; }
+  .preset-row button { flex: 1 1 auto; }
+}
+
+/* Visual Ralph readability lift — keep the cockpit dark, but avoid over-black, low-contrast layers. */
+:root {
+  --bg: #182235;
+  --panel: #24324c;
+  --card: #2a3a58;
+  --surface: #22304a;
+  --surface-soft: #30415f;
+  --ink: #fbfdff;
+  --muted: #d8e2ef;
+  --line: rgba(226, 232, 240, 0.34);
+  --shadow: 0 16px 36px rgba(3, 7, 18, 0.22);
+}
+
+html { background: #182235 !important; }
+
+body {
+  line-height: 1.72;
+  background:
+    radial-gradient(circle at 14% -6%, rgba(96, 165, 250, 0.24), transparent 34rem),
+    radial-gradient(circle at 88% 4%, rgba(125, 211, 252, 0.18), transparent 30rem),
+    linear-gradient(180deg, #202d45 0%, #182235 54%, #1a263b 100%) !important;
+}
+
+.hero {
+  background:
+    radial-gradient(circle at 80% -12%, rgba(125, 211, 252, .26), transparent 28rem),
+    linear-gradient(135deg, #30415f 0%, #24324c 58%, #1f2d45 100%) !important;
+}
+
+.hero-copy,
+.manual-update p,
+.notice,
+.panel-heading p,
+.card small,
+.control-hint,
+.chart-meta,
+#manual-update-status,
+.scenario-note,
+.diagnostic-note,
+.disclaimer,
+footer {
+  color: #dbe6f3 !important;
+}
+
+.notice,
+.manual-update,
+.controls,
+.card,
+.panel,
+.disclaimer,
+.viz-card,
+.diagnostic-card,
+.performance-period-card,
+.window-chip,
+.explain,
+.status-card {
+  background: linear-gradient(180deg, rgba(42, 58, 88, .99), rgba(34, 48, 74, .99)) !important;
+  border-color: rgba(226, 232, 240, .36) !important;
+}
+
+.manual-update,
+.visual-panel {
+  background:
+    linear-gradient(180deg, rgba(48, 65, 95, .99), rgba(36, 50, 76, .99)) !important;
+}
+
+.control-group {
+  background: linear-gradient(180deg, rgba(42, 58, 88, .99), rgba(34, 48, 74, .99)) !important;
+}
+
+select,
+input,
+table,
+.line-chart,
+.trend-bars,
+.gate-item,
+.mini-item,
+.empty-state,
+.scenario-note,
+.diagnostic-note,
+.code-pill {
+  background: #1f2d45 !important;
+  border-color: rgba(226, 232, 240, .36) !important;
+}
+
+.manual-update-actions .button.secondary,
+.manual-update-actions .code-pill {
+  background: #22324d !important;
+  color: #f4f8fd !important;
+}
+
+p,
+li,
+dd,
+td,
+small {
+  line-height: 1.68;
+}
 """
 
 
 JS_CONTENT = """const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
 const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
 
+const DASHBOARD_INPUT_DEFAULTS = {
+  window: '1Y',
+  lookbackMonths: 12,
+  topN: 20,
+  maxWeightPercent: 50,
+  rebalanceFrequency: 'ME',
+  transactionCostBps: 5,
+  slippageBps: 5,
+};
+
 const state = {
   data: null,
   activeRunIndex: 0,
+  hasUserSelectedFactor: false,
 };
 
 function bindManualUpdateControls() {
@@ -1738,6 +2160,31 @@ function selectedFactor() {
   return selector?.value || currentRun().summary?.selected_factor || '';
 }
 
+function selectedLookbackMonths() {
+  const selector = document.querySelector('#lookback-months-select');
+  return Math.round(clampNumber(selector?.value, 1, 60, DASHBOARD_INPUT_DEFAULTS.lookbackMonths));
+}
+
+function selectedRebalanceFrequency() {
+  const selector = document.querySelector('#rebalance-select');
+  const value = selector?.value || DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+  return ['W', 'ME', 'QE'].includes(value) ? value : DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+}
+
+function clampedTransactionCostBps() {
+  const input = document.querySelector('#transaction-cost-input');
+  const value = clampNumber(input?.value, 0, 200, DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
+  if (input && String(input.value) !== String(value)) input.value = String(value);
+  return value;
+}
+
+function clampedSlippageBps() {
+  const input = document.querySelector('#slippage-input');
+  const value = clampNumber(input?.value, 0, 200, DASHBOARD_INPUT_DEFAULTS.slippageBps);
+  if (input && String(input.value) !== String(value)) input.value = String(value);
+  return value;
+}
+
 function clampNumber(value, minValue, maxValue, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -1755,10 +2202,29 @@ function clampedTopN() {
 }
 
 function clampedMaxWeight() {
-  const percent = clampNumber(document.querySelector('#max-weight-input').value, 1, 50, 10);
   const input = document.querySelector('#max-weight-input');
-  if (String(input.value) !== String(percent)) input.value = String(percent);
+  const percent = clampNumber(input?.value, 1, 50, DASHBOARD_INPUT_DEFAULTS.maxWeightPercent);
+  if (input && String(input.value) !== String(percent)) input.value = String(percent);
   return percent / 100;
+}
+
+function inputScenarioParameters() {
+  const transactionCostBps = clampedTransactionCostBps();
+  const slippageBps = clampedSlippageBps();
+  return {
+    lookbackMonths: selectedLookbackMonths(),
+    topN: clampedTopN(),
+    maxWeight: clampedMaxWeight(),
+    rebalanceFrequency: selectedRebalanceFrequency(),
+    transactionCostBps,
+    slippageBps,
+    totalCostRate: (transactionCostBps + slippageBps) / 10000,
+  };
+}
+
+function rebalanceFrequencyLabel(value) {
+  const labels = { W: '주간', ME: '월간', QE: '분기' };
+  return labels[value] || value || '-';
 }
 
 function factorOptions(run = currentRun()) {
@@ -2270,15 +2736,8 @@ function barWidth(value, maxAbs) {
   return `${Math.max(3, Math.min(100, Math.abs(Number(value)) / maxAbs * 100)).toFixed(1)}%`;
 }
 
-function currentWeightedHoldings() {
-  const run = currentRun();
-  const date = selectedDate();
-  const windowKey = selectedWindow();
-  const factor = selectedFactor();
-  const topN = clampedTopN();
-  const maxWeight = clampedMaxWeight();
+function scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeight) {
   const snapshot = factorScoreSnapshot(run, date, factor);
-  const availableDates = run.scenario_available_dates || [];
   let allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
   let fallbackSource = null;
   const latestOutputRowsFactor = latestOutputFactor(run);
@@ -2306,12 +2765,24 @@ function currentWeightedHoldings() {
       cashTotal: Math.max(0, 1 - investedTotal),
       unusedCandidateCount: Math.max(0, (run.latest_output_rows || []).length - fallbackRows.length),
       weightingMethod: 'latest_output_rows_fallback',
-      topN: Math.max(1, Math.min(50, Math.round(Number(topN) || 20))),
+      topN: Math.max(1, Math.min(50, Math.round(Number(topN) || DASHBOARD_INPUT_DEFAULTS.topN))),
       maxWeight,
       availableCount: fallbackRows.length,
     };
     fallbackSource = 'latest_output_rows_fallback';
   }
+  return { allocation, snapshot, fallbackSource, latestOutputRowsFactor };
+}
+
+function currentWeightedHoldings() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const { allocation, snapshot, fallbackSource, latestOutputRowsFactor } = scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeight);
+  const availableDates = factorAvailableDates(run, factor);
   const stats = periodFactorStats(run, date, windowKey, factor);
   return {
     ...allocation,
@@ -2329,7 +2800,7 @@ function currentWeightedHoldings() {
       ? null
       : latestOutputRowsFactor && factor && latestOutputRowsFactor !== factor
       ? `저장된 latest_output_rows는 ${latestOutputRowsFactor} 기준이라 선택 팩터 ${factor} 시나리오로 표시하지 않습니다.`
-      : availableDates.length && !availableDates.includes(date)
+      : availableDates.size && !availableDates.has(date)
       ? '선택한 기준일은 용량과 로딩 속도 제한 때문에 종목/비중 스냅샷 보관 범위 밖입니다.'
       : '선택한 기준일에 이 팩터의 점수 스냅샷이 없습니다.',
   };
@@ -2384,6 +2855,36 @@ function fillDateOptions(run, preferredDate = null) {
   }
 }
 
+function factorOptionLabel(item, bestDefaultFactor, run) {
+  if (item.factor === bestDefaultFactor) return `${item.factor} · 현재 기준 최고 팩터`;
+  if (item.factor === run.summary?.selected_factor) return `${item.factor} · 실행 저장 선택`;
+  return `${item.factor} · ${humanFactorCategory(item.category)}`;
+}
+
+function updateFactorOptionLabels(run, bestDefaultFactor) {
+  const factorSelect = document.querySelector('#factor-select');
+  if (!factorSelect) return;
+  const metadata = new Map(factorOptions(run).map((item) => [item.factor, item]));
+  Array.from(factorSelect.children || []).forEach((option) => {
+    const item = metadata.get(option.value) || { factor: option.value, category: 'unknown' };
+    option.textContent = factorOptionLabel(item, bestDefaultFactor, run);
+  });
+}
+
+function syncDefaultFactorToCurrentBasis() {
+  if (state.hasUserSelectedFactor) return;
+  const run = currentRun();
+  const factorSelect = document.querySelector('#factor-select');
+  if (!run || !factorSelect) return;
+  const bestDefaultFactor = periodBestStats(run, selectedDate(), selectedWindow())?.factor;
+  updateFactorOptionLabels(run, bestDefaultFactor);
+  const values = Array.from(factorSelect.children || []).map((option) => option.value);
+  if (bestDefaultFactor && values.includes(bestDefaultFactor)) {
+    factorSelect.value = bestDefaultFactor;
+    fillDateOptions(run, selectedDate());
+  }
+}
+
 function fillControls() {
   const runSelect = document.querySelector('#run-select');
   runSelect.replaceChildren();
@@ -2399,9 +2900,9 @@ function fillControls() {
   runSelect.disabled = runs.length <= 1;
 
   const run = currentRun();
-  const previousFactor = document.querySelector('#factor-select')?.value || run.summary?.selected_factor || '';
   const windows = run.periods || [];
   const windowSelect = document.querySelector('#window-select');
+  const previousWindow = windowSelect?.value || '';
   windowSelect.replaceChildren();
   windows.forEach((period) => {
     const option = document.createElement('option');
@@ -2409,28 +2910,43 @@ function fillControls() {
     option.textContent = period.label;
     windowSelect.appendChild(option);
   });
-  windowSelect.value = windows[1]?.key || windows[0]?.key || '1M';
+  const windowKeys = windows.map((period) => period.key);
+  const defaultWindow = windowKeys.includes(DASHBOARD_INPUT_DEFAULTS.window)
+    ? DASHBOARD_INPUT_DEFAULTS.window
+    : (windowKeys.includes('1Y') ? '1Y' : (windowKeys.at(-1) || windowKeys[0] || '1M'));
+  windowSelect.value = windowKeys.includes(previousWindow) ? previousWindow : defaultWindow;
+
+  const previousDate = document.querySelector('#date-select')?.value || null;
+  fillDateOptions(run, previousDate);
+  const dateForDefault = selectedDate();
 
   const factorSelect = document.querySelector('#factor-select');
-  const previousDate = document.querySelector('#date-select')?.value || null;
+  const previousFactor = state.hasUserSelectedFactor ? factorSelect?.value || '' : '';
   factorSelect.replaceChildren();
   const options = factorOptions(run);
+  const bestDefaultFactor = periodBestStats(run, dateForDefault, windowSelect.value)?.factor;
   options.forEach((item) => {
     const option = document.createElement('option');
     option.value = item.factor;
-    option.textContent = item.factor === run.summary?.selected_factor
-      ? `${item.factor} · 현재 실행 선택`
-      : `${item.factor} · ${humanFactorCategory(item.category)}`;
+    option.textContent = factorOptionLabel(item, bestDefaultFactor, run);
     factorSelect.appendChild(option);
   });
   const factors = options.map((item) => item.factor);
-  factorSelect.value = factors.includes(previousFactor)
+  factorSelect.value = previousFactor && factors.includes(previousFactor)
     ? previousFactor
-    : (factors.includes(run.summary?.selected_factor) ? run.summary.selected_factor : factors[0] || '');
+    : (factors.includes(bestDefaultFactor) ? bestDefaultFactor : (factors.includes(run.summary?.selected_factor) ? run.summary.selected_factor : factors[0] || ''));
 
-  fillDateOptions(run, previousDate);
-  document.querySelector('#topn-input').value = run.summary?.default_top_n || 20;
-  document.querySelector('#max-weight-input').value = Math.round((run.summary?.default_max_weight || 0.1) * 100);
+  fillDateOptions(run, selectedDate());
+  document.querySelector('#topn-input').value = DASHBOARD_INPUT_DEFAULTS.topN;
+  document.querySelector('#max-weight-input').value = DASHBOARD_INPUT_DEFAULTS.maxWeightPercent;
+  const lookback = document.querySelector('#lookback-months-select');
+  if (lookback) lookback.value = String(DASHBOARD_INPUT_DEFAULTS.lookbackMonths);
+  const rebalance = document.querySelector('#rebalance-select');
+  if (rebalance) rebalance.value = DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+  const transactionCost = document.querySelector('#transaction-cost-input');
+  if (transactionCost) transactionCost.value = String(DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
+  const slippage = document.querySelector('#slippage-input');
+  if (slippage) slippage.value = String(DASHBOARD_INPUT_DEFAULTS.slippageBps);
 }
 
 function renderSummary() {
@@ -2456,6 +2972,12 @@ function renderSummary() {
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
   setText('#latest-run-at', latestRunAt);
   setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
+  const scenario = currentWeightedHoldings();
+  const params = inputScenarioParameters();
+  setText(
+    '#scenario-live-summary',
+    `상위 ${params.topN}개 · 종목당 최대 ${formatPercent(params.maxWeight)} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 리밸런싱 · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps · 시나리오 투자 ${formatPercent(scenario.investedTotal)} · 현금/미사용 ${formatPercent(scenario.cashTotal)}`,
+  );
 
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
@@ -2947,27 +3469,19 @@ function renderEnsembleWeightChart() {
   }
   const maxWeightValue = Math.max(
     ...ensemble.weighted.map((row) => Number(row.display_weight) || 0),
-    Number(ensemble.hiddenWeight) || 0,
-    Number(ensemble.cashTotal) || 0,
     0.01,
   );
   ensemble.weighted.forEach((row) => {
     const label = `${row.symbol} · ${row.factor_count}개 팩터`;
     appendBarRow(target, label, formatPercent(row.display_weight), row.display_weight, maxWeightValue);
   });
-  if (ensemble.hiddenWeight > 0.000001) {
-    appendBarRow(target, '미표시 후보 합계', formatPercent(ensemble.hiddenWeight), ensemble.hiddenWeight, maxWeightValue);
-  }
-  if (ensemble.cashTotal > 0.000001) {
-    appendBarRow(target, '현금/상한 미사용', formatPercent(ensemble.cashTotal), ensemble.cashTotal, maxWeightValue);
-  }
   const factorNames = ensemble.sleeves.map((sleeve) => `${sleeve.rank}. ${sleeve.factor}`).join(', ');
   const note = document.createElement('div');
   note.className = 'scenario-note';
   const missing = ensemble.missingFactors.length
     ? ` 스냅샷이 없는 팩터 ${ensemble.missingFactors.length}개는 제외했습니다.`
     : '';
-  note.textContent = `해석: ${ensemble.windowLabel} 성과 상위 팩터들을 각각 같은 팩터별 포트폴리오 비중으로 보고, 각 팩터 내부는 기존 백테스트 일별 보유 비중을 그대로 사용한 뒤 중복 종목 비중을 합산했습니다. 합산 후 브라우저 종목당 최대 비중 ${formatPercent(ensemble.maxWeight)}를 최종 상한으로 적용했습니다. ${ensemble.totalCandidateCount}개 합산 후보 중 상위 ${ensemble.weighted.length}개를 표시합니다. 사용 팩터: ${factorNames}.${missing}`;
+  note.textContent = `해석: ${ensemble.windowLabel} 성과 상위 팩터들을 각각 같은 팩터별 포트폴리오 비중으로 보고, 각 팩터 내부는 기존 백테스트 일별 보유 비중을 그대로 사용한 뒤 중복 종목 비중을 합산했습니다. 합산 후 브라우저 종목당 최대 비중 ${formatPercent(ensemble.maxWeight)}를 최종 상한으로 적용했습니다. 시각화는 개별 종목 ${ensemble.weighted.length}개만 표시하고, 미표시 후보 합계 ${formatPercent(ensemble.hiddenWeight)} 및 현금/상한 미사용 ${formatPercent(ensemble.cashTotal)}는 숫자로만 제공합니다. 전체 합산 후보 ${ensemble.totalCandidateCount}개. 사용 팩터: ${factorNames}.${missing}`;
   target.appendChild(note);
 }
 
@@ -3208,6 +3722,76 @@ function appendSvgText(svg, text, x, y, className, anchor = 'middle') {
   return label;
 }
 
+function lookbackFilteredPoints(points, months) {
+  if (!points.length) return [];
+  const endDate = parseDateString(points.at(-1).date);
+  if (!endDate) return points;
+  const cutoff = new Date(endDate.getTime());
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - Math.max(1, Number(months) || DASHBOARD_INPUT_DEFAULTS.lookbackMonths));
+  const filtered = points.filter((point) => {
+    const pointDate = parseDateString(point.date);
+    return pointDate && pointDate >= cutoff;
+  });
+  return filtered.length >= 2 ? filtered : points.slice(-Math.min(points.length, 2));
+}
+
+function rebalanceBucket(dateText, frequency) {
+  const parts = String(dateText || '').split('-').map((part) => Number(part));
+  if (parts.length < 3 || parts.some((part) => !Number.isFinite(part))) return String(dateText || '');
+  const [year, month, day] = parts;
+  if (frequency === 'QE') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+  if (frequency === 'W') return `${year}-${String(month).padStart(2, '0')}-W${Math.ceil(day / 7)}`;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function isScenarioRebalance(points, index, frequency) {
+  if (index <= 0 || index >= points.length) return false;
+  return rebalanceBucket(points[index].date, frequency) !== rebalanceBucket(points[index - 1].date, frequency);
+}
+
+function allocationConcentration(allocation) {
+  const weights = (allocation?.weighted || []).map((row) => Number(row.display_weight) || 0).filter((value) => value > 0);
+  if (!weights.length) return 0;
+  return weights.reduce((sum, value) => sum + value * value, 0);
+}
+
+function scenarioAdjustedSeriesPoints(series, date, params, allocation) {
+  const rawPoints = lookbackFilteredPoints(seriesPointsThroughDate(series, date, 2000), params.lookbackMonths);
+  if (rawPoints.length < 2) return rawPoints;
+  const hasAllocation = Array.isArray(allocation?.weighted) && allocation.weighted.length > 0;
+  const invested = hasAllocation ? Math.max(0, Math.min(1, Number(allocation?.investedTotal) || 0)) : 1;
+  const topN = Math.max(1, Number(params.topN) || DASHBOARD_INPUT_DEFAULTS.topN);
+  const concentration = hasAllocation ? allocationConcentration(allocation) : 1 / topN;
+  const equalConcentration = 1 / topN;
+  const concentrationTilt = Math.max(-0.5, Math.min(2.5, concentration / Math.max(equalConcentration, 1e-6) - 1));
+  const exposureMultiplier = Math.max(0.05, Math.min(1.45, invested * (1 + 0.10 * concentrationTilt)));
+  const turnoverProxy = Math.max(0, Math.min(2, 0.35 + 0.20 * Math.max(0, concentrationTilt)));
+  const adjusted = [{ ...rawPoints[0], equity: 1, drawdown: 0 }];
+  let equity = 1;
+  let peak = 1;
+  for (let index = 1; index < rawPoints.length; index += 1) {
+    const previous = Number(rawPoints[index - 1].equity);
+    const current = Number(rawPoints[index].equity);
+    let dailyReturn = previous > 0 && Number.isFinite(previous) && Number.isFinite(current)
+      ? current / previous - 1
+      : 0;
+    dailyReturn *= exposureMultiplier;
+    if (isScenarioRebalance(rawPoints, index, params.rebalanceFrequency)) {
+      dailyReturn -= turnoverProxy * params.totalCostRate;
+    }
+    equity *= Math.max(0.0001, 1 + dailyReturn);
+    peak = Math.max(peak, equity);
+    adjusted.push({
+      date: rawPoints[index].date,
+      equity,
+      drawdown: peak > 0 ? equity / peak - 1 : 0,
+      scenario_exposure: exposureMultiplier,
+      scenario_turnover_proxy: turnoverProxy,
+    });
+  }
+  return adjusted;
+}
+
 function renderBacktestChart() {
   const run = currentRun();
   const date = selectedDate();
@@ -3215,18 +3799,23 @@ function renderBacktestChart() {
   const factor = selectedFactor();
   const best = periodBestStats(run, date, windowKey);
   const benchmark = benchmarkBacktestSeries(run);
-  const selectedSeries = normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, factor), date));
+  const params = inputScenarioParameters();
+  const selectedAllocation = scenarioAllocationForFactor(run, date, windowKey, factor, params.topN, params.maxWeight).allocation;
+  const selectedSeries = normalizedLine(scenarioAdjustedSeriesPoints(factorBacktestSeries(run, factor), date, params, selectedAllocation));
+  const bestAllocation = best?.factor
+    ? scenarioAllocationForFactor(run, date, windowKey, best.factor, params.topN, params.maxWeight).allocation
+    : null;
   const bestMetricSeries = best?.factor
-    ? normalizedLine(seriesPointsThroughDate(factorBacktestSeries(run, best.factor), date))
+    ? normalizedLine(scenarioAdjustedSeriesPoints(factorBacktestSeries(run, best.factor), date, params, bestAllocation))
     : [];
   const bestSeries = best?.factor && best.factor !== factor ? bestMetricSeries : [];
-  const benchmarkSeries = normalizedLine(seriesPointsThroughDate(benchmark, date));
+  const benchmarkSeries = normalizedLine(lookbackFilteredPoints(seriesPointsThroughDate(benchmark, date, 2000), params.lookbackMonths));
   const benchmarkLabel = benchmark?.label_ko || benchmark?.symbol || run.summary?.chart_benchmark || '나스닥 벤치마크';
   const target = document.querySelector('#backtest-chart');
   target.replaceChildren();
   setText(
     '#backtest-chart-meta',
-    `${date || '-'} 기준 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}${benchmarkSeries.length ? ` · 벤치마크 ${benchmarkLabel}` : ''}`
+    `${date || '-'} 기준 · 브라우저 프록시/민감도 뷰 · 최근 ${params.lookbackMonths}개월 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}${benchmarkSeries.length ? ` · 벤치마크 ${benchmarkLabel}` : ''} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps · 최대 ${formatPercent(params.maxWeight)} · 저장된 팩터 곡선을 현재 비중 집중도와 비용 가정으로 조정`
   );
   if (!selectedSeries.length) {
     appendEmpty('#backtest-chart', '선택 팩터의 최근 백테스트 추이 데이터가 없습니다. 기간 최고 팩터 데이터를 대신 표시하지 않습니다.');
@@ -3368,9 +3957,9 @@ function renderPerformanceMetricsTable(seriesList) {
   heading.className = 'performance-metrics-heading';
   const headingText = document.createElement('div');
   const title = document.createElement('h4');
-  title.textContent = '기간별 성과 지표 비교';
+  title.textContent = '기간별 프록시 성과 지표 비교';
   const note = document.createElement('p');
-  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 샤프·변동성·소르티노·칼마는 백엔드와 동일하게 일간 수익률 population 표준편차(ddof=0)로 연율화하며, CVaR은 최악 5% 일간 손실 평균입니다. 1주·1개월 지표는 표본이 짧아 참고용입니다.';
+  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 선택/기간 최고 팩터 값은 새 백엔드 재백테스트가 아니라 저장된 팩터 누적 성과를 현재 입력값의 비중 집중도·리밸런싱·비용 가정으로 조정한 브라우저 프록시입니다. 샤프·변동성·소르티노·칼마·CVaR 산식은 같은 방식으로 적용하고, CVaR은 최악 5% 일간 손실 평균입니다. 실제 일별 구성종목 재매매 결과로 해석하지 마세요.';
   headingText.append(title, note);
   heading.appendChild(headingText);
   target.appendChild(heading);
@@ -3434,6 +4023,70 @@ function renderPerformanceMetricsTable(seriesList) {
   target.appendChild(grid);
 }
 
+function renderDailyWeightsAnalysis() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const snapshot = factorWeightSnapshot(run, date, windowKey, factor);
+  const scenario = currentWeightedHoldings();
+  const scenarioBySymbol = new Map((scenario.weighted || []).map((row) => [String(row.symbol), row]));
+  const actualRows = normalizeWeightRows(snapshot).slice(0, topN);
+  const rows = actualRows.length
+    ? actualRows.map((row, index) => ({
+      rank: index + 1,
+      symbol: row.symbol,
+      actualWeight: Number(row.weight) || 0,
+      scenarioWeight: Number(scenarioBySymbol.get(String(row.symbol))?.display_weight) || 0,
+      score: row.score,
+      weightDate: snapshot?.weight_date || date,
+      scoreDate: snapshot?.score_date || scenario.scoreDate || date,
+      source: 'backtest_weight_snapshot',
+    }))
+    : (scenario.weighted || []).slice(0, topN).map((row, index) => ({
+      rank: row.display_rank || index + 1,
+      symbol: row.symbol,
+      actualWeight: null,
+      scenarioWeight: Number(row.display_weight) || 0,
+      score: row.score,
+      weightDate: date,
+      scoreDate: scenario.scoreDate || date,
+      source: 'scenario_score_snapshot',
+    }));
+
+  setText(
+    '#daily-weight-analysis-note',
+    snapshot
+      ? `${date || '-'} 기준 선택 팩터 ${factor || '-'}의 백테스트 일별 보유 비중(${snapshot.weight_date || '-'})입니다. 시나리오 비중은 현재 입력값: 상위 ${topN}개, 최대 ${formatPercent(maxWeight)}를 적용해 함께 비교합니다.`
+      : `${date || '-'} 기준 선택 팩터 ${factor || '-'}의 저장된 백테스트 일별 비중 스냅샷이 없어 점수 스냅샷 기반 시나리오 비중만 표시합니다.`,
+  );
+  const tbody = document.querySelector('#daily-weights-table tbody');
+  if (!tbody) return;
+  tbody.replaceChildren();
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = '선택한 기준일과 팩터에 표시할 일별 투자 비중 데이터가 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    appendCell(tr, row.rank);
+    appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, row.actualWeight === null ? '-' : formatPercent(row.actualWeight), { className: row.actualWeight === null ? '' : classForNumber(row.actualWeight) });
+    appendCell(tr, formatPercent(row.scenarioWeight), { className: classForNumber(row.scenarioWeight) });
+    appendCell(tr, formatNumber(row.score));
+    appendCell(tr, row.weightDate || '-');
+    appendCell(tr, row.scoreDate || '-');
+    tbody.appendChild(tr);
+  });
+}
+
 function renderPeriodRankingTable() {
   const run = currentRun();
   const date = selectedDate();
@@ -3475,6 +4128,7 @@ function renderPeriodRankingTable() {
 }
 
 function renderAll() {
+  if (!state.data) return;
   renderSummary();
   renderDiagnostics();
   renderFactorReturnChart();
@@ -3486,10 +4140,15 @@ function renderAll() {
   renderCurrentOutputTable();
   renderFactorTable();
   renderHoldingsTable();
+  renderDailyWeightsAnalysis();
   renderPeriodRankingTable();
 }
 
 function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
+  if (!state.data) {
+    setStatusMessage('데이터를 불러오는 중입니다. 입력값은 데이터 로딩 후 반영됩니다.');
+    return;
+  }
   setStatusMessage(message);
   window.setTimeout(() => {
     renderAll();
@@ -3497,6 +4156,23 @@ function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
 }
 
 bindManualUpdateControls();
+
+if (typeof document.querySelectorAll === 'function') {
+  document.querySelectorAll('[data-topn-preset]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const input = document.querySelector('#topn-input');
+      if (input) input.value = button.getAttribute('data-topn-preset') || DASHBOARD_INPUT_DEFAULTS.topN;
+      renderWithBusy('상위 종목 수 프리셋을 반영하는 중입니다...');
+    });
+  });
+  document.querySelectorAll('[data-max-weight-preset]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const input = document.querySelector('#max-weight-input');
+      if (input) input.value = button.getAttribute('data-max-weight-preset') || DASHBOARD_INPUT_DEFAULTS.maxWeightPercent;
+      renderWithBusy('최대 비중 프리셋을 반영하는 중입니다...');
+    });
+  });
+}
 
 fetch('data/dashboard.json')
   .then((response) => response.json())
@@ -3510,14 +4186,26 @@ fetch('data/dashboard.json')
     renderAll();
     document.querySelector('#run-select').addEventListener('change', (event) => {
       state.activeRunIndex = Number(event.target.value || 0);
+      state.hasUserSelectedFactor = false;
       fillControls();
       renderWithBusy('실행 결과를 전환하는 중입니다...');
     });
     document.querySelector('#factor-select').addEventListener('change', () => {
+      state.hasUserSelectedFactor = true;
       fillDateOptions(currentRun(), selectedDate());
       renderWithBusy('선택 팩터를 반영하는 중입니다...');
     });
-    ['#date-select', '#window-select', '#topn-input', '#max-weight-input'].forEach((selector) => {
+    ['#date-select', '#window-select'].forEach((selector) => {
+      document.querySelector(selector).addEventListener('input', () => {
+        syncDefaultFactorToCurrentBasis();
+        renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
+      });
+      document.querySelector(selector).addEventListener('change', () => {
+        syncDefaultFactorToCurrentBasis();
+        renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
+      });
+    });
+    ['#lookback-months-select', '#topn-input', '#max-weight-input', '#rebalance-select', '#transaction-cost-input', '#slippage-input'].forEach((selector) => {
       document.querySelector(selector).addEventListener('input', () => renderWithBusy('선택값을 반영하는 중입니다...'));
       document.querySelector(selector).addEventListener('change', () => renderWithBusy('선택값을 반영하는 중입니다...'));
     });

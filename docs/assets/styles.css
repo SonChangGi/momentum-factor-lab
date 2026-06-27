@@ -1103,3 +1103,341 @@ td:not(:first-child),
 .bar-track { background: rgba(148,163,184,0.20) !important; }
 .legend-dot,
 .chart-legend .legend-dot { box-shadow: 0 0 0 1px rgba(255,255,255,0.24), 0 0 14px currentColor !important; }
+
+/* Readable dark research cockpit refresh — 2026-06-26.
+   Keep the dark concept, but reduce over-black surfaces and raise text/chart contrast. */
+:root {
+  color-scheme: dark;
+  --bg: #111827;
+  --panel: #182235;
+  --card: #1d2940;
+  --surface: #182235;
+  --surface-soft: #24324c;
+  --ink: #f8fafc;
+  --muted: #c5d0df;
+  --line: rgba(203, 213, 225, 0.28);
+  --accent: #60a5fa;
+  --accent-2: #7dd3fc;
+  --accent-soft: rgba(96, 165, 250, 0.18);
+  --good: #74e0a3;
+  --warn: #f8c66a;
+  --danger: #fb7185;
+  --shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+}
+
+html { background: #111827 !important; }
+
+body {
+  color: var(--ink) !important;
+  background:
+    radial-gradient(circle at 14% -6%, rgba(96, 165, 250, 0.22), transparent 34rem),
+    radial-gradient(circle at 88% 4%, rgba(125, 211, 252, 0.14), transparent 30rem),
+    linear-gradient(180deg, #172033 0%, #111827 54%, #121a2a 100%) !important;
+}
+
+body::before {
+  opacity: .38;
+  background-size: 88px 88px;
+}
+
+.hero {
+  background:
+    radial-gradient(circle at 78% -12%, rgba(125, 211, 252, .22), transparent 28rem),
+    linear-gradient(135deg, #22304a 0%, #172033 58%, #132034 100%) !important;
+  border-bottom: 1px solid rgba(203, 213, 225, .22);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, .28) !important;
+}
+
+.hero-copy,
+.panel-heading p,
+.notice,
+.manual-update p,
+.card small,
+.control-hint,
+.chart-meta,
+#manual-update-status,
+.line-legend,
+.scenario-note,
+.diagnostic-note,
+.disclaimer,
+footer {
+  color: var(--muted) !important;
+}
+
+.hero-copy { opacity: 1 !important; }
+
+.status-card,
+.notice,
+.manual-update,
+.controls,
+.card,
+.panel,
+.disclaimer,
+.viz-card,
+.diagnostic-card,
+.performance-period-card,
+.window-chip,
+.explain {
+  background: linear-gradient(180deg, rgba(29, 41, 64, .98), rgba(24, 34, 53, .98)) !important;
+  border-color: var(--line) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.manual-update,
+.visual-panel {
+  background:
+    linear-gradient(180deg, rgba(34, 48, 74, .98), rgba(24, 34, 53, .98)) !important;
+}
+
+.controls-enhanced {
+  display: grid;
+  grid-template-columns: minmax(280px, .9fr) minmax(320px, 1.35fr);
+  gap: 1rem;
+  padding: 0;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.control-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .9rem;
+  padding: 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(29, 41, 64, .98), rgba(24, 34, 53, .98));
+  box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.control-group-heading {
+  grid-column: 1 / -1;
+}
+
+.control-group-heading h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+
+label { color: #d8e2ef !important; }
+
+select,
+input {
+  color: #f8fafc !important;
+  background: #111827 !important;
+  border-color: rgba(203, 213, 225, .34) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+}
+
+select:focus,
+input:focus,
+button:focus,
+a:focus {
+  outline: 3px solid rgba(125, 211, 252, .58) !important;
+  outline-offset: 2px;
+}
+
+.unit { color: #d8e2ef !important; font-weight: 900; }
+
+.preset-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+}
+
+.preset-row button {
+  border: 1px solid rgba(125, 211, 252, .35);
+  border-radius: 999px;
+  color: #dff6ff;
+  background: rgba(96, 165, 250, .14);
+  padding: .5rem .72rem;
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.preset-row button:hover { background: rgba(96, 165, 250, .26); }
+
+.scenario-live-summary {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: .78rem .9rem;
+  border: 1px solid rgba(125, 211, 252, .28);
+  border-radius: 16px;
+  color: #e0f2fe;
+  background: rgba(96, 165, 250, .12);
+  line-height: 1.6;
+  font-weight: 800;
+}
+
+.card strong,
+.panel-heading h2,
+.viz-card h3,
+.diagnostic-card h3,
+.performance-period-card h5,
+.metric-name,
+th,
+td,
+.window-chip strong {
+  color: var(--ink) !important;
+}
+
+table,
+.line-chart,
+.trend-bars,
+.window-chip,
+.performance-period-card,
+.performance-period-card h5,
+.gate-item,
+.mini-item,
+.empty-state,
+.scenario-note,
+.diagnostic-note,
+.code-pill {
+  background: #111827 !important;
+  border-color: var(--line) !important;
+}
+
+th {
+  background: #22304a !important;
+  color: #e5edf7 !important;
+}
+
+tbody tr:hover { background: rgba(96, 165, 250, .10) !important; }
+
+.bar-track { background: #334155 !important; }
+.bar-fill { background: linear-gradient(90deg, #60a5fa, #7dd3fc) !important; }
+.bar-fill.negative { background: linear-gradient(90deg, #fb7185, #fda4af) !important; }
+.bar-row.is-selected { background: rgba(96, 165, 250, .16) !important; border-color: rgba(96, 165, 250, .48) !important; }
+.bar-row.is-best:not(.is-selected) { background: rgba(116, 224, 163, .14) !important; border-color: rgba(116, 224, 163, .44) !important; }
+
+.line-chart svg { background: transparent !important; }
+.line-grid { stroke: rgba(203, 213, 225, .24) !important; }
+.axis-line { stroke: rgba(226, 232, 240, .54) !important; }
+.axis-label { fill: #d8e2ef !important; }
+.axis-title { fill: #eff6ff !important; }
+.line-path.selected { stroke: #7dd3fc !important; }
+.line-path.best { stroke: #74e0a3 !important; }
+.line-path.benchmark { stroke: #c4b5fd !important; }
+.legend-dot { background: #7dd3fc !important; }
+.legend-dot.best { background: #74e0a3 !important; }
+.legend-dot.benchmark { background: #c4b5fd !important; }
+.trend-fill { background: linear-gradient(180deg, #7dd3fc, #60a5fa) !important; }
+
+.positive { color: #86efac !important; }
+.negative { color: #fda4af !important; }
+.badge { background: rgba(96, 165, 250, .18) !important; color: #dff6ff !important; }
+.gate-item.pass { background: rgba(116, 224, 163, .12) !important; border-color: rgba(116, 224, 163, .34) !important; }
+.gate-item.block { background: rgba(248, 198, 106, .12) !important; border-color: rgba(248, 198, 106, .38) !important; }
+
+@media (max-width: 1180px) {
+  .controls-enhanced { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+  .control-group { grid-template-columns: 1fr; }
+  .preset-row button { flex: 1 1 auto; }
+}
+
+/* Visual Ralph readability lift — keep the cockpit dark, but avoid over-black, low-contrast layers. */
+:root {
+  --bg: #182235;
+  --panel: #24324c;
+  --card: #2a3a58;
+  --surface: #22304a;
+  --surface-soft: #30415f;
+  --ink: #fbfdff;
+  --muted: #d8e2ef;
+  --line: rgba(226, 232, 240, 0.34);
+  --shadow: 0 16px 36px rgba(3, 7, 18, 0.22);
+}
+
+html { background: #182235 !important; }
+
+body {
+  line-height: 1.72;
+  background:
+    radial-gradient(circle at 14% -6%, rgba(96, 165, 250, 0.24), transparent 34rem),
+    radial-gradient(circle at 88% 4%, rgba(125, 211, 252, 0.18), transparent 30rem),
+    linear-gradient(180deg, #202d45 0%, #182235 54%, #1a263b 100%) !important;
+}
+
+.hero {
+  background:
+    radial-gradient(circle at 80% -12%, rgba(125, 211, 252, .26), transparent 28rem),
+    linear-gradient(135deg, #30415f 0%, #24324c 58%, #1f2d45 100%) !important;
+}
+
+.hero-copy,
+.manual-update p,
+.notice,
+.panel-heading p,
+.card small,
+.control-hint,
+.chart-meta,
+#manual-update-status,
+.scenario-note,
+.diagnostic-note,
+.disclaimer,
+footer {
+  color: #dbe6f3 !important;
+}
+
+.notice,
+.manual-update,
+.controls,
+.card,
+.panel,
+.disclaimer,
+.viz-card,
+.diagnostic-card,
+.performance-period-card,
+.window-chip,
+.explain,
+.status-card {
+  background: linear-gradient(180deg, rgba(42, 58, 88, .99), rgba(34, 48, 74, .99)) !important;
+  border-color: rgba(226, 232, 240, .36) !important;
+}
+
+.manual-update,
+.visual-panel {
+  background:
+    linear-gradient(180deg, rgba(48, 65, 95, .99), rgba(36, 50, 76, .99)) !important;
+}
+
+.control-group {
+  background: linear-gradient(180deg, rgba(42, 58, 88, .99), rgba(34, 48, 74, .99)) !important;
+}
+
+select,
+input,
+table,
+.line-chart,
+.trend-bars,
+.gate-item,
+.mini-item,
+.empty-state,
+.scenario-note,
+.diagnostic-note,
+.code-pill {
+  background: #1f2d45 !important;
+  border-color: rgba(226, 232, 240, .36) !important;
+}
+
+.manual-update-actions .button.secondary,
+.manual-update-actions .code-pill {
+  background: #22324d !important;
+  color: #f4f8fd !important;
+}
+
+p,
+li,
+dd,
+td,
+small {
+  line-height: 1.68;
+}
