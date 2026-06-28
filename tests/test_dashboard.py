@@ -11,6 +11,9 @@ from momentum_factor_lab import cli
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.dashboard import (
     ASSET_VERSION,
+    CSS_CONTENT,
+    HTML_TEMPLATE,
+    JS_CONTENT,
     _factor_score_snapshots,
     _fit_dashboard_payload,
     _holding_rows,
@@ -648,6 +651,77 @@ const highCapAllocation = computeScenarioAllocation([['AAA', 9], ['BBB', 8], ['C
 const monthlyParams = {{ lookbackMonths: 12, topN: 3, maxWeight: 0.10, rebalanceFrequency: 'ME', transactionCostBps: 0, slippageBps: 0, totalCostRate: 0 }};
 const lowCapSeries = scenarioAdjustedSeriesPoints(risingSeries, '2026-03-31', monthlyParams, lowCapAllocation);
 const highCapSeries = scenarioAdjustedSeriesPoints(risingSeries, '2026-03-31', {{ ...monthlyParams, maxWeight: 0.50 }}, highCapAllocation);
+const linkageRun = {{
+  periods: [{{ key: '1M', label: '최근 1개월', trading_days: 3 }}],
+  factor_period_matrix: [{{
+    date: '2026-01-09',
+    window: '1M',
+    window_label: '최근 1개월',
+    factors: ['mom_12_1', 'mom_9_1'],
+    returns: [0.12, 0.04],
+    factor_count: 2,
+  }}],
+  factor_score_snapshots: [
+    {{ date: '2026-01-09', factor: 'mom_9_1', score_date: '2026-01-08', rows: [['AAA', 100], ['BBB', 2], ['CCC', 1], ['DDD', 1]] }},
+    {{ date: '2026-01-09', factor: 'mom_12_1', score_date: '2026-01-08', rows: [['EEE', 5], ['FFF', 5], ['GGG', 5], ['HHH', 5]] }},
+  ],
+  factor_backtest_series: [
+    {{
+      factor: 'mom_9_1',
+      dates: ['2026-01-01', '2026-01-06', '2026-01-08', '2026-01-09'],
+      equity: [1, 1.04, 1.09, 1.14],
+      drawdown: [0, 0, 0, 0],
+    }},
+    {{
+      factor: 'mom_12_1',
+      dates: ['2026-01-01', '2026-01-06', '2026-01-08', '2026-01-09'],
+      equity: [1, 1.02, 1.04, 1.06],
+      drawdown: [0, 0, 0, 0],
+    }},
+  ],
+}};
+const lowScenarioParams = {{ lookbackMonths: 12, topN: 4, maxWeight: 0.10, rebalanceFrequency: 'ME', transactionCostBps: 0, slippageBps: 0, totalCostRate: 0 }};
+const highScenarioParams = {{ ...lowScenarioParams, maxWeight: 0.50 }};
+const lowScenarioRows = scenarioPeriodRows(linkageRun, '2026-01-09', '1M', lowScenarioParams);
+const highScenarioRows = scenarioPeriodRows(linkageRun, '2026-01-09', '1M', highScenarioParams);
+const costlyWeeklyRows = scenarioPeriodRows(linkageRun, '2026-01-09', '1M', {{ ...highScenarioParams, rebalanceFrequency: 'W', transactionCostBps: 100, slippageBps: 0, totalCostRate: 0.01 }});
+const freeMonthlyRows = scenarioPeriodRows(linkageRun, '2026-01-09', '1M', highScenarioParams);
+const topOneRows = scenarioPeriodRows(linkageRun, '2026-01-09', '1M', {{ ...highScenarioParams, topN: 1 }});
+const lookbackDates = Array.from({{ length: 120 }}, (_, index) => {{
+  const day = new Date(Date.UTC(2026, 0, 1 + index));
+  return day.toISOString().slice(0, 10);
+}});
+let lookbackMomentumEquity = 1;
+let lookbackSteadyEquity = 1;
+const lookbackMomentumCurve = lookbackDates.map((_date, index) => {{
+  lookbackMomentumEquity *= index < 80 ? 1.001 : 1.012;
+  return lookbackMomentumEquity;
+}});
+const lookbackSteadyCurve = lookbackDates.map(() => {{
+  lookbackSteadyEquity *= 1.004;
+  return lookbackSteadyEquity;
+}});
+const lookbackRun = {{
+  periods: [{{ key: '1Y', label: '최근 1년', trading_days: 252 }}],
+  factor_period_matrix: [{{
+    date: lookbackDates.at(-1),
+    window: '1Y',
+    window_label: '최근 1년',
+    factors: ['mom_9_1', 'mom_12_1'],
+    returns: [0.7, 0.6],
+    factor_count: 2,
+  }}],
+  factor_score_snapshots: [
+    {{ date: lookbackDates.at(-1), factor: 'mom_9_1', score_date: lookbackDates.at(-2), rows: [['AAA', 10], ['BBB', 9], ['CCC', 8], ['DDD', 7]] }},
+    {{ date: lookbackDates.at(-1), factor: 'mom_12_1', score_date: lookbackDates.at(-2), rows: [['EEE', 10], ['FFF', 9], ['GGG', 8], ['HHH', 7]] }},
+  ],
+  factor_backtest_series: [
+    {{ factor: 'mom_9_1', dates: lookbackDates, equity: lookbackMomentumCurve, drawdown: lookbackDates.map(() => 0) }},
+    {{ factor: 'mom_12_1', dates: lookbackDates, equity: lookbackSteadyCurve, drawdown: lookbackDates.map(() => 0) }},
+  ],
+}};
+const longLookbackRows = scenarioPeriodRows(lookbackRun, lookbackDates.at(-1), '1Y', {{ ...highScenarioParams, lookbackMonths: 12 }});
+const shortLookbackRows = scenarioPeriodRows(lookbackRun, lookbackDates.at(-1), '1Y', {{ ...highScenarioParams, lookbackMonths: 1 }});
 if (a.weighted[0].symbol !== 'AAA') throw new Error('factor A ranking failed');
 if (b.weighted[0].symbol !== 'ZZZ') throw new Error('factor B ranking failed');
 if (Math.abs(a.weighted[0].display_weight - 0.10) > 1e-12) throw new Error('max cap was not applied');
@@ -679,6 +753,11 @@ if (!Number.isFinite(perf.cumulativeReturn)) throw new Error('performance return
 if (!Number.isFinite(perf.volatility)) throw new Error('performance volatility missing');
 if (!Number.isFinite(perf.maxDrawdown) || perf.maxDrawdown > 0) throw new Error('performance MDD invalid');
 if (!(highCapSeries.at(-1).equity > lowCapSeries.at(-1).equity)) throw new Error('max-weight scenario did not affect backtest series');
+if (highScenarioRows[0].factor !== 'mom_9_1') throw new Error('scenario rows did not recompute factor ranking from linked input-adjusted returns');
+if (!(highScenarioRows.find((row) => row.factor === 'mom_9_1').period_return > lowScenarioRows.find((row) => row.factor === 'mom_9_1').period_return)) throw new Error('max-weight input did not affect factor return rows');
+if (!(costlyWeeklyRows.find((row) => row.factor === 'mom_9_1').period_return < freeMonthlyRows.find((row) => row.factor === 'mom_9_1').period_return)) throw new Error('rebalance/cost inputs did not affect factor return rows');
+if (topOneRows.find((row) => row.factor === 'mom_9_1').period_return === highScenarioRows.find((row) => row.factor === 'mom_9_1').period_return) throw new Error('top-N input did not affect factor return rows');
+if (shortLookbackRows.find((row) => row.factor === 'mom_9_1').period_return === longLookbackRows.find((row) => row.factor === 'mom_9_1').period_return) throw new Error('lookback input did not affect factor return rows');
 `, sandbox);
 """,
         encoding="utf-8",
@@ -1009,6 +1088,275 @@ if (!document.querySelector('#holdings-availability').textContent.includes('late
 document.querySelector('#factor-select').value = 'mom_12_1';
 renderAll();
 if (!document.querySelector('#holdings-availability').textContent.includes('mom_9_1 기준')) throw new Error('mismatched factor explanation was not rendered');
+`, sandbox);
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(["node", str(node_script)], check=False, capture_output=True, text=True)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_dashboard_js_render_all_relinks_inputs_to_analysis_panels(tmp_path):
+    if shutil.which("node") is None:
+        pytest.skip("node is required for dashboard JavaScript behavior smoke test")
+
+    run_json = tmp_path / "run.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "schema_version": 1,
+                    "generated_at_utc": "2026-06-28T00:00:00Z",
+                    "summary": {
+                        "data_as_of": "2026-01-09",
+                        "run_timestamp_utc": "2026-01-10T00:00:00Z",
+                        "selected_factor": "mom_9_1",
+                        "default_top_n": 20,
+                        "default_max_weight": 0.5,
+                        "research_only": True,
+                    },
+                    "periods": [{"key": "1M", "label": "최근 1개월", "trading_days": 3}],
+                    "factor_options": [
+                        {"factor": "mom_9_1", "category": "traditional", "description_ko": "9개월-1개월 모멘텀"},
+                        {"factor": "mom_12_1", "category": "traditional", "description_ko": "12개월-1개월 모멘텀"},
+                    ],
+                    "factor_leaders": [
+                        {
+                            "date": "2026-01-09",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "best_factor": "mom_12_1",
+                            "best_return": 0.12,
+                        }
+                    ],
+                    "factor_period_matrix": [
+                        {
+                            "date": "2026-01-09",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "factors": ["mom_12_1", "mom_9_1"],
+                            "returns": [0.12, 0.04],
+                            "factor_count": 2,
+                        }
+                    ],
+                    "factor_score_snapshots": [
+                        {
+                            "date": "2026-01-09",
+                            "factor": "mom_9_1",
+                            "score_date": "2026-01-08",
+                            "rows": [["AAA", 100], ["BBB", 2], ["CCC", 1], ["DDD", 1]],
+                        },
+                        {
+                            "date": "2026-01-09",
+                            "factor": "mom_12_1",
+                            "score_date": "2026-01-08",
+                            "rows": [["EEE", 5], ["FFF", 5], ["GGG", 5], ["HHH", 5]],
+                        },
+                    ],
+                    "factor_weight_snapshots": [
+                        {
+                            "date": "2026-01-09",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "factor": "mom_9_1",
+                            "weight_date": "2026-01-09",
+                            "score_date": "2026-01-08",
+                            "rows": [["AAA", 0.7, 100], ["BBB", 0.2, 2], ["CCC", 0.1, 1]],
+                        }
+                    ],
+                    "holdings": [
+                        {
+                            "date": "2026-01-09",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "factor": "mom_9_1",
+                            "rank": 1,
+                            "symbol": "AAA",
+                            "score": 100,
+                            "default_weight": 0.7,
+                            "score_date": "2026-01-08",
+                            "weight_source": "백테스트 일별 보유 비중",
+                        },
+                        {
+                            "date": "2026-01-09",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "factor": "mom_9_1",
+                            "rank": 2,
+                            "symbol": "BBB",
+                            "score": 2,
+                            "default_weight": 0.2,
+                            "score_date": "2026-01-08",
+                            "weight_source": "백테스트 일별 보유 비중",
+                        },
+                        {
+                            "date": "2026-01-08",
+                            "window": "1M",
+                            "window_label": "최근 1개월",
+                            "factor": "mom_9_1",
+                            "rank": 1,
+                            "symbol": "AAA",
+                            "score": 90,
+                            "default_weight": 0.6,
+                            "score_date": "2026-01-07",
+                            "weight_source": "백테스트 일별 보유 비중",
+                        },
+                    ],
+                    "factor_backtest_series": [
+                        {
+                            "factor": "mom_9_1",
+                            "dates": ["2026-01-01", "2026-01-06", "2026-01-08", "2026-01-09"],
+                            "equity": [1, 1.04, 1.09, 1.14],
+                            "drawdown": [0, 0, 0, 0],
+                        },
+                        {
+                            "factor": "mom_12_1",
+                            "dates": ["2026-01-01", "2026-01-06", "2026-01-08", "2026-01-09"],
+                            "equity": [1, 1.02, 1.04, 1.06],
+                            "drawdown": [0, 0, 0, 0],
+                        },
+                    ],
+                    "benchmark_backtest_series": {
+                        "symbol": "^IXIC",
+                        "dates": ["2026-01-01", "2026-01-06", "2026-01-08", "2026-01-09"],
+                        "equity": [1, 1.01, 1.02, 1.03],
+                        "drawdown": [0, 0, 0, 0],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = write_dashboard_site([run_json], tmp_path / "site")
+    js_path = Path(paths["js"])
+    node_script = tmp_path / "input-linkage-render.mjs"
+    node_script.write_text(
+        f"""
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source = fs.readFileSync({str(js_path)!r}, 'utf8').replace(/fetch\\('data\\/dashboard\\.json'\\)[\\s\\S]*$/u, '');
+class FakeElement {{
+  constructor(selector) {{
+    this.selector = selector;
+    this.value = '';
+    this.textContent = '';
+    this.children = [];
+    this.attributes = {{}};
+    this.disabled = false;
+    this.className = '';
+    this.colSpan = 1;
+    this.style = {{ setProperty: (key, value) => {{ this.style[key] = value; }} }};
+    this.classList = {{ add() {{}}, remove() {{}}, toggle() {{}} }};
+  }}
+  replaceChildren(...nodes) {{ this.children = nodes; this.textContent = ''; }}
+  appendChild(node) {{ this.children.push(node); return node; }}
+  append(...nodes) {{ this.children.push(...nodes); }}
+  setAttribute(key, value) {{ this.attributes[key] = value; }}
+  removeAttribute(key) {{ delete this.attributes[key]; }}
+  getAttribute(key) {{ return this.attributes[key] || null; }}
+  addEventListener() {{}}
+}}
+const elements = new Map();
+function elementFor(selector) {{
+  if (!elements.has(selector)) elements.set(selector, new FakeElement(selector));
+  return elements.get(selector);
+}}
+const document = {{
+  querySelector: elementFor,
+  querySelectorAll: () => [],
+  createElement: (tag) => new FakeElement(tag),
+  createElementNS: (_ns, tag) => new FakeElement(tag),
+  addEventListener() {{}},
+}};
+function textOf(node) {{
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'string') return node;
+  return [node.textContent || '', ...(node.children || []).map(textOf)].join(' ');
+}}
+const sandbox = {{
+  console,
+  document,
+  textOf,
+  window: {{ setTimeout: (fn) => fn(), location: {{ search: '' }}, addEventListener() {{}} }},
+  localStorage: {{ getItem() {{ return null; }}, setItem() {{}} }},
+  URLSearchParams,
+}};
+vm.runInNewContext(source + `
+state.data = {{
+  generated_at_utc: '2026-06-28T00:00:00Z',
+  latest_run_index: 0,
+  runs: [{{
+    generated_at_utc: '2026-06-28T00:00:00Z',
+    summary: {{
+      data_as_of: '2026-01-09',
+      run_timestamp_utc: '2026-01-10T00:00:00Z',
+      selected_factor: 'mom_9_1',
+      default_top_n: 20,
+      default_max_weight: 0.5,
+      research_only: true,
+    }},
+    periods: [{{ key: '1M', label: '최근 1개월', trading_days: 3 }}],
+    factor_options: [
+      {{ factor: 'mom_9_1', category: 'traditional', description_ko: '9개월-1개월 모멘텀' }},
+      {{ factor: 'mom_12_1', category: 'traditional', description_ko: '12개월-1개월 모멘텀' }},
+    ],
+    factor_leaders: [{{ date: '2026-01-09', window: '1M', window_label: '최근 1개월', best_factor: 'mom_12_1', best_return: 0.12 }}],
+    factor_period_matrix: [{{ date: '2026-01-09', window: '1M', window_label: '최근 1개월', factors: ['mom_12_1', 'mom_9_1'], returns: [0.12, 0.04], factor_count: 2 }}],
+    factor_score_snapshots: [
+      {{ date: '2026-01-09', factor: 'mom_9_1', score_date: '2026-01-08', rows: [['AAA', 100], ['BBB', 2], ['CCC', 1], ['DDD', 1]] }},
+      {{ date: '2026-01-09', factor: 'mom_12_1', score_date: '2026-01-08', rows: [['EEE', 5], ['FFF', 5], ['GGG', 5], ['HHH', 5]] }},
+    ],
+    factor_weight_snapshots: [
+      {{ date: '2026-01-09', window: '1M', window_label: '최근 1개월', factor: 'mom_9_1', weight_date: '2026-01-09', score_date: '2026-01-08', rows: [['AAA', 0.7, 100], ['BBB', 0.2, 2], ['CCC', 0.1, 1]] }},
+    ],
+    holdings: [
+      {{ date: '2026-01-09', window: '1M', window_label: '최근 1개월', factor: 'mom_9_1', rank: 1, symbol: 'AAA', score: 100, default_weight: 0.7, score_date: '2026-01-08', weight_source: '백테스트 일별 보유 비중' }},
+      {{ date: '2026-01-09', window: '1M', window_label: '최근 1개월', factor: 'mom_9_1', rank: 2, symbol: 'BBB', score: 2, default_weight: 0.2, score_date: '2026-01-08', weight_source: '백테스트 일별 보유 비중' }},
+      {{ date: '2026-01-08', window: '1M', window_label: '최근 1개월', factor: 'mom_9_1', rank: 1, symbol: 'AAA', score: 90, default_weight: 0.6, score_date: '2026-01-07', weight_source: '백테스트 일별 보유 비중' }},
+    ],
+    factor_backtest_series: [
+      {{ factor: 'mom_9_1', dates: ['2026-01-01', '2026-01-06', '2026-01-08', '2026-01-09'], equity: [1, 1.04, 1.09, 1.14], drawdown: [0, 0, 0, 0] }},
+      {{ factor: 'mom_12_1', dates: ['2026-01-01', '2026-01-06', '2026-01-08', '2026-01-09'], equity: [1, 1.02, 1.04, 1.06], drawdown: [0, 0, 0, 0] }},
+    ],
+    benchmark_backtest_series: {{ symbol: '^IXIC', dates: ['2026-01-01', '2026-01-06', '2026-01-08', '2026-01-09'], equity: [1, 1.01, 1.02, 1.03], drawdown: [0, 0, 0, 0] }},
+  }}],
+}};
+state.activeRunIndex = 0;
+document.querySelector('#date-select').value = '2026-01-09';
+document.querySelector('#window-select').value = '1M';
+document.querySelector('#factor-select').value = 'mom_9_1';
+document.querySelector('#lookback-months-select').value = '12';
+document.querySelector('#topn-input').value = '4';
+document.querySelector('#max-weight-input').value = '10';
+document.querySelector('#rebalance-select').value = 'ME';
+document.querySelector('#transaction-cost-input').value = '0';
+document.querySelector('#slippage-input').value = '0';
+renderAll();
+const lowDetail = document.querySelector('#selected-factor-detail').textContent;
+if (!document.querySelector('#factor-chart-meta').textContent.includes('브라우저 시나리오/프록시')) throw new Error('factor chart did not disclose scenario/proxy basis');
+if (!document.querySelector('#selected-factor-method-summary').textContent.includes('9개월') || !document.querySelector('#selected-factor-method-summary').textContent.includes('1개월')) throw new Error('selected factor formula explanation missing lookback/skip months');
+if (!document.querySelector('#selected-factor-method-summary').textContent.includes('브라우저 시나리오/민감도 프록시')) throw new Error('selected factor formula explanation missing proxy disclaimer');
+const periodText = textOf(document.querySelector('#period-ranking-table tbody'));
+if (!periodText.includes('시나리오') || !periodText.includes('원')) throw new Error('period ranking did not show scenario/raw returns');
+const dailyBody = document.querySelector('#daily-weights-table tbody');
+if (!dailyBody.children.length || dailyBody.children[0].children.length !== 10) throw new Error('daily weights table did not render the expanded readable schema');
+const dailyText = textOf(dailyBody);
+if (!dailyText.includes('2026-01-09') || !dailyText.includes('백테스트 일별 보유 비중')) throw new Error('daily weights table did not render dated holdings and source');
+if (!document.querySelector('#daily-weight-analysis-note').textContent.includes('리밸런싱') || !document.querySelector('#daily-weight-analysis-note').textContent.includes('성과 프록시')) throw new Error('daily weights note did not separate holdings from performance-only inputs');
+document.querySelector('#max-weight-input').value = '50';
+renderAll();
+const highDetail = document.querySelector('#selected-factor-detail').textContent;
+if (lowDetail === highDetail) throw new Error('max-weight input did not change selected factor analysis output');
+document.querySelector('#rebalance-select').value = 'W';
+document.querySelector('#transaction-cost-input').value = '100';
+renderAll();
+const weeklyCostDetail = document.querySelector('#selected-factor-detail').textContent;
+document.querySelector('#rebalance-select').value = 'ME';
+renderAll();
+const monthlyCostDetail = document.querySelector('#selected-factor-detail').textContent;
+if (weeklyCostDetail === monthlyCostDetail) throw new Error('rebalance/cost input did not change selected factor analysis output');
 `, sandbox);
 """,
         encoding="utf-8",
@@ -1681,8 +2029,6 @@ def test_dashboard_monotonic_rejects_candidate_with_collapsed_publication_rows(t
 
 
 def test_dashboard_css_template_keeps_mobile_overflow_guards():
-    from momentum_factor_lab.dashboard import CSS_CONTENT
-
     docs_css = (Path(__file__).resolve().parents[1] / "docs" / "assets" / "styles.css").read_text(encoding="utf-8")
     required_guards = [
         "html, body { max-width: 100%; overflow-x: hidden; }",
@@ -1697,3 +2043,19 @@ def test_dashboard_css_template_keeps_mobile_overflow_guards():
     for guard in required_guards:
         assert guard in CSS_CONTENT
         assert guard in docs_css
+
+
+def test_dashboard_embedded_assets_stay_synced_with_static_site():
+    repo_root = Path(__file__).resolve().parents[1]
+    docs_html = (repo_root / "docs" / "index.html").read_text(encoding="utf-8")
+    docs_css = (repo_root / "docs" / "assets" / "styles.css").read_text(encoding="utf-8")
+    docs_js = (repo_root / "docs" / "assets" / "dashboard.js").read_text(encoding="utf-8")
+
+    rendered_html = HTML_TEMPLATE.format(title="모멘텀 팩터 데일리 대시보드", asset_version=ASSET_VERSION)
+
+    assert rendered_html == docs_html
+    assert CSS_CONTENT == docs_css
+    assert JS_CONTENT == docs_js
+    assert 'id="selected-factor-method-title"' in rendered_html
+    assert "scenarioPeriodRows" in JS_CONTENT
+    assert "selectedDailyWeightRows" in JS_CONTENT

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>모멘텀 팩터 데일리 대시보드</title>
-  <link rel="stylesheet" href="assets/styles.css?v=20260627-family-dark-readable" />
+  <link rel="stylesheet" href="assets/styles.css?v=20260628-input-linked-scenario" />
 </head>
 <body>
   <header class="hero">
@@ -196,6 +196,18 @@
         </p>
       </div>
       <p id="factor-scope-note" class="diagnostic-note">-</p>
+      <article class="diagnostic-card factor-method-card">
+        <div class="method-card-heading">
+          <div>
+            <p class="eyebrow">선택 팩터 계산법</p>
+            <h3 id="selected-factor-method-title">-</h3>
+          </div>
+          <span id="selected-factor-method-badge" class="badge">브라우저 시나리오 설명</span>
+        </div>
+        <p id="selected-factor-method-summary" class="method-summary">선택한 팩터의 산식과 현재 입력값 적용 방식을 표시합니다.</p>
+        <div id="selected-factor-method-steps" class="method-grid" aria-live="polite"></div>
+        <p id="selected-factor-method-note" class="scenario-note">팩터 설명을 불러오는 중입니다.</p>
+      </article>
       <div class="diagnostic-grid three">
         <article class="diagnostic-card">
           <h3>팩터 카테고리</h3>
@@ -335,8 +347,8 @@
               <th>기준일</th>
               <th>기간</th>
               <th>최고 팩터</th>
-              <th>기간 수익률</th>
-              <th>선택 팩터 수익률</th>
+              <th>브라우저 시나리오 최고 수익률</th>
+              <th>선택 팩터 시나리오 수익률</th>
               <th>선택 팩터 순위</th>
             </tr>
           </thead>
@@ -382,12 +394,15 @@
         <table id="daily-weights-table">
           <thead>
             <tr>
+              <th>비중일</th>
+              <th>기간</th>
               <th>순위</th>
               <th>종목</th>
-              <th>백테스트 일별 비중</th>
-              <th>시나리오 비중</th>
+              <th>저장 비중</th>
+              <th>현재 입력 시나리오 비중</th>
+              <th>차이</th>
               <th>모멘텀 신호</th>
-              <th>비중 기준일</th>
+              <th>출처</th>
               <th>신호일</th>
             </tr>
           </thead>
@@ -402,7 +417,7 @@
         <h2>기준일별 기간 수익률 상위 팩터</h2>
         <div class="table-wrap compact">
           <table id="period-ranking-table">
-            <thead><tr><th>기간</th><th>팩터</th><th>수익률</th><th>순위</th></tr></thead>
+                <thead><tr><th>기간</th><th>팩터</th><th>시나리오/원자료 수익률</th><th>순위</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -435,6 +450,6 @@
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v=20260627-family-dark-readable"></script>
+  <script src="assets/dashboard.js?v=20260628-input-linked-scenario"></script>
 </body>
 </html>
