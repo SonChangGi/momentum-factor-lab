@@ -4,9 +4,9 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>모멘텀 팩터 데일리 대시보드</title>
-  <link rel="stylesheet" href="assets/styles.css?v=20260628-input-linked-scenario" />
+  <link rel="stylesheet" href="assets/styles.css?v=20260629-readability-methods" />
 </head>
-<body>
+<body id="top">
   <header class="hero">
     <div>
       <p class="eyebrow">모멘텀 팩터 랩</p>
@@ -29,38 +29,7 @@
   </noscript>
 
   <main>
-    <section class="notice">
-      <strong>중요:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
-      다음 수동 실행 입력값을 저장하지 않습니다. 검토된 live-run 입력값은 저장소의
-      <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
-      2026-06-20 데이터 축소 롤백 이후 자동 예약 실행과 watchdog 예약은 중지되어 있으며,
-      새 데이터 반영은 <code>workflow_dispatch</code> 수동 실행 후 publication safety gate를 통과해야 합니다.
-    </section>
 
-    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
-      <div>
-        <p class="eyebrow">수동 업데이트</p>
-        <h2>검토 후 그 시점의 최신 데이터로 수동 실행</h2>
-        <p>
-          자동 예약 실행은 현재 중지되어 있습니다. 검토 후 이 버튼으로 GitHub Actions
-          <code>workflow_dispatch</code> 파이프라인을 수동 실행할 수 있습니다.
-          저장소 쓰기 권한이 있는 GitHub 계정으로 로그인한 뒤 <strong>Run workflow</strong>를 누르면
-          실행 시점에 무료 제공자가 제공하는 가장 최근 미국 일별 종가까지 다시 수집하고, 팩터 백테스트,
-          종목/비중 산출, <code>docs/data/dashboard.json</code> 갱신, GitHub Pages 배포를 진행합니다.
-        </p>
-        <p class="manual-update-note">
-          보안상 공개 정적 페이지에는 GitHub 토큰을 저장하지 않습니다. 브라우저 버튼은 인증된
-          GitHub 수동 실행 화면으로 연결하며, provider가 아직 새 종가를 공개하지 않았거나 변경사항이 없으면
-          새 커밋 없이 종료될 수 있습니다. 실행 후 Actions 상태와 대시보드 기준일·최근 실행 시각을 확인하세요.
-        </p>
-      </div>
-      <div class="manual-update-actions">
-        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
-        <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
-        <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
-        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
-      </div>
-    </section>
 
     <section class="controls controls-enhanced" aria-label="대시보드 입력값">
       <div class="control-group control-group-run">
@@ -207,6 +176,7 @@
         <p id="selected-factor-method-summary" class="method-summary">선택한 팩터의 산식과 현재 입력값 적용 방식을 표시합니다.</p>
         <div id="selected-factor-method-steps" class="method-grid" aria-live="polite"></div>
         <p id="selected-factor-method-note" class="scenario-note">팩터 설명을 불러오는 중입니다.</p>
+        <p class="scenario-note method-glossary"><strong>용어:</strong> 여기서 원자료는 원화(KRW)가 아니라 서버가 저장한 기존 백테스트/산출 원본값입니다. “시나리오”는 화면 입력값(상위 N, 최대 비중, 리밸런싱, 비용)을 적용해 원자료를 다시 해석한 브라우저 민감도 표시입니다.</p>
       </article>
       <div class="diagnostic-grid three">
         <article class="diagnostic-card">
@@ -306,10 +276,8 @@
           <h2>기존 결과물 기준 · 해당 날짜 최고 팩터 추천/연구 신호</h2>
         </div>
         <p>
-          웹에서 고른 선택 팩터가 아니라, 기준일과 최근 기간에서 성과가 가장 높았던 best factor 기준 신호입니다.
-          최종 매매 비중이 0%라면 현재 실행이 연구용 신호로 분류되어 매매 권고를 막은 상태입니다.
-          게이트 전 모형 비중은 best factor 점수 스냅샷으로 계산한 연구용 진단값이며 실제 주문 비중이 아닙니다.
-          아래 선택 팩터 시나리오는 별도 영역으로 분리되어 있습니다.
+          기준일·기간 최고 팩터의 기존 출력입니다. 매매 비중 0%는 연구용 신호이며 주문 비중이 아닙니다.
+          게이트 전 모형 비중은 후보 간 상대 강도 진단값이고, 선택 팩터 시나리오는 아래 별도 영역에서 비교합니다.
         </p>
       </div>
       <p id="current-output-note" class="scenario-note">-</p>
@@ -396,14 +364,7 @@
             <tr>
               <th>비중일</th>
               <th>기간</th>
-              <th>순위</th>
-              <th>종목</th>
-              <th>저장 비중</th>
-              <th>현재 입력 시나리오 비중</th>
-              <th>차이</th>
-              <th>모멘텀 신호</th>
-              <th>출처</th>
-              <th>신호일</th>
+              <th>종목별 저장/시나리오 비중</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -437,6 +398,39 @@
       </div>
     </section>
 
+    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
+      <div>
+        <p class="eyebrow">수동 업데이트</p>
+        <h2>검토 후 그 시점의 최신 데이터로 수동 실행</h2>
+        <p>
+          자동 예약 실행은 현재 중지되어 있습니다. 검토 후 이 버튼으로 GitHub Actions
+          <code>workflow_dispatch</code> 파이프라인을 수동 실행할 수 있습니다.
+          저장소 쓰기 권한이 있는 GitHub 계정으로 로그인한 뒤 <strong>Run workflow</strong>를 누르면
+          실행 시점에 무료 제공자가 제공하는 가장 최근 미국 일별 종가까지 다시 수집하고, 팩터 백테스트,
+          종목/비중 산출, <code>docs/data/dashboard.json</code> 갱신, GitHub Pages 배포를 진행합니다.
+        </p>
+        <p class="manual-update-note">
+          보안상 공개 정적 페이지에는 GitHub 토큰을 저장하지 않습니다. 브라우저 버튼은 인증된
+          GitHub 수동 실행 화면으로 연결하며, provider가 아직 새 종가를 공개하지 않았거나 변경사항이 없으면
+          새 커밋 없이 종료될 수 있습니다. 실행 후 Actions 상태와 대시보드 기준일·최근 실행 시각을 확인하세요.
+        </p>
+      </div>
+      <div class="manual-update-actions">
+        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
+        <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
+        <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
+        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
+      </div>
+    </section>
+
+    <section class="notice moved-notice">
+      <strong>운영 고지:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
+      다음 수동 실행 입력값을 저장하지 않습니다. 검토된 live-run 입력값은 저장소의
+      <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
+      2026-06-20 데이터 축소 롤백 이후 자동 예약 실행과 watchdog 예약은 중지되어 있으며,
+      새 데이터 반영은 <code>workflow_dispatch</code> 수동 실행 후 publication safety gate를 통과해야 합니다.
+    </section>
+
     <section class="disclaimer">
       <h2>주의 및 한계</h2>
       <p>
@@ -450,6 +444,11 @@
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v=20260628-input-linked-scenario"></script>
+  <script src="assets/dashboard.js?v=20260629-readability-methods"></script>
+  <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
+    <a href="#top" aria-label="맨 위로 이동">↑ 위</a>
+    <a href="#page-bottom" aria-label="맨 아래로 이동">↓ 아래</a>
+  </nav>
+  <div id="page-bottom" tabindex="-1" aria-hidden="true"></div>
 </body>
 </html>

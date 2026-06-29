@@ -1,6 +1,381 @@
 const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
 const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
 
+const FACTOR_METHOD_OVERRIDES = {
+  "mom_12_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-273] - 1",
+    "description": "Traditional 12-1 cross-sectional total return momentum.",
+    "validation": "Manual shifted-return and no-lookahead tests."
+  },
+  "mom_9_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-210] - 1",
+    "description": "Nine-month skipped return momentum.",
+    "validation": "Manual shifted-return and no-lookahead tests."
+  },
+  "mom_6_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-147] - 1",
+    "description": "Traditional 6-1 cross-sectional total return momentum.",
+    "validation": "Manual shifted-return and no-lookahead tests."
+  },
+  "mom_12_2": {
+    "category": "traditional",
+    "formula": "P[t-42] / P[t-294] - 1",
+    "description": "Twelve-month momentum with a two-month skip to reduce reversal contamination.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_3_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-84] - 1",
+    "description": "Traditional 3-1 skipped return momentum.",
+    "validation": "Independent shifted-return and no-lookahead tests."
+  },
+  "mom_10d": {
+    "category": "recent",
+    "formula": "P[t] / P[t-10] - 1",
+    "description": "Ten-trading-day short-horizon momentum with high-turnover warning.",
+    "validation": "Literal golden-vector simple-return tests and turnover warning audit."
+  },
+  "mom_6m_unskipped": {
+    "category": "recent",
+    "formula": "P[t] / P[t-126] - 1",
+    "description": "Six-month recent momentum without a skip window.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_3m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-63] - 1",
+    "description": "Three-month recent momentum without skip month.",
+    "validation": "Simple-return fixture tests."
+  },
+  "mom_2m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-42] - 1",
+    "description": "Two-month short-horizon momentum for fast leadership changes.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_2_1": {
+    "category": "recent",
+    "formula": "P[t-21] / P[t-63] - 1",
+    "description": "Two-month momentum that skips the most recent month.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_6m": {
+    "category": "recent",
+    "formula": "P[t-10] / P[t-136] - 1",
+    "description": "Six-month momentum ending ten trading days before the signal date to avoid very recent reversal noise.",
+    "validation": "Independent shifted-return and no-lookahead tests; intentionally distinct from mom_6m_unskipped."
+  },
+  "mom_12m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-252] - 1",
+    "description": "Twelve-month simple momentum without skip month.",
+    "validation": "Independent simple-return and no-lookahead tests."
+  },
+  "mom_1m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-21] - 1",
+    "description": "One-month short-horizon momentum.",
+    "validation": "Simple-return fixture tests."
+  },
+  "multi_horizon": {
+    "category": "composite",
+    "formula": "0.15*1m + 0.25*3m(skip5) + 0.30*6m(skip10) + 0.30*12m(skip21)",
+    "description": "Weighted 1/3/6/12-month multi-horizon momentum composite.",
+    "validation": "Component helper tests plus output audit."
+  },
+  "vol_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) / annualized_vol_63d",
+    "description": "Six-month momentum scaled by recent annualized volatility.",
+    "validation": "Division-by-zero and finite coverage audit."
+  },
+  "risk_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "annualized_mean_return_126d / annualized_vol_126d",
+    "description": "Rolling Sharpe-like annualized return divided by volatility.",
+    "validation": "Rolling mean/vol helper tests."
+  },
+  "downside_risk_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) / annualized_downside_vol_126d",
+    "description": "Momentum scaled by downside volatility only.",
+    "validation": "Downside fixture tests and finite audit."
+  },
+  "dual_momentum": {
+    "category": "trend",
+    "formula": "6m relative momentum penalized when price < MA200",
+    "description": "Relative momentum penalized when absolute trend is below the 200-day average.",
+    "validation": "Trend penalty and no-lookahead audit."
+  },
+  "ma_trend": {
+    "category": "trend",
+    "formula": "P/MA200 - 1 + 0.5*(MA50/MA200 - 1)",
+    "description": "Trend persistence from price/MA200 and MA50/MA200 structure.",
+    "validation": "Moving-average fixture tests."
+  },
+  "time_series_trend": {
+    "category": "trend",
+    "formula": "I(P>MA20)+I(MA20>MA100)+I(MA100>MA200)",
+    "description": "Discrete time-series trend stack across short/intermediate/long averages.",
+    "validation": "Bounded 0..3 output audit."
+  },
+  "drawdown_aware": {
+    "category": "drawdown",
+    "formula": "6m(skip10) + P/rolling_high_126 - 1",
+    "description": "Six-month momentum penalized by recent drawdown from rolling high.",
+    "validation": "Drawdown sign and no-lookahead audit."
+  },
+  "high_52w": {
+    "category": "drawdown",
+    "formula": "P / rolling_high_252 - 1",
+    "description": "Closeness to 52-week high; less negative is stronger.",
+    "validation": "Manual rolling-high fixture tests."
+  },
+  "high_26w": {
+    "category": "drawdown",
+    "formula": "P / rolling_high_126 - 1",
+    "description": "Closeness to a 26-week high for intermediate breakout confirmation.",
+    "validation": "Independent rolling-high golden tests."
+  },
+  "breakout_63d": {
+    "category": "breakout",
+    "formula": "P/rolling_high_63 - 1 + 0.5*1m",
+    "description": "Recent breakout pressure with one-month confirmation.",
+    "validation": "Rolling-high plus 1m fixture tests."
+  },
+  "breakout_126d": {
+    "category": "breakout",
+    "formula": "P/rolling_high_126 - 1 + 0.5*3m",
+    "description": "Intermediate breakout pressure with three-month confirmation.",
+    "validation": "Independent rolling-high golden tests."
+  },
+  "reversal_adjusted": {
+    "category": "reversal",
+    "formula": "12-1 momentum - 0.35*1m momentum",
+    "description": "12-1 momentum adjusted for short-term reversal risk.",
+    "validation": "Component helper tests plus no-lookahead audit."
+  },
+  "acceleration": {
+    "category": "acceleration",
+    "formula": "3m momentum - 0.5*6-1 momentum",
+    "description": "Momentum acceleration toward recent leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "short_acceleration": {
+    "category": "acceleration",
+    "formula": "1m momentum - 0.5*3m momentum",
+    "description": "Short-horizon acceleration signal for very recent leadership surges.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "decay_adjusted": {
+    "category": "acceleration",
+    "formula": "6m(skip10) - 0.25*abs(1m momentum)",
+    "description": "Six-month momentum penalized when very recent moves look overextended.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "consistency": {
+    "category": "quality",
+    "formula": "6m(skip10) * rolling_positive_return_ratio_126d",
+    "description": "Rewards momentum earned consistently across days.",
+    "validation": "Positive-ratio fixture tests."
+  },
+  "persistent_12_1": {
+    "category": "quality",
+    "formula": "12m(skip21) * positive_daily_return_ratio_252d(skip21)",
+    "description": "Long-horizon skipped momentum scaled by the share of positive daily returns in the skipped formation window.",
+    "validation": "Positive-ratio and no-lookahead tests."
+  },
+  "low_vol_momentum": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) - annualized_vol_63d",
+    "description": "Momentum penalized by high recent volatility.",
+    "validation": "Low-vol ranking fixture tests."
+  },
+  "stability_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) / (1 + annualized_vol_126d)",
+    "description": "Six-month momentum damped by one-year realized volatility from price returns.",
+    "validation": "Independent volatility golden tests."
+  },
+  "relative_strength_6m": {
+    "category": "cross_sectional",
+    "formula": "cross-sectional percentile_rank(6m(skip10))",
+    "description": "Six-month relative-strength percentile within the eligible universe.",
+    "validation": "Cross-sectional rank audit."
+  },
+  "trend_quality": {
+    "category": "quality",
+    "formula": "P/MA126 - 1 + rolling_mean_return_126/rolling_vol_126",
+    "description": "Combines trend slope with smoothness of returns.",
+    "validation": "Rolling helper and finite audit."
+  },
+  "gap_resistant": {
+    "category": "robust",
+    "formula": "compound clipped daily returns over 126d",
+    "description": "Momentum using clipped daily returns to reduce single-gap dominance.",
+    "validation": "Clipped-return fixture tests."
+  },
+  "winsorized_skip": {
+    "category": "robust",
+    "formula": "compound clipped daily returns over 126d after 10d skip",
+    "description": "Skipped six-month momentum using winsorized daily returns to reduce gap dominance.",
+    "validation": "Independent clipped-return golden tests."
+  },
+  "price_efficiency": {
+    "category": "quality",
+    "formula": "6m(skip10) * |P/P[t-126]-1| / sum_126(|daily_return|)",
+    "description": "Rewards six-month momentum that traveled a direct, low-chop price path.",
+    "validation": "Path-efficiency fixture tests and division-by-zero audit."
+  },
+  "range_position": {
+    "category": "range",
+    "formula": "6m(skip10) + (P-low_126)/(high_126-low_126) - 0.5",
+    "description": "Combines six-month momentum with where price sits inside its trailing range.",
+    "validation": "Rolling-range fixture tests and flat-range audit."
+  },
+  "range_position_252d": {
+    "category": "range",
+    "formula": "12m(skip21) + (P-low_252)/(high_252-low_252) - 0.5",
+    "description": "Combines long-horizon skipped momentum with position inside a 52-week range.",
+    "validation": "Independent rolling-range golden tests."
+  },
+  "median_return_3m": {
+    "category": "robust",
+    "formula": "median(daily_return, 63d) * 63",
+    "description": "Three-month median daily return momentum to reduce outlier sensitivity.",
+    "validation": "Median-return golden-vector and outlier-gap tests."
+  },
+  "median_return_6m": {
+    "category": "robust",
+    "formula": "median(daily_return, 126d) * 126",
+    "description": "Six-month median daily return momentum to reduce outlier sensitivity.",
+    "validation": "Median-return golden-vector and no-lookahead tests."
+  },
+  "winsorized_3m": {
+    "category": "robust",
+    "formula": "compound clipped [-8%, +8%] daily returns over 63d",
+    "description": "Three-month winsorized compounded momentum.",
+    "validation": "Winsorized golden-vector and outlier-gap tests."
+  },
+  "winsorized_12m": {
+    "category": "robust",
+    "formula": "compound clipped [-8%, +8%] daily returns over 252d",
+    "description": "Twelve-month winsorized compounded momentum.",
+    "validation": "Winsorized no-lookahead and edge-case tests."
+  },
+  "vol_adjusted_3m": {
+    "category": "risk_adjusted",
+    "formula": "3m simple momentum / annualized_vol_63d",
+    "description": "Three-month momentum scaled by recent annualized volatility.",
+    "validation": "Division-by-zero and finite coverage audit."
+  },
+  "vol_adjusted_12m": {
+    "category": "risk_adjusted",
+    "formula": "12-1 momentum / annualized_vol_126d",
+    "description": "Twelve-minus-one momentum scaled by intermediate volatility.",
+    "validation": "Division-by-zero and no-lookahead audit."
+  },
+  "downside_adjusted_12m": {
+    "category": "risk_adjusted",
+    "formula": "12-1 momentum / annualized_downside_vol_252d",
+    "description": "Twelve-minus-one momentum scaled by downside volatility.",
+    "validation": "Downside risk edge-case tests."
+  },
+  "ma_slope_50": {
+    "category": "trend",
+    "formula": "MA50[t] / MA50[t-21] - 1",
+    "description": "One-month slope of the 50-day moving average.",
+    "validation": "Moving-average slope fixture tests."
+  },
+  "price_vs_ma200": {
+    "category": "trend",
+    "formula": "P / MA200 - 1",
+    "description": "Distance of price above/below the 200-day moving average.",
+    "validation": "Moving-average fixture tests."
+  },
+  "ma_stack_quality": {
+    "category": "trend",
+    "formula": "I(P>MA20)+I(MA20>MA50)+I(MA50>MA100)+I(MA100>MA200)",
+    "description": "Four-step moving-average stack quality score.",
+    "validation": "Bounded 0..4 output and no-lookahead audit."
+  },
+  "breakout_20d": {
+    "category": "breakout",
+    "formula": "P/rolling_high_20 - 1 + 0.5*10d",
+    "description": "Short breakout proximity with ten-day confirmation.",
+    "validation": "Rolling-high golden-vector tests."
+  },
+  "accel_1m_vs_3m": {
+    "category": "acceleration",
+    "formula": "1m momentum - 3m momentum",
+    "description": "Acceleration from three-month to one-month leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "accel_3m_vs_6m": {
+    "category": "acceleration",
+    "formula": "3m momentum - 6m momentum",
+    "description": "Acceleration from six-month to three-month leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "accel_6m_vs_12m": {
+    "category": "acceleration",
+    "formula": "6m momentum - 12m momentum",
+    "description": "Acceleration from twelve-month to six-month leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "ulcer_adjusted": {
+    "category": "drawdown",
+    "formula": "6m(skip10) / sqrt(mean(drawdown_126^2, 126d))",
+    "description": "Momentum scaled by Ulcer-style drawdown severity.",
+    "validation": "Drawdown denominator and finite audit."
+  },
+  "smooth_return_6m": {
+    "category": "quality",
+    "formula": "6m simple momentum - rolling_std_daily_return_126d",
+    "description": "Six-month return momentum penalized by daily return roughness.",
+    "validation": "Smoothness edge-case tests."
+  },
+  "residual_12_1": {
+    "category": "cross_sectional",
+    "formula": "sum_252(return shifted21) - beta_252_to_equal_weight_market * sum_252(market_return shifted21)",
+    "description": "Twelve-minus-one beta-neutral residual momentum versus the equal-weight candidate-universe proxy.",
+    "validation": "Rolling beta residual formula, rank-distinctness, and no-lookahead tests."
+  },
+  "excess_ir_6m": {
+    "category": "cross_sectional",
+    "formula": "annualized_mean(excess_return_126d) / annualized_tracking_error_126d",
+    "description": "Six-month information-ratio style momentum versus the equal-weight candidate universe.",
+    "validation": "Tracking-error denominator and no-lookahead tests."
+  },
+  "up_down_capture_6m": {
+    "category": "asymmetry",
+    "formula": "mean(return | market_up,126d) - abs(mean(return | market_down,126d))",
+    "description": "Rewards stocks that participate on up-market days without giving back as much on down-market days.",
+    "validation": "Market-up/down conditioning and finite-coverage tests."
+  },
+  "tail_resilient_6m": {
+    "category": "tail_risk",
+    "formula": "6m(skip10) + q05(daily_return,126d)",
+    "description": "Six-month skipped momentum penalized by poor left-tail daily returns.",
+    "validation": "Rolling quantile edge-case and no-lookahead tests."
+  },
+  "jump_excluded_6m": {
+    "category": "robust",
+    "formula": "sum_126(daily_return shifted10) - max_126(daily_return shifted10)",
+    "description": "Formation-window momentum that removes the single largest daily jump to reduce one-day gap dominance.",
+    "validation": "Independent shifted-return and outlier-resistance tests."
+  },
+  "high_persistence_6m": {
+    "category": "quality",
+    "formula": "mean_63(I(P >= 0.98*rolling_high_126))",
+    "description": "Fraction of recent days spent near a six-month high, capturing persistent leadership rather than one-day proximity.",
+    "validation": "Rolling-high persistence and no-lookahead tests."
+  }
+};
+
 const DASHBOARD_INPUT_DEFAULTS = {
   window: '1Y',
   lookbackMonths: 12,
@@ -1048,14 +1423,14 @@ function renderSummary() {
   setText(
     '#best-factor-detail',
     best
-      ? `${best.window_label} 브라우저 시나리오 수익률 ${formatPercent(best.period_return)}${best.raw_period_return != null ? ` · 원자료 ${formatPercent(best.raw_period_return)}` : ''}`
+      ? `${best.window_label} 브라우저 시나리오 수익률 ${formatPercent(best.period_return)}${best.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(best.raw_period_return)}` : ''}`
       : '-',
   );
   setText('#selected-factor', factor || '-');
   setText(
     '#selected-factor-detail',
     selectedStats && selectedStats.rank
-      ? `${selectedStats.window_label} 브라우저 시나리오 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)}${selectedStats.raw_period_return != null ? ` · 원자료 ${formatPercent(selectedStats.raw_period_return)}` : ''} · ${factorDescription(factor, run)}`
+      ? `${selectedStats.window_label} 브라우저 시나리오 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)}${selectedStats.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(selectedStats.raw_period_return)}` : ''} · ${factorDescription(factor, run)}`
       : `자료 없음 · ${factorDescription(factor, run)}`,
   );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
@@ -1369,7 +1744,7 @@ function renderCurrentOutputTable() {
       : '해당 최고 팩터의 종목 점수 스냅샷이 없어 행을 표시하지 못했습니다.';
     const bestFactorCaution = 'Best factor는 해당 기간의 과거 성과 1위 팩터이므로 미래 우위를 보장하지 않으며, 선택 팩터 드롭다운과 별개입니다.';
     note.textContent = researchOnly
-      ? `${scope} 기준 연구용 fail-closed 신호입니다. 최종 매매 비중과 목표금액은 0으로 고정하고, 게이트 전 모형 비중만 후보 간 상대 강도 진단으로 표시합니다. ${availability} ${bestFactorCaution} 미충족 요건: ${blockers}. 후보 ${candidateCount}, 가격 적격 ${eligibleCount}, 유동성 적격 ${liquidityCount}.`
+      ? `${scope} · 연구용 신호(매매 비중 0%). ${availability} ${bestFactorCaution} 미충족: ${blockers}. 후보 ${candidateCount} · 가격 적격 ${eligibleCount} · 유동성 적격 ${liquidityCount}.`
       : `${scope} 기준 표시용 best-factor 신호입니다. ${availability} ${bestFactorCaution} 후보 ${candidateCount}, 가격 적격 ${eligibleCount}, 유동성 적격 ${liquidityCount}.`;
   }
   if (!rows.length) {
@@ -1429,7 +1804,7 @@ function renderFactorReturnChart() {
   rows.forEach((row) => appendBarRow(
     target,
     `${row.rank}. ${row.factor}`,
-    `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` / 원 ${formatPercent(row.raw_period_return)}` : ''}`,
+    `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(row.raw_period_return)}` : ''}`,
     row.period_return,
     maxAbs,
     { className: `${row.factor === factor ? 'is-selected' : ''} ${row.factor === best?.factor ? 'is-best' : ''}`.trim() },
@@ -2390,49 +2765,102 @@ function renderDailyWeightsAnalysis() {
   setText(
     '#daily-weight-analysis-note',
     sourceKind === 'historical_holdings'
-      ? `${date || '-'} 이하 최근 ${dateCount}개 보유일의 선택 팩터 ${factor || '-'} 일별 투자 비중입니다. 시나리오 비중/차이는 현재 입력값 중 상위 ${topN}개와 종목당 최대 ${formatPercent(maxWeight)}만 단일일자 비중에 적용합니다. ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 리밸런싱·비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps는 성과 프록시에만 적용되며, 단일일자 보유 종목을 가짜로 바꾸지 않습니다.`
+      ? `${date || '-'} 이하 최근 ${dateCount}개 보유일의 선택 팩터 ${factor || '-'} 비중입니다. 종목을 열로 배치해 날짜별 저장 비중과 현재 입력 시나리오 비중을 바로 비교합니다.`
       : snapshot
-      ? `${snapshot.date || date || '-'} 기준 선택 팩터 ${factor || '-'}의 ${exactDate ? '정확한' : '가장 가까운'} 백테스트 일별 보유 비중 스냅샷입니다. 시나리오 비중/차이는 현재 상위 ${topN}개와 최대 ${formatPercent(maxWeight)}만 적용합니다. 리밸런싱·거래비용은 위 성과 프록시 전용 입력입니다.`
-      : `${date || '-'} 기준 선택 팩터 ${factor || '-'}의 저장된 백테스트 일별 비중 스냅샷이 없어 점수 스냅샷 기반 시나리오 비중만 표시합니다. 리밸런싱·거래비용은 보유 표가 아니라 성과 프록시에만 반영됩니다.`,
+      ? `${snapshot.date || date || '-'} 기준 선택 팩터 ${factor || '-'}의 ${exactDate ? '정확한' : '가장 가까운'} 보유 비중 스냅샷입니다. 종목 열마다 저장/현재 입력 비중을 함께 표시합니다.`
+      : `${date || '-'} 기준 선택 팩터 ${factor || '-'}의 저장 보유 비중이 없어 점수 스냅샷 기반 시나리오 비중만 종목별로 표시합니다.`,
   );
-  const tbody = document.querySelector('#daily-weights-table tbody');
-  if (!tbody) return;
+
+  const table = document.querySelector('#daily-weights-table');
+  const thead = table?.querySelector('thead');
+  const tbody = table?.querySelector('tbody');
+  if (!table || !thead || !tbody) return;
+
   tbody.replaceChildren();
+  const symbols = [...new Set(rows.map((row) => row.symbol).filter(Boolean))].slice(0, Math.max(1, Math.min(topN, 24)));
+  const headerRow = document.createElement('tr');
+  appendHeaderCell(headerRow, '비중일');
+  appendHeaderCell(headerRow, '기간');
+  symbols.forEach((symbol) => appendHeaderCell(headerRow, symbol));
+  thead.replaceChildren(headerRow);
+
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 10;
+    td.colSpan = Math.max(symbols.length + 2, 3);
     td.textContent = '선택한 기준일과 팩터에 표시할 일별 투자 비중 데이터가 없습니다.';
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
   }
+
+  const groups = new Map();
   rows.forEach((row) => {
-    const tr = document.createElement('tr');
-    appendCell(tr, row.weightDate || row.date || '-');
-    appendCell(tr, row.windowLabel || row.window || '-');
-    appendCell(tr, row.rank);
-    appendCell(tr, row.symbol, { strong: true });
-    appendCell(tr, row.actualWeight === null ? '-' : formatPercent(row.actualWeight), { className: row.actualWeight === null ? '' : classForNumber(row.actualWeight) });
-    appendCell(tr, formatPercent(row.scenarioWeight), { className: classForNumber(row.scenarioWeight) });
-    appendCell(tr, row.deltaWeight === null ? '-' : formatPercent(row.deltaWeight), { className: row.deltaWeight === null ? '' : classForNumber(row.deltaWeight) });
-    appendCell(tr, formatNumber(row.score));
-    appendCell(tr, row.source || '-');
-    appendCell(tr, row.scoreDate || '-');
-    tbody.appendChild(tr);
+    const key = `${row.weightDate || row.date || '-'}|${row.windowLabel || row.window || '-'}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        date: row.weightDate || row.date || '-',
+        windowLabel: row.windowLabel || row.window || '-',
+        bySymbol: new Map(),
+      });
+    }
+    if (row.symbol) groups.get(key).bySymbol.set(row.symbol, row);
   });
+
+  [...groups.values()]
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+    .forEach((group) => {
+      const tr = document.createElement('tr');
+      appendCell(tr, group.date);
+      appendCell(tr, group.windowLabel);
+      symbols.forEach((symbol) => appendWeightMatrixCell(tr, group.bySymbol.get(symbol)));
+      tbody.appendChild(tr);
+    });
+}
+
+function appendHeaderCell(tr, text) {
+  const th = document.createElement('th');
+  th.scope = 'col';
+  th.textContent = text;
+  tr.appendChild(th);
+}
+
+function appendWeightMatrixCell(tr, row) {
+  const td = document.createElement('td');
+  td.className = 'weight-matrix-cell';
+  if (!row) {
+    td.textContent = '-';
+    tr.appendChild(td);
+    return;
+  }
+  const primary = document.createElement('strong');
+  primary.textContent = row.actualWeight === null ? formatPercent(row.scenarioWeight) : formatPercent(row.actualWeight);
+  const secondary = document.createElement('small');
+  const parts = [];
+  if (row.actualWeight !== null) parts.push(`현재 ${formatPercent(row.scenarioWeight)}`);
+  if (row.deltaWeight !== null) parts.push(`차이 ${formatPercent(row.deltaWeight)}`);
+  if (Number.isFinite(Number(row.score))) parts.push(`신호 ${formatNumber(row.score)}`);
+  secondary.textContent = parts.join(' · ') || '시나리오 비중';
+  td.title = `${row.symbol || ''} ${row.scoreDate ? `신호일 ${row.scoreDate}` : ''}`.trim();
+  td.append(primary, secondary);
+  tr.appendChild(td);
 }
 
 function parseSelectedFactorMethod(factor, option = {}) {
   const text = String(factor || '');
-  const category = humanFactorCategory(option.category || 'unknown');
+  const override = FACTOR_METHOD_OVERRIDES[text] || null;
+  const category = humanFactorCategory(override?.category || option.category || 'unknown');
   const base = {
     category,
-    formulaLabel: '팩터별 가격 모멘텀 점수',
-    lookback: '팩터명에서 명시된 기간 또는 내부 정의 기간',
+    formulaLabel: override?.formula || '팩터별 가격/거래량·재무 신호 산식',
+    lookback: '팩터명 또는 카탈로그 정의 구간',
     skip: '팩터별 정의에 따름',
-    score: '종목별 가격 기반 신호를 계산한 뒤 값이 큰 순서로 순위를 매깁니다.',
-    caveat: option.description_ko || option.description || '세부 설명 정보가 제한적이므로 팩터명과 카테고리 기반으로 해석합니다.',
+    score: override
+      ? `${text} 원자료 산식은 ${override.formula}입니다. 각 종목에 같은 산식을 적용한 뒤 점수가 높은 순서로 후보를 정렬합니다.`
+      : '종목별 가격 기반 신호를 계산한 뒤 값이 큰 순서로 순위를 매깁니다.',
+    caveat: override
+      ? `${override.description} 검증 메모: ${override.validation}`
+      : option.description_ko || option.description || '세부 설명 정보가 제한적이므로 팩터명과 카테고리 기반으로 해석합니다.',
   };
   let match = text.match(/^mom_(\d+)_(\d+)$/);
   if (match) {
@@ -2440,11 +2868,11 @@ function parseSelectedFactorMethod(factor, option = {}) {
     const skip = Number(match[2]);
     return {
       ...base,
-      formulaLabel: `${lookback}개월 수익률 · 최근 ${skip}개월 제외`,
-      lookback: `${lookback}개월 가격 변화`,
+      formulaLabel: override?.formula || `score_i = P_i(t-${skip}m) / P_i(t-${lookback + skip}m) - 1`,
+      lookback: `최근 ${skip}개월을 제외한 직전 ${lookback}개월 가격 변화`,
       skip: `${skip}개월 스킵/제외`,
-      score: `각 종목의 최근 ${skip}개월을 제외한 직전 ${lookback}개월 누적수익률을 계산하고, 값이 큰 종목을 상위 모멘텀 후보로 정렬합니다.`,
-      caveat: `${text}는 전통적인 skip-month 모멘텀입니다. 최근 과열/반전 가능성을 줄이기 위해 가장 최근 ${skip}개월을 점수 계산 구간에서 제외합니다.`,
+      score: `각 종목 i에 대해 최근 ${skip}개월을 제외한 직전 ${lookback}개월 누적수익률을 계산합니다. 즉 대략 P_i(t-${skip}m) / P_i(t-${lookback + skip}m) - 1이며, 값이 큰 종목이 상위 모멘텀 후보입니다.`,
+      caveat: `${base.caveat} 최근 과열/단기 반전 오염을 줄이기 위해 가장 최근 ${skip}개월은 점수 계산 구간에서 제외합니다.`,
     };
   }
   match = text.match(/^mom_(\d+)m$/);
@@ -2452,11 +2880,11 @@ function parseSelectedFactorMethod(factor, option = {}) {
     const lookback = Number(match[1]);
     return {
       ...base,
-      formulaLabel: `${lookback}개월 누적수익률`,
+      formulaLabel: override?.formula || `score_i = P_i(t) / P_i(t-${lookback}m) - 1`,
       lookback: `${lookback}개월 가격 변화`,
       skip: '명시적 스킵 없음',
-      score: `각 종목의 최근 ${lookback}개월 누적수익률을 계산하고 높은 순서로 정렬합니다.`,
-      caveat: `${text}는 단순 기간 모멘텀입니다. 단기 과열 제외보다는 해당 기간의 가격 추세 지속성을 직접 봅니다.`,
+      score: `각 종목의 최근 ${lookback}개월 누적수익률을 계산하고 높은 순서로 정렬합니다. 원자료 산식은 조정종가 기준 가격 변화율입니다.`,
+      caveat: `${base.caveat} 단순 기간 모멘텀은 빠른 추세를 직접 보지만 단기 과열과 회전율에 더 민감할 수 있습니다.`,
     };
   }
   match = text.match(/^mom_(\d+)d$/);
@@ -2464,68 +2892,76 @@ function parseSelectedFactorMethod(factor, option = {}) {
     const days = Number(match[1]);
     return {
       ...base,
-      formulaLabel: `${days}거래일 내외 단기 수익률`,
+      formulaLabel: override?.formula || `score_i = P_i(t) / P_i(t-${days}d) - 1`,
       lookback: `${days}거래일`,
       skip: '명시적 스킵 없음',
       score: `최근 ${days}거래일 내외의 단기 가격 변화를 비교해 단기 모멘텀이 강한 종목을 위로 정렬합니다.`,
-      caveat: '단기 모멘텀 팩터는 회전율과 반전 위험이 커서 비용/슬리피지 민감도를 함께 봐야 합니다.',
+      caveat: `${base.caveat} 단기 모멘텀 팩터는 회전율과 반전 위험이 커서 비용/슬리피지 민감도를 함께 봐야 합니다.`,
     };
   }
   match = text.match(/^accel_(\d+)m_vs_(\d+)m$/);
   if (match) {
     return {
       ...base,
-      formulaLabel: `${match[1]}개월 모멘텀 대 ${match[2]}개월 모멘텀 가속도`,
-      lookback: `${match[1]}개월 및 ${match[2]}개월 비교`,
-      skip: '명시적 스킵 없음',
-      score: `짧은 기간 모멘텀이 긴 기간 모멘텀보다 개선되는 종목을 높게 평가합니다.`,
-      caveat: '가속도 계열은 추세 변화 속도를 보므로 단순 장기 모멘텀보다 노이즈에 민감할 수 있습니다.',
+      formulaLabel: override?.formula || `${match[1]}개월 모멘텀 - ${match[2]}개월 모멘텀`,
+      lookback: `${match[1]}개월과 ${match[2]}개월 수익률 비교`,
+      skip: '팩터 정의의 skip 값 적용',
+      score: `짧은 기간 모멘텀이 긴 기간 모멘텀보다 얼마나 개선됐는지 계산합니다. 값이 클수록 최근 리더십이 가속된 종목입니다.`,
+      caveat: `${base.caveat} 가속도 계열은 추세 변화 속도를 보므로 단순 장기 모멘텀보다 노이즈에 민감할 수 있습니다.`,
     };
   }
   match = text.match(/^high_(\d+)w$/);
   if (match) {
     return {
       ...base,
-      formulaLabel: `${match[1]}주 고점 근접도`,
+      formulaLabel: override?.formula || `score_i = P_i(t) / rolling_high_${match[1]}w - 1`,
       lookback: `${match[1]}주 고점/현재가 비교`,
       skip: '명시적 스킵 없음',
-      score: `현재 가격이 ${match[1]}주 고점에 얼마나 가까운지로 추세 지속성을 평가합니다.`,
-      caveat: '고점 근접 팩터는 강한 추세를 빠르게 포착하지만 추세 말기 변동성에 유의해야 합니다.',
+      score: `현재 가격이 ${match[1]}주 고점에 얼마나 가까운지로 추세 지속성을 평가합니다. 0에 가까울수록 고점 근접도가 높습니다.`,
+      caveat: `${base.caveat} 고점 근접 팩터는 강한 추세를 빠르게 포착하지만 추세 말기 변동성에 유의해야 합니다.`,
     };
   }
   match = text.match(/^breakout_(\d+)d$/);
   if (match) {
     return {
       ...base,
-      formulaLabel: `${match[1]}거래일 돌파 신호`,
+      formulaLabel: override?.formula || `score_i = P_i(t) / prior_high_${match[1]}d - 1 + 확인 모멘텀`,
       lookback: `${match[1]}거래일 가격 범위`,
       skip: '명시적 스킵 없음',
-      score: `최근 ${match[1]}거래일 가격 범위에서 상단 돌파/근접 정도가 큰 종목을 높게 평가합니다.`,
-      caveat: '돌파 팩터는 추세 시작을 포착하려 하지만 false breakout과 비용 민감도가 있습니다.',
+      score: `최근 ${match[1]}거래일 가격 범위에서 상단 돌파/근접 정도와 확인 모멘텀을 함께 평가합니다.`,
+      caveat: `${base.caveat} 돌파 팩터는 추세 시작을 포착하려 하지만 false breakout과 비용 민감도가 있습니다.`,
     };
   }
-  if (text.includes('winsorized')) {
+  if (text.includes('winsorized') || text.includes('gap_resistant') || text.includes('jump_excluded') || text.includes('median_return')) {
     return {
       ...base,
-      formulaLabel: '극단값 완화 모멘텀',
-      score: '수익률 극단값의 영향을 줄인 뒤 종목별 모멘텀 순위를 계산합니다.',
-      caveat: '극단값 완화 계열은 한두 번의 급등락에 과도하게 끌려가지 않도록 설계된 연구용 변형입니다.',
+      lookback: '주로 63~252거래일 견고화 구간',
+      score: `${base.score} 급등락·단일 점프·극단 일수익률 영향을 줄이는 견고화 처리를 포함합니다.`,
+      caveat: `${base.caveat} 견고화 계열은 한두 번의 급등락에 덜 끌려가지만, 실제 급격한 추세 전환을 일부 늦게 반영할 수 있습니다.`,
     };
   }
-  if (text.includes('risk') || text.includes('vol') || text.includes('ulcer') || text.includes('drawdown')) {
+  if (text.includes('risk') || text.includes('vol') || text.includes('ulcer') || text.includes('drawdown') || text.includes('tail')) {
     return {
       ...base,
-      formulaLabel: '위험조정 모멘텀',
-      score: '가격 상승률을 변동성, 낙폭, 하방위험 등 위험 지표로 보정해 순위를 계산합니다.',
-      caveat: '위험조정 계열은 단순 수익률보다 안정성을 선호하지만 급격한 추세 전환을 늦게 반영할 수 있습니다.',
+      lookback: '모멘텀 구간과 63~252거래일 위험 구간',
+      score: `${base.score} 상승률을 변동성, 낙폭, 하방위험, 좌측 꼬리위험 같은 위험 지표로 보정합니다.`,
+      caveat: `${base.caveat} 위험조정 계열은 단순 수익률보다 안정성을 선호하지만 강한 고변동 추세를 낮게 볼 수 있습니다.`,
     };
   }
-  if (text.includes('ma_') || text.includes('trend') || text.includes('range_position')) {
+  if (text.includes('ma_') || text.includes('trend') || text.includes('range_position') || text.includes('price_vs_ma')) {
     return {
       ...base,
-      formulaLabel: '추세/가격 위치 모멘텀',
-      score: '이동평균 기울기, 추세 정렬, 가격 범위 내 위치 등을 이용해 추세 품질을 평가합니다.',
-      caveat: '추세 품질 계열은 방향성과 지속성을 함께 보지만 횡보장에서는 신호가 둔화될 수 있습니다.',
+      lookback: '20~252거래일 추세·이동평균·가격 범위 구간',
+      score: `${base.score} 이동평균 기울기, 추세 정렬, 가격 범위 내 위치 등을 이용해 추세 품질을 평가합니다.`,
+      caveat: `${base.caveat} 추세 품질 계열은 방향성과 지속성을 함께 보지만 횡보장에서는 신호가 둔화될 수 있습니다.`,
+    };
+  }
+  if (text.includes('relative_strength') || text.includes('residual') || text.includes('excess_ir') || text.includes('up_down_capture')) {
+    return {
+      ...base,
+      lookback: '주로 126~252거래일 횡단면/시장상대 구간',
+      score: `${base.score} 동일 후보군 또는 시장 프록시 대비 초과 성과·상대 순위·상승/하락 참여도를 비교합니다.`,
+      caveat: `${base.caveat} 상대강도 계열은 후보군 구성과 시장 프록시 변화에 민감하므로 단독 투자 결론보다 비교 진단으로 보세요.`,
     };
   }
   return base;
@@ -2586,7 +3022,7 @@ function renderPeriodRankingTable() {
     const tr = document.createElement('tr');
     appendCell(tr, `${row.window_label || windowKey} · 시나리오`);
     appendCell(tr, row.factor, { strong: row.factor === factor });
-    appendCell(tr, `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` / 원 ${formatPercent(row.raw_period_return)}` : ''}`, { className: classForNumber(row.period_return) });
+    appendCell(tr, `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(row.raw_period_return)}` : ''}`, { className: classForNumber(row.period_return) });
     appendCell(tr, row.rank);
     tbody.appendChild(tr);
   });
