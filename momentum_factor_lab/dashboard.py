@@ -46,15 +46,18 @@ ASSET_VERSION = "20260629-readability-methods"
 
 
 HTML_TEMPLATE = """<!doctype html>
-<html lang="ko">
+<html lang="ko" data-project-id="momentum">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{title}</title>
   <link rel="stylesheet" href="assets/styles.css?v={asset_version}" />
+  <link rel="stylesheet" href="assets/common-ui.css?v={asset_version}" />
+  <script src="assets/common-ui.js?v={asset_version}" defer></script>
 </head>
 <body id="top">
   <header class="hero">
+    <nav class="top-nav" data-common-nav aria-label="Quant 프로젝트 공통 이동"></nav>
     <div>
       <p class="eyebrow">모멘텀 팩터 랩</p>
       <h1>{title}</h1>
@@ -5602,6 +5605,8 @@ def write_dashboard_site(
     index_path = site_path / "index.html"
     css_path = assets_dir / "styles.css"
     js_path = assets_dir / "dashboard.js"
+    common_css_path = assets_dir / "common-ui.css"
+    common_js_path = assets_dir / "common-ui.js"
     data_path = data_dir / "dashboard.json"
     summary_path = data_dir / "summary.json"
 
@@ -5625,6 +5630,9 @@ def write_dashboard_site(
     index_path.write_text(HTML_TEMPLATE.format(title=escaped_title, asset_version=ASSET_VERSION), encoding="utf-8")
     css_path.write_text(CSS_CONTENT, encoding="utf-8")
     js_path.write_text(JS_CONTENT, encoding="utf-8")
+    common_source_dir = Path(__file__).resolve().parents[1] / "docs" / "assets"
+    common_css_path.write_text((common_source_dir / "common-ui.css").read_text(encoding="utf-8"), encoding="utf-8")
+    common_js_path.write_text((common_source_dir / "common-ui.js").read_text(encoding="utf-8"), encoding="utf-8")
     data_path.write_text(
         json.dumps(combined, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
         encoding="utf-8",
@@ -5638,6 +5646,8 @@ def write_dashboard_site(
         "index": str(index_path),
         "css": str(css_path),
         "js": str(js_path),
+        "common_css": str(common_css_path),
+        "common_js": str(common_js_path),
         "data": str(data_path),
         "summary": str(summary_path),
     }
