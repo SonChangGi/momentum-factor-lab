@@ -3,8 +3,8 @@
   "contract": "quant-research-summary",
   "projectId": "momentum",
   "projectName": "모멘텀 팩터 랩",
-  "generatedAt": "2026-06-27T03:21:48+00:00",
-  "dataAsOf": "2026-06-26",
+  "generatedAt": "2026-06-30T03:57:51+00:00",
+  "dataAsOf": "2026-06-29",
   "timezone": "UTC",
   "detailUrl": "https://sonchanggi.github.io/momentum-factor-lab/",
   "detailDataUrl": "https://sonchanggi.github.io/momentum-factor-lab/data/dashboard.json",
@@ -21,49 +21,48 @@
   "coverage": {
     "runCount": 30,
     "candidateUniverseSize": 2865,
-    "eligiblePriceUniverseSize": 2353,
-    "liquidityEligibleUniverseSize": 2178,
+    "eligiblePriceUniverseSize": 2358,
+    "liquidityEligibleUniverseSize": 2195,
     "factorCount": 62,
     "quality": {
       "candidate_universe_size": 2865,
-      "eligible_price_universe_size": 2353,
-      "liquidity_eligible_universe_size": 2178,
-      "fetched_price_symbol_count": 2355,
-      "excluded_symbols": 512,
-      "provider": "yfinance-free-public-data+yahoo-chart-fallback+nasdaq-latest-repair",
-      "data_as_of": "2026-06-26",
+      "eligible_price_universe_size": 2358,
+      "liquidity_eligible_universe_size": 2195,
+      "fetched_price_symbol_count": 2360,
+      "excluded_symbols": 507,
+      "provider": "yfinance-free-public-data+yahoo-chart-fallback",
+      "data_as_of": "2026-06-29",
       "provider_requested_symbol_count": 2865.0,
       "provider_returned_symbol_count": 2863.0,
       "price_coverage_ratio": 0.9993019197207679,
-      "model_price_universe_ratio": 0.8219895287958116,
-      "eligible_price_ratio": 0.8212914485165794,
-      "liquidity_eligible_ratio": 0.7602094240837697,
-      "excluded_ratio": 0.1787085514834206,
+      "model_price_universe_ratio": 0.8237347294938918,
+      "eligible_price_ratio": 0.8230366492146597,
+      "liquidity_eligible_ratio": 0.7661431064572426,
+      "excluded_ratio": 0.1769633507853403,
       "price_quality_rows": 2867,
-      "data_quality_pass_count": 2181,
-      "data_quality_pass_ratio": 0.7607254970352285,
-      "fresh_price_rows": 2853,
-      "fresh_price_ratio": 0.99511684687827,
+      "data_quality_pass_count": 2198,
+      "data_quality_pass_ratio": 0.7666550401116149,
+      "fresh_price_rows": 2856,
+      "fresh_price_ratio": 0.9961632368329264,
       "data_quality_status_counts": {
-        "pass": 2179,
-        "extreme_return_anomaly": 227,
-        "insufficient_history": 145,
-        "below_minimum_price": 126,
-        "below_liquidity_floor": 120,
-        "insufficient_liquidity_observations": 54,
-        "stale_price": 12,
+        "pass": 2196,
+        "extreme_return_anomaly": 225,
+        "below_liquidity_floor": 159,
+        "insufficient_history": 144,
+        "below_minimum_price": 127,
+        "stale_price": 9,
+        "insufficient_liquidity_observations": 3,
         "benchmark_comparator_only": 2,
         "missing_price": 2
       },
       "price_source_counts": {
-        "yfinance-adjusted-daily": 2616,
-        "yahoo-chart-adjusted-daily-fallback": 240,
-        "nasdaq-latest-close-repair": 9
+        "yfinance-adjusted-daily": 2653,
+        "yahoo-chart-adjusted-daily-fallback": 212
       },
       "source_counts": {
-        "yahoo-chart-adjusted-daily-fallback": 250,
-        "nasdaq-latest-close-repair": 250,
-        "stooq-daily-close-fallback": 250,
+        "yahoo-chart-adjusted-daily-fallback": 214,
+        "stooq-daily-close-fallback": 214,
+        "nasdaq-latest-close-repair": 212,
         "yfinance-adjusted-daily": 115,
         "yfinance-fast-info-market-cap": 20,
         "packaged-default-universe": 1,
@@ -83,35 +82,35 @@
         },
         {
           "source": "yahoo-chart-adjusted-daily-fallback",
-          "row_count": 250,
-          "success_rows": 248,
+          "row_count": 214,
+          "success_rows": 212,
           "failed_rows": 2,
           "no_newer_rows": 0,
           "cache_hit_rows": 0,
-          "records_sum": 248.0,
-          "requested_price_symbols_sum": 250.0,
+          "records_sum": 212.0,
+          "requested_price_symbols_sum": 214.0,
           "returned_price_symbols_sum": null
         },
         {
           "source": "nasdaq-latest-close-repair",
-          "row_count": 250,
-          "success_rows": 9,
-          "failed_rows": 104,
-          "no_newer_rows": 137,
+          "row_count": 212,
+          "success_rows": 0,
+          "failed_rows": 44,
+          "no_newer_rows": 168,
           "cache_hit_rows": 0,
-          "records_sum": 9.0,
-          "requested_price_symbols_sum": 250.0,
+          "records_sum": 0.0,
+          "requested_price_symbols_sum": 212.0,
           "returned_price_symbols_sum": null
         },
         {
           "source": "stooq-daily-close-fallback",
-          "row_count": 250,
+          "row_count": 214,
           "success_rows": 0,
-          "failed_rows": 250,
+          "failed_rows": 214,
           "no_newer_rows": 0,
           "cache_hit_rows": 0,
           "records_sum": 0.0,
-          "requested_price_symbols_sum": 250.0,
+          "requested_price_symbols_sum": 214.0,
           "returned_price_symbols_sum": null
         },
         {
@@ -132,7 +131,7 @@
           "failed_rows": 0,
           "no_newer_rows": 0,
           "cache_hit_rows": 0,
-          "records_sum": 2355.0,
+          "records_sum": 2360.0,
           "requested_price_symbols_sum": 2865.0,
           "returned_price_symbols_sum": 2863.0
         },
@@ -187,11 +186,11 @@
       ],
       "metrics": {
         "rank": 1,
-        "signal": 42.228873363883935,
+        "signal": 40.768952254484375,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -214,11 +213,11 @@
       ],
       "metrics": {
         "rank": 2,
-        "signal": 32.987601173472015,
+        "signal": 33.67032877615968,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -241,11 +240,11 @@
       ],
       "metrics": {
         "rank": 3,
-        "signal": 10.022727115710904,
+        "signal": 10.216374197254423,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -268,11 +267,11 @@
       ],
       "metrics": {
         "rank": 4,
-        "signal": 6.986231675140722,
+        "signal": 6.938712587629242,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -295,11 +294,11 @@
       ],
       "metrics": {
         "rank": 5,
-        "signal": 6.842767298898244,
+        "signal": 6.62499976716936,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -310,9 +309,9 @@
       ]
     },
     {
-      "symbol": "AAOI",
-      "name": "AAOI",
-      "label": "AAOI · rank 6",
+      "symbol": "PL",
+      "name": "PL",
+      "label": "PL · rank 6",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -322,11 +321,11 @@
       ],
       "metrics": {
         "rank": 6,
-        "signal": 6.388249823487972,
+        "signal": 6.363897046622309,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -349,11 +348,11 @@
       ],
       "metrics": {
         "rank": 7,
-        "signal": 6.310889733797056,
+        "signal": 5.905953909078948,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -364,9 +363,9 @@
       ]
     },
     {
-      "symbol": "PL",
-      "name": "PL",
-      "label": "PL · rank 8",
+      "symbol": "AAOI",
+      "name": "AAOI",
+      "label": "AAOI · rank 8",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -376,38 +375,11 @@
       ],
       "metrics": {
         "rank": 8,
-        "signal": 6.150141636171489,
+        "signal": 5.741922869163642,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
-      },
-      "signals": [
-        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
-      ],
-      "warnings": [
-        "complete_requested_price_coverage",
-        "point_in_time_universe"
-      ]
-    },
-    {
-      "symbol": "VICR",
-      "name": "VICR",
-      "label": "VICR · rank 9",
-      "sector": "US Equity Momentum",
-      "sectorLabel": "미국 주식 모멘텀",
-      "themes": [
-        "Momentum",
-        "Factor",
-        "mom_9_1"
-      ],
-      "metrics": {
-        "rank": 9,
-        "signal": 5.821301600269241,
-        "displayWeight": 0.0,
-        "finalWeight": 0.0,
-        "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -420,7 +392,7 @@
     {
       "symbol": "TE",
       "name": "TE",
-      "label": "TE · rank 10",
+      "label": "TE · rank 9",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -429,12 +401,12 @@
         "mom_9_1"
       ],
       "metrics": {
-        "rank": 10,
-        "signal": 5.765432102399307,
+        "rank": 9,
+        "signal": 5.720496645147046,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -447,7 +419,34 @@
     {
       "symbol": "WDC",
       "name": "WDC",
-      "label": "WDC · rank 11",
+      "label": "WDC · rank 10",
+      "sector": "US Equity Momentum",
+      "sectorLabel": "미국 주식 모멘텀",
+      "themes": [
+        "Momentum",
+        "Factor",
+        "mom_9_1"
+      ],
+      "metrics": {
+        "rank": 10,
+        "signal": 5.680224563300086,
+        "displayWeight": 0.0,
+        "finalWeight": 0.0,
+        "factor": "mom_9_1",
+        "dataAsOf": "2026-06-29"
+      },
+      "signals": [
+        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
+      ],
+      "warnings": [
+        "complete_requested_price_coverage",
+        "point_in_time_universe"
+      ]
+    },
+    {
+      "symbol": "VICR",
+      "name": "VICR",
+      "label": "VICR · rank 11",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -457,11 +456,11 @@
       ],
       "metrics": {
         "rank": 11,
-        "signal": 5.714202804278553,
+        "signal": 5.6412348570177215,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -484,38 +483,11 @@
       ],
       "metrics": {
         "rank": 12,
-        "signal": 5.414811888840207,
+        "signal": 5.232156585300077,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
-      },
-      "signals": [
-        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
-      ],
-      "warnings": [
-        "complete_requested_price_coverage",
-        "point_in_time_universe"
-      ]
-    },
-    {
-      "symbol": "MXL",
-      "name": "MXL",
-      "label": "MXL · rank 13",
-      "sector": "US Equity Momentum",
-      "sectorLabel": "미국 주식 모멘텀",
-      "themes": [
-        "Momentum",
-        "Factor",
-        "mom_9_1"
-      ],
-      "metrics": {
-        "rank": 13,
-        "signal": 5.079374839214402,
-        "displayWeight": 0.0,
-        "finalWeight": 0.0,
-        "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -528,7 +500,34 @@
     {
       "symbol": "BE",
       "name": "BE",
-      "label": "BE · rank 14",
+      "label": "BE · rank 13",
+      "sector": "US Equity Momentum",
+      "sectorLabel": "미국 주식 모멘텀",
+      "themes": [
+        "Momentum",
+        "Factor",
+        "mom_9_1"
+      ],
+      "metrics": {
+        "rank": 13,
+        "signal": 4.807168957560231,
+        "displayWeight": 0.0,
+        "finalWeight": 0.0,
+        "factor": "mom_9_1",
+        "dataAsOf": "2026-06-29"
+      },
+      "signals": [
+        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
+      ],
+      "warnings": [
+        "complete_requested_price_coverage",
+        "point_in_time_universe"
+      ]
+    },
+    {
+      "symbol": "MXL",
+      "name": "MXL",
+      "label": "MXL · rank 14",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -538,11 +537,11 @@
       ],
       "metrics": {
         "rank": 14,
-        "signal": 4.953394060326792,
+        "signal": 4.677119978768839,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -565,38 +564,11 @@
       ],
       "metrics": {
         "rank": 15,
-        "signal": 4.348923117102461,
+        "signal": 4.3701233472932834,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
-      },
-      "signals": [
-        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
-      ],
-      "warnings": [
-        "complete_requested_price_coverage",
-        "point_in_time_universe"
-      ]
-    },
-    {
-      "symbol": "HUT",
-      "name": "HUT",
-      "label": "HUT · rank 16",
-      "sector": "US Equity Momentum",
-      "sectorLabel": "미국 주식 모멘텀",
-      "themes": [
-        "Momentum",
-        "Factor",
-        "mom_9_1"
-      ],
-      "metrics": {
-        "rank": 16,
-        "signal": 4.0166309408214405,
-        "displayWeight": 0.0,
-        "finalWeight": 0.0,
-        "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -609,7 +581,7 @@
     {
       "symbol": "INTC",
       "name": "INTC",
-      "label": "INTC · rank 17",
+      "label": "INTC · rank 16",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -618,12 +590,12 @@
         "mom_9_1"
       ],
       "metrics": {
-        "rank": 17,
-        "signal": 3.960081483800744,
+        "rank": 16,
+        "signal": 3.9646816220029857,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -636,7 +608,34 @@
     {
       "symbol": "DOCN",
       "name": "DOCN",
-      "label": "DOCN · rank 18",
+      "label": "DOCN · rank 17",
+      "sector": "US Equity Momentum",
+      "sectorLabel": "미국 주식 모멘텀",
+      "themes": [
+        "Momentum",
+        "Factor",
+        "mom_9_1"
+      ],
+      "metrics": {
+        "rank": 17,
+        "signal": 3.9353476372084177,
+        "displayWeight": 0.0,
+        "finalWeight": 0.0,
+        "factor": "mom_9_1",
+        "dataAsOf": "2026-06-29"
+      },
+      "signals": [
+        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
+      ],
+      "warnings": [
+        "complete_requested_price_coverage",
+        "point_in_time_universe"
+      ]
+    },
+    {
+      "symbol": "ALM",
+      "name": "ALM",
+      "label": "ALM · rank 18",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -646,11 +645,38 @@
       ],
       "metrics": {
         "rank": 18,
-        "signal": 3.8397682927345667,
+        "signal": 3.836448539301908,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
+      },
+      "signals": [
+        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
+      ],
+      "warnings": [
+        "complete_requested_price_coverage",
+        "point_in_time_universe"
+      ]
+    },
+    {
+      "symbol": "HUT",
+      "name": "HUT",
+      "label": "HUT · rank 19",
+      "sector": "US Equity Momentum",
+      "sectorLabel": "미국 주식 모멘텀",
+      "themes": [
+        "Momentum",
+        "Factor",
+        "mom_9_1"
+      ],
+      "metrics": {
+        "rank": 19,
+        "signal": 3.7950597682530907,
+        "displayWeight": 0.0,
+        "finalWeight": 0.0,
+        "factor": "mom_9_1",
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -663,34 +689,7 @@
     {
       "symbol": "TSEM",
       "name": "TSEM",
-      "label": "TSEM · rank 19",
-      "sector": "US Equity Momentum",
-      "sectorLabel": "미국 주식 모멘텀",
-      "themes": [
-        "Momentum",
-        "Factor",
-        "mom_9_1"
-      ],
-      "metrics": {
-        "rank": 19,
-        "signal": 3.825256383836604,
-        "displayWeight": 0.0,
-        "finalWeight": 0.0,
-        "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
-      },
-      "signals": [
-        "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
-      ],
-      "warnings": [
-        "complete_requested_price_coverage",
-        "point_in_time_universe"
-      ]
-    },
-    {
-      "symbol": "VIAV",
-      "name": "VIAV",
-      "label": "VIAV · rank 20",
+      "label": "TSEM · rank 20",
       "sector": "US Equity Momentum",
       "sectorLabel": "미국 주식 모멘텀",
       "themes": [
@@ -700,11 +699,11 @@
       ],
       "metrics": {
         "rank": 20,
-        "signal": 3.8105170134032313,
+        "signal": 3.591666666666667,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
-        "dataAsOf": "2026-06-26"
+        "dataAsOf": "2026-06-29"
       },
       "signals": [
         "모멘텀 신호는 research-only 점검 출발점이며 매매 지시가 아닙니다."
@@ -733,6 +732,6 @@
   },
   "payload": {
     "summaryBytes": null,
-    "detailBytes": 4791550
+    "detailBytes": 4803369
   }
 }
