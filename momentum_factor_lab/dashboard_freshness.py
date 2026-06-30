@@ -9,7 +9,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
-DEFAULT_CUTOFF_HOUR_KST = 8
+DEFAULT_CUTOFF_HOUR_KST = 6
+DEFAULT_CUTOFF_MINUTE_KST = 30
 
 
 @dataclass(frozen=True)
@@ -42,17 +43,18 @@ def decide_dashboard_freshness(
     event_name: str,
     now: datetime | None = None,
     cutoff_hour_kst: int = DEFAULT_CUTOFF_HOUR_KST,
+    cutoff_minute_kst: int = DEFAULT_CUTOFF_MINUTE_KST,
 ) -> DashboardFreshnessDecision:
     """Return whether a scheduled fallback run should skip duplicate work.
 
     Manual dispatches never skip. Scheduled retries skip only when the dashboard
-    both executed after the Korean 08:00 cutoff and already covers the expected
+    both executed after the Korean 06:30 cutoff and already covers the expected
     latest U.S. close date. This prevents an early provider-lagged run from
     suppressing later retry windows for the same Korean calendar day.
     """
 
     now_kst = _to_kst(now) if now else datetime.now(KST)
-    cutoff_kst = datetime.combine(now_kst.date(), time(hour=cutoff_hour_kst), tzinfo=KST)
+    cutoff_kst = datetime.combine(now_kst.date(), time(hour=cutoff_hour_kst, minute=cutoff_minute_kst), tzinfo=KST)
     latest_run_kst = latest_dashboard_run_kst(dashboard)
     latest_data_as_of = latest_dashboard_data_as_of(dashboard)
     target_data_as_of = expected_recent_us_close_date(now_kst)
@@ -60,7 +62,7 @@ def decide_dashboard_freshness(
     data_covers_target = latest_data_as_of is not None and latest_data_as_of >= target_data_as_of
     skip = event_name == "schedule" and already_executed_after_cutoff and data_covers_target
     if skip:
-        reason = "scheduled fallback skipped because dashboard already executed after 08:00 KST with target data_as_of"
+        reason = "scheduled fallback skipped because dashboard already executed after 06:30 KST with target data_as_of"
     elif event_name == "schedule" and already_executed_after_cutoff and not data_covers_target:
         reason = "dashboard retry required because latest execution did not reach target data_as_of"
     else:

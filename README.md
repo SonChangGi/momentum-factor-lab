@@ -69,10 +69,10 @@ python -m momentum_factor_lab.cli scheduled-dashboard \
 ```
 
 The committed workflow `.github/workflows/daily-dashboard.yml` runs on a
-reviewed schedule again: 09:00 KST Tue-Sat after the prior U.S. regular session,
+reviewed schedule again: 06:30 KST Tue-Sat after the prior U.S. regular session,
 plus explicit `workflow_dispatch` when an operator wants to rerun it. The
 lightweight watchdog workflow `.github/workflows/daily-dashboard-watchdog.yml`
-runs freshness-gated fallback checks at 10:00/12:00/15:00/18:00 KST Tue-Sat and
+runs freshness-gated fallback checks at 08:30/10:30/12:30 KST Tue-Sat and
 dispatches the main `daily-dashboard.yml` workflow only when the committed
 dashboard is stale. Both paths preserve the freshness check and monotonic publication safety gate
 before replacing `docs/data/dashboard.json`. The pipeline rebuilds `docs/`
@@ -95,7 +95,7 @@ price collection, factor backtest, stock/weight calculation,
 gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main
 ```
 
-Manual runs never skip because of the 08:00 KST freshness guard, but
+Manual runs never skip because of the 06:30 KST freshness guard, but
 they can still finish with no `docs/` diff when providers have not published a
 newer close, the regenerated dashboard is identical, or the monotonic publication
 gate rejects a collapsed candidate. In that case the workflow exits without a

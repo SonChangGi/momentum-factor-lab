@@ -1938,14 +1938,14 @@ def test_daily_dashboard_workflow_has_scheduled_refresh_and_watchdog_fallbacks()
 
     assert "workflow_dispatch:" in workflow
     assert "schedule:" in workflow
-    assert 'cron: "0 0 * * 2-6"' in workflow
-    assert "09:00 KST Tue-Sat" in workflow
+    assert 'cron: "30 21 * * 1-5"' in workflow
+    assert "06:30 KST Tue-Sat" in workflow
     assert "concurrency:" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "Refresh checkout to latest branch head" in workflow
     assert "dashboard_freshness" in workflow
     assert "continue-on-error: true" in workflow
-    assert "Remote branch already has a dashboard execution after 08:00 KST" in workflow
+    assert "Remote branch already has a dashboard execution after 06:30 KST" in workflow
     assert "dashboard_monotonic" in workflow
     assert "--min-latest-output-rows" not in workflow
     assert "Push attempt ${attempt} failed" in workflow
@@ -1954,7 +1954,7 @@ def test_daily_dashboard_workflow_has_scheduled_refresh_and_watchdog_fallbacks()
     assert "Daily Momentum Dashboard Watchdog" in watchdog
     assert "workflow_dispatch:" in watchdog
     assert "schedule:" in watchdog
-    for cron in ['cron: "0 1 * * 2-6"', 'cron: "0 3 * * 2-6"', 'cron: "0 6 * * 2-6"', 'cron: "0 9 * * 2-6"']:
+    for cron in ['cron: "30 23 * * 1-5"', 'cron: "30 1 * * 2-6"', 'cron: "30 3 * * 2-6"']:
         assert cron in watchdog
     assert "freshness-gated fallback checks" in watchdog
     assert "actions: write" in watchdog
@@ -1965,8 +1965,8 @@ def test_daily_dashboard_workflow_has_scheduled_refresh_and_watchdog_fallbacks()
     assert "gh workflow run daily-dashboard.yml" in watchdog
     assert "steps.freshness.outputs.skip != 'true'" in watchdog
     assert "daily-dashboard-watchdog.yml" in readme
-    assert "09:00 KST Tue-Sat" in readme
-    assert "10:00/12:00/15:00/18:00 KST Tue-Sat" in readme
+    assert "06:30 KST Tue-Sat" in readme
+    assert "08:30/10:30/12:30 KST Tue-Sat" in readme
     assert "freshness-gated fallback checks" in readme
     assert "publication safety gate" in readme
     assert "workflow_dispatch" in readme

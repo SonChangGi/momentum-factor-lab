@@ -11,7 +11,7 @@
   "status": {
     "state": "degraded",
     "label": "Research signals (not tradable)",
-    "cadence": "scheduled 09:00 KST Tue-Sat with freshness-gated watchdog fallbacks; workflow_dispatch on demand",
+    "cadence": "scheduled 06:30 KST Tue-Sat with 08:30/10:30/12:30 KST freshness-gated watchdog fallbacks; workflow_dispatch on demand",
     "expectedFreshnessDays": 7,
     "degradedReasons": [
       "complete_requested_price_coverage",

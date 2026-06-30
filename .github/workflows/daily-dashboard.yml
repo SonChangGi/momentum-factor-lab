@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     # Manual dispatch remains available for reviewed reruns.
   schedule:
-    # 09:00 KST Tue-Sat: primary refresh after the prior U.S. regular session.
-    - cron: "0 0 * * 2-6"
+    # 06:30 KST Tue-Sat: first refresh after the prior U.S. regular session close settles.
+    - cron: "30 21 * * 1-5"
 
 concurrency:
   group: daily-momentum-dashboard-${{ github.ref }}
@@ -84,7 +84,7 @@ jobs:
                   --data-path "${remote_dashboard}" > "${precommit_freshness}" || true
                 cat "${precommit_freshness}"
                 if grep -q '^skip=true$' "${precommit_freshness}"; then
-                  echo "Remote branch already has a dashboard execution after 08:00 KST; skipping duplicate commit."
+                  echo "Remote branch already has a dashboard execution after 06:30 KST; skipping duplicate commit."
                   exit 0
                 fi
               fi

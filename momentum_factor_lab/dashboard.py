@@ -5065,29 +5065,40 @@ function renderDailyWeightsAnalysis() {
   setText(
     '#daily-weight-analysis-note',
     sourceKind === 'historical_holdings'
-      ? `${date || '-'} 이하 최근 ${dateCount}개 보유일의 선택 팩터 ${factor || '-'} 비중입니다. 종목을 열로 배치해 날짜별 저장 비중과 현재 입력 시나리오 비중을 바로 비교합니다.`
+      ? `${date || '-'} 이하 최근 ${dateCount}개 보유일의 선택 팩터 ${factor || '-'} 비중입니다. 리밸런싱 빈도와 비용 입력은 저장 보유 비중 자체가 아니라 현재 입력 시나리오/성과 프록시 비교에만 반영됩니다. 종목을 열로 배치해 날짜별 저장 비중과 현재 입력 시나리오 비중을 바로 비교합니다.`
       : snapshot
       ? `${snapshot.date || date || '-'} 기준 선택 팩터 ${factor || '-'}의 ${exactDate ? '정확한' : '가장 가까운'} 보유 비중 스냅샷입니다. 종목 열마다 저장/현재 입력 비중을 함께 표시합니다.`
       : `${date || '-'} 기준 선택 팩터 ${factor || '-'}의 저장 보유 비중이 없어 점수 스냅샷 기반 시나리오 비중만 종목별로 표시합니다.`,
   );
 
   const table = document.querySelector('#daily-weights-table');
-  const thead = table?.querySelector('thead');
-  const tbody = table?.querySelector('tbody');
+  const thead = document.querySelector('#daily-weights-table thead');
+  const tbody = document.querySelector('#daily-weights-table tbody');
   if (!table || !thead || !tbody) return;
 
   tbody.replaceChildren();
-  const symbols = [...new Set(rows.map((row) => row.symbol).filter(Boolean))].slice(0, Math.max(1, Math.min(topN, 24)));
+  const scenario = currentWeightedHoldings();
+  const scenarioRows = Array.isArray(scenario.weighted) ? scenario.weighted : [];
+  const scenarioBySymbol = new Map(scenarioRows.map((row) => [String(row.symbol), row]));
+  const symbols = [
+    ...new Set([
+      ...rows.map((row) => row.symbol).filter(Boolean),
+      ...scenarioRows.map((row) => row.symbol).filter(Boolean),
+    ]),
+  ].slice(0, Math.max(1, Math.min(topN, 24)));
   const headerRow = document.createElement('tr');
   appendHeaderCell(headerRow, '비중일');
   appendHeaderCell(headerRow, '기간');
-  symbols.forEach((symbol) => appendHeaderCell(headerRow, symbol));
+  symbols.forEach((symbol) => {
+    appendHeaderCell(headerRow, `${symbol} 저장`);
+    appendHeaderCell(headerRow, `${symbol} 현재`);
+  });
   thead.replaceChildren(headerRow);
 
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = Math.max(symbols.length + 2, 3);
+    td.colSpan = Math.max(symbols.length * 2 + 2, 3);
     td.textContent = '선택한 기준일과 팩터에 표시할 일별 투자 비중 데이터가 없습니다.';
     tr.appendChild(td);
     tbody.appendChild(tr);
@@ -5113,7 +5124,7 @@ function renderDailyWeightsAnalysis() {
       const tr = document.createElement('tr');
       appendCell(tr, group.date);
       appendCell(tr, group.windowLabel);
-      symbols.forEach((symbol) => appendWeightMatrixCell(tr, group.bySymbol.get(symbol)));
+      symbols.forEach((symbol) => appendWeightMatrixCells(tr, group.bySymbol.get(symbol), scenarioBySymbol.get(String(symbol))));
       tbody.appendChild(tr);
     });
 }
@@ -5125,25 +5136,39 @@ function appendHeaderCell(tr, text) {
   tr.appendChild(th);
 }
 
-function appendWeightMatrixCell(tr, row) {
-  const td = document.createElement('td');
-  td.className = 'weight-matrix-cell';
-  if (!row) {
-    td.textContent = '-';
-    tr.appendChild(td);
-    return;
+function appendWeightMatrixCells(tr, row, scenarioRow = null) {
+  const actual = document.createElement('td');
+  actual.className = 'weight-matrix-cell';
+  if (row && row.actualWeight !== null) {
+    const primary = document.createElement('strong');
+    primary.textContent = formatPercent(row.actualWeight);
+    const secondary = document.createElement('small');
+    secondary.textContent = row.source || (row.scoreDate ? `신호일 ${row.scoreDate}` : '저장 비중');
+    actual.title = `${row.symbol || ''} ${row.scoreDate ? `신호일 ${row.scoreDate}` : ''}`.trim();
+    actual.append(primary, secondary);
+  } else {
+    actual.textContent = '-';
   }
-  const primary = document.createElement('strong');
-  primary.textContent = row.actualWeight === null ? formatPercent(row.scenarioWeight) : formatPercent(row.actualWeight);
-  const secondary = document.createElement('small');
-  const parts = [];
-  if (row.actualWeight !== null) parts.push(`현재 ${formatPercent(row.scenarioWeight)}`);
-  if (row.deltaWeight !== null) parts.push(`차이 ${formatPercent(row.deltaWeight)}`);
-  if (Number.isFinite(Number(row.score))) parts.push(`신호 ${formatNumber(row.score)}`);
-  secondary.textContent = parts.join(' · ') || '시나리오 비중';
-  td.title = `${row.symbol || ''} ${row.scoreDate ? `신호일 ${row.scoreDate}` : ''}`.trim();
-  td.append(primary, secondary);
-  tr.appendChild(td);
+  tr.appendChild(actual);
+
+  const scenario = document.createElement('td');
+  scenario.className = 'weight-matrix-cell';
+  const scenarioWeight = row ? Number(row.scenarioWeight) : Number(scenarioRow?.display_weight);
+  if (Number.isFinite(scenarioWeight) && scenarioWeight > 0) {
+    const primary = document.createElement('strong');
+    primary.textContent = formatPercent(scenarioWeight);
+    const secondary = document.createElement('small');
+    const parts = [];
+    if (row && row.deltaWeight !== null) parts.push(`차이 ${formatPercent(row.deltaWeight)}`);
+    const score = row?.score ?? scenarioRow?.score;
+    if (Number.isFinite(Number(score))) parts.push(`신호 ${formatNumber(score)}`);
+    if (!row && scenarioRow) parts.push('현재 입력 시나리오');
+    secondary.textContent = parts.join(' · ') || '시나리오 비중';
+    scenario.append(primary, secondary);
+  } else {
+    scenario.textContent = '-';
+  }
+  tr.appendChild(scenario);
 }
 
 function parseSelectedFactorMethod(factor, option = {}) {
@@ -5690,7 +5715,7 @@ def build_public_summary(combined_payload: dict[str, Any]) -> dict[str, Any]:
         "status": {
             "state": state,
             "label": summary.get("recommendation_output_label") or "Research signals",
-            "cadence": "scheduled 09:00 KST Tue-Sat with freshness-gated watchdog fallbacks; workflow_dispatch on demand",
+            "cadence": "scheduled 06:30 KST Tue-Sat with 08:30/10:30/12:30 KST freshness-gated watchdog fallbacks; workflow_dispatch on demand",
             "expectedFreshnessDays": 7,
             "degradedReasons": [str(item) for item in blockers],
         },
