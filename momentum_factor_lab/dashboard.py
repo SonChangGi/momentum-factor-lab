@@ -42,7 +42,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260629-readability-methods"
+ASSET_VERSION = "20260701-visual-ralph"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -62,8 +62,8 @@ HTML_TEMPLATE = """<!doctype html>
       <p class="eyebrow">모멘텀 팩터 랩</p>
       <h1>{title}</h1>
       <p class="hero-copy">
-        매일 미국 종가 기준으로 업데이트되는 모멘텀 팩터 비교 화면입니다.
-        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 모형 비중을 한 화면에서 비교합니다.
+        미국 종가 기준 모멘텀 팩터를 매일 비교합니다.
+        최고 팩터, 상위 종목, 신호, 표시용 비중을 한 화면에서 확인합니다.
       </p>
       <div class="hero-actions">
         <a class="button hero-link" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="투자 리서치 프로젝트 통합 대시보드로 돌아가기">← 통합 대시보드로 돌아가기</a>
