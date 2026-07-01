@@ -42,7 +42,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260701-visual-ralph"
+ASSET_VERSION = "20260701-theme-balance"
 
 
 HTML_TEMPLATE = """<!doctype html>
