@@ -42,7 +42,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260701-ralph-table-v5d"
+ASSET_VERSION = "20260702-light-system-v6"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -63,7 +63,7 @@ HTML_TEMPLATE = """<!doctype html>
       <h1>{title}</h1>
       <p class="hero-copy">
         미국 종가 기준 모멘텀 팩터를 매일 비교합니다.
-        최고 팩터, 상위 종목, 신호, 표시용 비중을 한 화면에서 확인합니다.
+        핵심 팩터, 상위 종목, 표시용 비중을 먼저 보고 필요한 표로 내려갑니다.
       </p>
       <div class="hero-actions">
         <a class="button hero-link" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="투자 리서치 프로젝트 통합 대시보드로 돌아가기">← 통합 대시보드로 돌아가기</a>
@@ -422,7 +422,9 @@ HTML_TEMPLATE = """<!doctype html>
       </div>
     </section>
 
-    <section class="panel two-col">
+    <details class="panel two-col">
+      <summary>대시보드 설명</summary>
+      <div class="details-body">
       <div>
         <p class="eyebrow">최신 팩터 랭킹</p>
         <h2>기준일별 기간 수익률 상위 팩터</h2>
@@ -446,9 +448,12 @@ HTML_TEMPLATE = """<!doctype html>
           <li>데이터 품질, 유동성, 생존편향, 무료 데이터 한계는 기존 리포트와 동일하게 적용됩니다.</li>
         </ul>
       </div>
-    </section>
+          </div>
+    </details>
 
-    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
+    <details class="manual-update" aria-label="수동 최신 데이터 업데이트">
+      <summary>수동 업데이트</summary>
+      <div class="details-body">
       <div>
         <p class="eyebrow">수동 업데이트</p>
         <h2>검토 후 그 시점의 최신 데이터로 수동 실행</h2>
@@ -471,30 +476,37 @@ HTML_TEMPLATE = """<!doctype html>
         <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
         <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
       </div>
-    </section>
+          </div>
+    </details>
 
-    <section class="notice moved-notice">
+    <details class="notice moved-notice">
+      <summary>운영 고지</summary>
+      <div class="details-body">
       <strong>운영 고지:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
       다음 수동 실행 입력값을 저장하지 않습니다. 검토된 live-run 입력값은 저장소의
       <code>.github/momentum-dashboard-config.json</code>에서 관리됩니다.
       2026-06-20 데이터 축소 롤백 이후 자동 예약 실행과 watchdog 예약은 중지되어 있으며,
       새 데이터 반영은 <code>workflow_dispatch</code> 수동 실행 후 publication safety gate를 통과해야 합니다.
-    </section>
+          </div>
+    </details>
 
-    <section class="disclaimer">
+    <details class="disclaimer">
+      <summary>주의 및 한계</summary>
+      <div class="details-body">
       <h2>주의 및 한계</h2>
       <p>
         본 대시보드는 연구/의사결정 보조용이며 개인화된 투자, 세무, 법률 또는 매매 조언이 아닙니다.
         무료/공개 데이터의 누락, 조정가격 차이, 생존편향, 유동성/용량 한계가 있을 수 있습니다.
       </p>
-    </section>
+          </div>
+    </details>
   </main>
 
   <footer>
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v={asset_version}"></script>
+  <script src="assets/dashboard.js?v=20260701-ralph-table-v5d"></script>
   <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
     <a href="#top" aria-label="맨 위로 이동">↑ 위</a>
     <a href="#page-bottom" aria-label="맨 아래로 이동">↓ 아래</a>
