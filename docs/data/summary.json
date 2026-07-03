@@ -3,7 +3,7 @@
   "contract": "quant-research-summary",
   "projectId": "momentum",
   "projectName": "모멘텀 팩터 랩",
-  "generatedAt": "2026-07-02T23:09:23+00:00",
+  "generatedAt": "2026-07-03T23:03:54+00:00",
   "dataAsOf": "2026-07-02",
   "timezone": "UTC",
   "detailUrl": "https://sonchanggi.github.io/momentum-factor-lab/",
@@ -22,12 +22,12 @@
     "runCount": 30,
     "candidateUniverseSize": 2865,
     "eligiblePriceUniverseSize": 2360,
-    "liquidityEligibleUniverseSize": 2185,
+    "liquidityEligibleUniverseSize": 2189,
     "factorCount": 62,
     "quality": {
       "candidate_universe_size": 2865,
       "eligible_price_universe_size": 2360,
-      "liquidity_eligible_universe_size": 2185,
+      "liquidity_eligible_universe_size": 2189,
       "fetched_price_symbol_count": 2362,
       "excluded_symbols": 505,
       "provider": "yfinance-free-public-data+yahoo-chart-fallback",
@@ -37,32 +37,32 @@
       "price_coverage_ratio": 0.9993019197207679,
       "model_price_universe_ratio": 0.8244328097731239,
       "eligible_price_ratio": 0.8237347294938918,
-      "liquidity_eligible_ratio": 0.7626527050610821,
+      "liquidity_eligible_ratio": 0.7640488656195462,
       "excluded_ratio": 0.1762652705061082,
       "price_quality_rows": 2867,
-      "data_quality_pass_count": 2188,
-      "data_quality_pass_ratio": 0.7631670735960935,
+      "data_quality_pass_count": 2192,
+      "data_quality_pass_ratio": 0.7645622602023021,
       "fresh_price_rows": 2856,
       "fresh_price_ratio": 0.9961632368329264,
       "data_quality_status_counts": {
-        "pass": 2186,
+        "pass": 2190,
         "extreme_return_anomaly": 226,
+        "below_liquidity_floor": 158,
         "insufficient_history": 144,
-        "below_liquidity_floor": 135,
         "below_minimum_price": 124,
-        "insufficient_liquidity_observations": 39,
+        "insufficient_liquidity_observations": 12,
         "stale_price": 9,
         "benchmark_comparator_only": 2,
         "missing_price": 2
       },
       "price_source_counts": {
-        "yfinance-adjusted-daily": 2617,
-        "yahoo-chart-adjusted-daily-fallback": 248
+        "yfinance-adjusted-daily": 2643,
+        "yahoo-chart-adjusted-daily-fallback": 222
       },
       "source_counts": {
-        "yahoo-chart-adjusted-daily-fallback": 250,
-        "nasdaq-latest-close-repair": 250,
-        "stooq-daily-close-fallback": 250,
+        "yahoo-chart-adjusted-daily-fallback": 224,
+        "stooq-daily-close-fallback": 224,
+        "nasdaq-latest-close-repair": 222,
         "yfinance-adjusted-daily": 115,
         "yfinance-fast-info-market-cap": 20,
         "packaged-default-universe": 1,
@@ -82,35 +82,35 @@
         },
         {
           "source": "yahoo-chart-adjusted-daily-fallback",
-          "row_count": 250,
-          "success_rows": 248,
+          "row_count": 224,
+          "success_rows": 222,
           "failed_rows": 2,
           "no_newer_rows": 0,
           "cache_hit_rows": 0,
-          "records_sum": 248.0,
-          "requested_price_symbols_sum": 250.0,
+          "records_sum": 222.0,
+          "requested_price_symbols_sum": 224.0,
           "returned_price_symbols_sum": null
         },
         {
           "source": "nasdaq-latest-close-repair",
-          "row_count": 250,
+          "row_count": 222,
           "success_rows": 0,
-          "failed_rows": 81,
-          "no_newer_rows": 169,
+          "failed_rows": 51,
+          "no_newer_rows": 171,
           "cache_hit_rows": 0,
           "records_sum": 0.0,
-          "requested_price_symbols_sum": 250.0,
+          "requested_price_symbols_sum": 222.0,
           "returned_price_symbols_sum": null
         },
         {
           "source": "stooq-daily-close-fallback",
-          "row_count": 250,
+          "row_count": 224,
           "success_rows": 0,
-          "failed_rows": 250,
+          "failed_rows": 224,
           "no_newer_rows": 0,
           "cache_hit_rows": 0,
           "records_sum": 0.0,
-          "requested_price_symbols_sum": 250.0,
+          "requested_price_symbols_sum": 224.0,
           "returned_price_symbols_sum": null
         },
         {
@@ -732,6 +732,6 @@
   },
   "payload": {
     "summaryBytes": null,
-    "detailBytes": 4830773
+    "detailBytes": 4838411
   }
 }
