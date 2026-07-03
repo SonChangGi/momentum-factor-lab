@@ -1,6 +1,61 @@
 const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
 const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
 
+const THEME_STORAGE_KEY = 'momentum-factor-theme';
+
+function storedTheme() {
+  try {
+    return window.localStorage?.getItem(THEME_STORAGE_KEY);
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveTheme(theme) {
+  try {
+    window.localStorage?.setItem(THEME_STORAGE_KEY, theme);
+  } catch (error) {
+    // Theme persistence is optional; the page still works without localStorage.
+  }
+}
+
+function themeRoot() {
+  return document.documentElement || document.querySelector?.('html') || null;
+}
+
+function currentTheme() {
+  const root = themeRoot();
+  return root?.dataset?.theme || root?.getAttribute?.('data-theme') || 'light';
+}
+
+function applyTheme(theme) {
+  const normalized = theme === 'dark' ? 'dark' : 'light';
+  const root = themeRoot();
+  if (root?.dataset) {
+    root.dataset.theme = normalized;
+  } else if (root?.setAttribute) {
+    root.setAttribute('data-theme', normalized);
+  }
+  const button = document.querySelector('#theme-toggle');
+  if (!button) return;
+  const isDark = normalized === 'dark';
+  button.setAttribute('aria-pressed', String(isDark));
+  button.setAttribute('aria-label', isDark ? '라이트 모드로 전환' : '다크 모드로 전환');
+  const label = typeof button.querySelector === 'function' ? button.querySelector('.theme-toggle-text') : null;
+  if (label) label.textContent = isDark ? '라이트 모드' : '다크 모드';
+}
+
+function bindThemeToggle() {
+  applyTheme(storedTheme() || 'light');
+  const button = document.querySelector('#theme-toggle');
+  if (!button || typeof button.addEventListener !== 'function') return;
+  button.addEventListener('click', () => {
+    const nextTheme = currentTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(nextTheme);
+    saveTheme(nextTheme);
+  });
+}
+
 const FACTOR_METHOD_OVERRIDES = {
   "mom_12_1": {
     "category": "traditional",
@@ -1812,7 +1867,7 @@ function renderFactorReturnChart() {
   const note = document.createElement('div');
   note.className = 'scenario-note';
   const fallbackCount = rows.filter((row) => !row.scenario_adjusted).length;
-  note.textContent = `막대값은 저장된 팩터 누적성과를 현재 입력값의 비중 집중도·리밸런싱·거래비용 가정으로 조정한 브라우저 시나리오/민감도 프록시입니다.${fallbackCount ? ` ${fallbackCount}개 팩터는 필요한 백테스트 시계열이 부족해 원자료 수익률 fallback을 사용했습니다.` : ''}`;
+  note.textContent = `막대값은 저장된 팩터 성과에 현재 입력값을 반영한 브라우저 시나리오/민감도 프록시입니다.${fallbackCount ? ` ${fallbackCount}개 팩터는 원자료 수익률 fallback을 사용했습니다.` : ''}`;
   target.appendChild(note);
   if (!selectedRow) {
     const missingNote = document.createElement('div');
@@ -2553,7 +2608,7 @@ function renderPerformanceMetricsTable(seriesList) {
   const title = document.createElement('h4');
   title.textContent = '기간별 프록시 성과 지표 비교';
   const note = document.createElement('p');
-  note.textContent = '각 기간 카드에서 같은 지표의 선택 팩터·기간 최고 팩터·나스닥 값을 한 줄로 비교합니다. 선택/기간 최고 팩터 값은 새 백엔드 재백테스트가 아니라 저장된 팩터 누적 성과를 현재 입력값의 비중 집중도·리밸런싱·비용 가정으로 조정한 브라우저 프록시입니다. 샤프·변동성·소르티노·칼마·CVaR 산식은 같은 방식으로 적용하고, CVaR은 최악 5% 일간 손실 평균입니다. 실제 일별 구성종목 재매매 결과로 해석하지 마세요.';
+  note.textContent = '각 기간 카드에서 같은 지표를 비교합니다. 선택/기간 최고 팩터 값은 새 백엔드 재백테스트가 아니라 저장된 누적성과에 현재 입력값을 반영한 브라우저 프록시입니다. CVaR은 최악 5% 일간 손실 평균입니다. 실제 일별 구성종목 재매매 결과로 해석하지 마세요.';
   headingText.append(title, note);
   heading.appendChild(headingText);
   target.appendChild(heading);
@@ -2765,10 +2820,10 @@ function renderDailyWeightsAnalysis() {
   setText(
     '#daily-weight-analysis-note',
     sourceKind === 'historical_holdings'
-      ? `${date || '-'} 이하 최근 ${dateCount}개 보유일의 선택 팩터 ${factor || '-'} 비중입니다. 리밸런싱 빈도와 비용 입력은 저장 보유 비중 자체가 아니라 현재 입력 시나리오/성과 프록시 비교에만 반영됩니다. 종목을 열로 배치해 날짜별 저장 비중과 현재 입력 시나리오 비중을 바로 비교합니다.`
+      ? `${date || '-'} 이하 최근 ${dateCount}개 보유일 · ${factor || '-'} 저장 비중과 현재 입력 시나리오 비중입니다. 리밸런싱/비용 입력은 성과 프록시에만 반영됩니다.`
       : snapshot
-      ? `${snapshot.date || date || '-'} 기준 선택 팩터 ${factor || '-'}의 ${exactDate ? '정확한' : '가장 가까운'} 보유 비중 스냅샷입니다. 종목 열마다 저장/현재 입력 비중을 함께 표시합니다.`
-      : `${date || '-'} 기준 선택 팩터 ${factor || '-'}의 저장 보유 비중이 없어 점수 스냅샷 기반 시나리오 비중만 종목별로 표시합니다.`,
+      ? `${snapshot.date || date || '-'} 기준 ${factor || '-'} 보유 비중 스냅샷입니다. 리밸런싱/비용 입력은 성과 프록시에만 반영됩니다.`
+      : `${date || '-'} 기준 저장 보유 비중이 없어 점수 스냅샷 기반 시나리오만 표시합니다. 리밸런싱/비용 입력은 성과 프록시에만 반영됩니다.`,
   );
 
   const table = document.querySelector('#daily-weights-table');
@@ -3013,7 +3068,7 @@ function renderSelectedFactorMethod() {
   setText('#selected-factor-method-badge', `${method.category} · 브라우저 시나리오 설명`);
   setText(
     '#selected-factor-method-summary',
-    `${factor || '-'} 계산법: ${method.score} 현재 화면의 비중/성과 비교는 이 점수 순위를 기반으로 최근 ${params.lookbackMonths}개월, 상위 ${params.topN}개, 종목당 최대 ${formatPercent(params.maxWeight)}, ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 리밸런싱, 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps 가정을 적용한 브라우저 시나리오/민감도 프록시입니다.`,
+    `${factor || '-'}: ${method.score} 화면 비교는 최근 ${params.lookbackMonths}개월, 상위 ${params.topN}개, 종목당 최대 ${formatPercent(params.maxWeight)}, ${rebalanceFrequencyLabel(params.rebalanceFrequency)}, 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps를 적용한 브라우저 시나리오/민감도 프록시입니다.`,
   );
   const steps = document.querySelector('#selected-factor-method-steps');
   if (steps) {
@@ -3027,7 +3082,7 @@ function renderSelectedFactorMethod() {
   }
   setText(
     '#selected-factor-method-note',
-    `${method.caveat} 이 페이지는 서버에서 전체 일별 구성종목을 재백테스트한 결과가 아니라, 저장된 점수/비중 스냅샷과 팩터 누적성과를 현재 입력값으로 다시 해석한 브라우저 시나리오/프록시입니다.`,
+    `${method.caveat} 입력값은 저장된 점수/비중 스냅샷과 팩터 누적성과를 다시 해석합니다.`,
   );
 }
 
@@ -3089,6 +3144,8 @@ function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
     renderAll();
   }, 160);
 }
+
+bindThemeToggle();
 
 bindManualUpdateControls();
 
