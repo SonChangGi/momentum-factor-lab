@@ -3,7 +3,7 @@
   "contract": "quant-research-summary",
   "projectId": "momentum",
   "projectName": "모멘텀 팩터 랩",
-  "generatedAt": "2026-07-03T23:03:54+00:00",
+  "generatedAt": "2026-07-04T01:29:53+00:00",
   "dataAsOf": "2026-07-02",
   "timezone": "UTC",
   "detailUrl": "https://sonchanggi.github.io/momentum-factor-lab/",
@@ -240,7 +240,7 @@
       ],
       "metrics": {
         "rank": 3,
-        "signal": 7.954238746894477,
+        "signal": 7.9542393217583385,
         "displayWeight": 0.0,
         "finalWeight": 0.0,
         "factor": "mom_9_1",
@@ -732,6 +732,6 @@
   },
   "payload": {
     "summaryBytes": null,
-    "detailBytes": 4838411
+    "detailBytes": 4844247
   }
 }
