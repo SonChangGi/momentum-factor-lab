@@ -522,16 +522,15 @@ footer {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 54px;
-  min-height: 38px;
-  padding: 8px 10px;
+  width: 40px;
+  height: 40px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   color: var(--muted-strong);
   background: color-mix(in srgb, var(--panel), transparent 6%);
   box-shadow: var(--shadow-soft);
   text-decoration: none;
-  font-size: .8rem;
+  font-size: 1rem;
   font-weight: 900;
   backdrop-filter: blur(14px);
 }
@@ -578,7 +577,7 @@ footer {
   .status-label, .status-value { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
   .trend-chart, .line-chart { overflow-x: auto; }
   .page-jump-nav { right: 10px; bottom: 10px; gap: 6px; }
-  .page-jump-nav a { min-width: 48px; min-height: 34px; padding: 7px 9px; font-size: .74rem; }
+  .page-jump-nav a { width: 36px; height: 36px; font-size: 1rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

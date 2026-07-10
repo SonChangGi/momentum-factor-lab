@@ -42,7 +42,7 @@ PERIOD_LABELS: dict[str, str] = {
 }
 
 DEFAULT_SITE_TITLE = "모멘텀 팩터 데일리 대시보드"
-ASSET_VERSION = "20260703-light-theme-nav"
+ASSET_VERSION = "20260710-unified-nav"
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -52,7 +52,7 @@ HTML_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
   <title>{title}</title>
-  <link rel="stylesheet" href="assets/styles.css?v=20260703-light-theme-nav" />
+  <link rel="stylesheet" href="assets/styles.css?v={asset_version}" />
 </head>
 <body id="top">
   <nav class="site-nav" aria-label="연결 프로젝트 바로가기">
@@ -64,9 +64,9 @@ HTML_TEMPLATE = """<!doctype html>
       <a href="https://sonchanggi.github.io/best-factor/">Best Factor</a>
       <a href="https://sonchanggi.github.io/etf-tracking/">ETF</a>
       <a href="https://sonchanggi.github.io/sox/">SOX</a>
+      <a href="https://sonchanggi.github.io/quant-dashboard/risk-score/">Risk Score</a>
       <a href="https://sonchanggi.github.io/port/">Port</a>
       <a href="https://sonchanggi.github.io/valuation/">Valuation</a>
-      <a href="https://sonchanggi.github.io/quant-dashboard/risk-score/">Risk Score</a>
     </div>
     <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="다크 모드로 전환">
       <span class="theme-toggle-icon" aria-hidden="true"></span>
@@ -499,10 +499,10 @@ HTML_TEMPLATE = """<!doctype html>
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v=20260703-light-theme-nav"></script>
+  <script src="assets/dashboard.js?v={asset_version}"></script>
   <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
-    <a href="#top" aria-label="맨 위로 이동">위</a>
-    <a href="#page-bottom" aria-label="맨 아래로 이동">아래</a>
+    <a href="#top" aria-label="맨 위로 이동" title="맨 위로">↑</a>
+    <a href="#page-bottom" aria-label="맨 아래로 이동" title="맨 아래로">↓</a>
   </nav>
   <div id="page-bottom" tabindex="-1" aria-hidden="true"></div>
 </body>
@@ -1034,16 +1034,15 @@ footer {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 54px;
-  min-height: 38px;
-  padding: 8px 10px;
+  width: 40px;
+  height: 40px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   color: var(--muted-strong);
   background: color-mix(in srgb, var(--panel), transparent 6%);
   box-shadow: var(--shadow-soft);
   text-decoration: none;
-  font-size: .8rem;
+  font-size: 1rem;
   font-weight: 900;
   backdrop-filter: blur(14px);
 }
@@ -1090,7 +1089,7 @@ footer {
   .status-label, .status-value { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
   .trend-chart, .line-chart { overflow-x: auto; }
   .page-jump-nav { right: 10px; bottom: 10px; gap: 6px; }
-  .page-jump-nav a { min-width: 48px; min-height: 34px; padding: 7px 9px; font-size: .74rem; }
+  .page-jump-nav a { width: 36px; height: 36px; font-size: 1rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
