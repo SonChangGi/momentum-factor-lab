@@ -82,7 +82,9 @@ def test_raw_packaged_universe_resource_is_stock_only_not_runtime_only():
 
 
 def test_sec_company_tickers_exchange_parser():
-    payload = '{"fields":["cik","name","ticker","exchange"],"data":[[1,"Acme Corp","ACME","Nasdaq"]]}'
+    payload = (
+        '{"fields":["cik","name","ticker","exchange"],"data":[[1,"Acme Corp","ACME","Nasdaq"]]}'
+    )
     frame = parse_sec_company_tickers_exchange(payload)
     assert frame.loc[0, "symbol"] == "ACME"
     assert frame.loc[0, "asset_type"] == "stock"
@@ -121,7 +123,20 @@ def test_nasdaq_parser_can_retain_etf_evidence_for_refresh_merge():
 
 
 def test_suffix_endings_do_not_drop_common_equities_and_metadata_excludes_derivatives():
-    for symbol in ["UBER", "PLTR", "SNOW", "DOW", "BKU", "YOU", "ABR", "AUR", "WS", "WSC", "NWSA", "BRK-B"]:
+    for symbol in [
+        "UBER",
+        "PLTR",
+        "SNOW",
+        "DOW",
+        "BKU",
+        "YOU",
+        "ABR",
+        "AUR",
+        "WS",
+        "WSC",
+        "NWSA",
+        "BRK-B",
+    ]:
         assert is_supported_symbol(symbol)
     assert is_excluded_instrument_name("Acme Corp Warrants")
     assert is_excluded_instrument_name("Acme Corp Rights")
@@ -135,7 +150,9 @@ def test_suffix_endings_do_not_drop_common_equities_and_metadata_excludes_deriva
     assert is_excluded_instrument_name("Energy Transfer LP")
     assert not is_excluded_instrument_name("Preferred Bank")
     assert not is_excluded_instrument_name("BlackRock, Inc.")
-    assert not is_excluded_instrument_name("Equity Residential Common Shares of Beneficial Interest")
+    assert not is_excluded_instrument_name(
+        "Equity Residential Common Shares of Beneficial Interest"
+    )
     payload = (
         "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\n"
         "UBER|Uber Technologies Inc. Common Stock|Q|N|N|100|N|N\n"
@@ -171,7 +188,12 @@ def test_public_universe_refresh_combined_output_is_stock_only(monkeypatch, tmp_
             "nasdaqlisted.txt": nasdaq_payload,
             "otherlisted.txt": other_payload,
         }
-        return payloads[cache_name], {"source": url, "status": "fixture", "cache_path": str(tmp_path / cache_name), "retries": 0}
+        return payloads[cache_name], {
+            "source": url,
+            "status": "fixture",
+            "cache_path": str(tmp_path / cache_name),
+            "retries": 0,
+        }
 
     monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
 
@@ -205,7 +227,12 @@ def test_public_universe_refresh_urls_are_https(monkeypatch, tmp_path):
                 "File Creation Time: today"
             ),
         }
-        return payloads[cache_name], {"source": url, "status": "fixture", "cache_path": str(tmp_path / cache_name), "retries": 0}
+        return payloads[cache_name], {
+            "source": url,
+            "status": "fixture",
+            "cache_path": str(tmp_path / cache_name),
+            "retries": 0,
+        }
 
     monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
 
@@ -239,7 +266,10 @@ def test_fetch_text_with_cache_refetches_stale_universe_cache(monkeypatch, tmp_p
     os.utime(cache_path, (old, old))
     fresh_payload = "fresh payload"
 
-    monkeypatch.setattr("momentum_factor_lab.universe.urlopen", lambda request, timeout=30: _FakeResponse(fresh_payload))
+    monkeypatch.setattr(
+        "momentum_factor_lab.universe.urlopen",
+        lambda request, timeout=30: _FakeResponse(fresh_payload),
+    )
 
     text, source = _fetch_text_with_cache(
         "https://example.test/stale.txt",
@@ -303,9 +333,19 @@ def test_public_universe_refresh_records_partial_source_without_pit(monkeypatch,
 
     def fake_fetch(url, cache_dir, cache_name, retry_count, retry_backoff_seconds, user_agent=None):
         if cache_name == "sec_company_tickers_exchange.json":
-            return None, {"source": url, "status": "failed", "error": "HTTP Error 403: Forbidden", "retries": 0}
+            return None, {
+                "source": url,
+                "status": "failed",
+                "error": "HTTP Error 403: Forbidden",
+                "retries": 0,
+            }
         payloads = {"nasdaqlisted.txt": nasdaq_payload, "otherlisted.txt": other_payload}
-        return payloads[cache_name], {"source": url, "status": "fixture", "cache_path": str(tmp_path / cache_name), "retries": 0}
+        return payloads[cache_name], {
+            "source": url,
+            "status": "fixture",
+            "cache_path": str(tmp_path / cache_name),
+            "retries": 0,
+        }
 
     monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
 
@@ -313,7 +353,9 @@ def test_public_universe_refresh_records_partial_source_without_pit(monkeypatch,
 
     assert list(result.frame["symbol"]) == ["AAA", "BBB"]
     assert not result.frame["is_etf"].any()
-    summary = result.data_sources[result.data_sources["source"].eq("public-universe-refresh")].iloc[0]
+    summary = result.data_sources[result.data_sources["source"].eq("public-universe-refresh")].iloc[
+        0
+    ]
     assert summary["status"] == "partial_source_current_universe"
     assert not bool(summary["point_in_time_universe"])
     sec_row = result.data_sources[result.data_sources["status"].eq("failed")].iloc[0]
@@ -343,13 +385,24 @@ def test_public_universe_refresh_surfaces_stale_cache_status(monkeypatch, tmp_pa
             "nasdaqlisted.txt": nasdaq_payload,
             "otherlisted.txt": other_payload,
         }
-        status = "stale_cache_fallback" if cache_name == "sec_company_tickers_exchange.json" else "fixture"
-        return payloads[cache_name], {"source": url, "status": status, "cache_path": str(tmp_path / cache_name), "retries": 0}
+        status = (
+            "stale_cache_fallback"
+            if cache_name == "sec_company_tickers_exchange.json"
+            else "fixture"
+        )
+        return payloads[cache_name], {
+            "source": url,
+            "status": status,
+            "cache_path": str(tmp_path / cache_name),
+            "retries": 0,
+        }
 
     monkeypatch.setattr("momentum_factor_lab.universe._fetch_text_with_cache", fake_fetch)
 
     result = build_public_universe_frame(cache_dir=tmp_path)
 
-    summary = result.data_sources[result.data_sources["source"].eq("public-universe-refresh")].iloc[0]
+    summary = result.data_sources[result.data_sources["source"].eq("public-universe-refresh")].iloc[
+        0
+    ]
     assert summary["status"] == "partial_or_stale_source_current_universe"
     assert "stale_cache_fallback" in set(result.data_sources["status"])

@@ -25,10 +25,9 @@ PUBLIC_UNIVERSE_CACHE_TTL_DAYS = 1
 
 def effective_user_agent(user_agent: str | None = None) -> str:
     return (
-        (user_agent or "").strip()
-        or os.environ.get(SEC_USER_AGENT_ENV, "").strip()
-        or USER_AGENT
+        (user_agent or "").strip() or os.environ.get(SEC_USER_AGENT_ENV, "").strip() or USER_AGENT
     )
+
 
 CORE_STOCK_SAMPLE_SYMBOLS = [
     "AAPL",
@@ -317,7 +316,11 @@ def stock_only_universe_frame(frame: pd.DataFrame) -> pd.DataFrame:
     cleaned = _clean_frame(frame)
     if cleaned.empty:
         return cleaned
-    stock_mask = ~cleaned["is_etf"] & cleaned["asset_type"].ne("etf") & ~cleaned["symbol"].map(is_known_etf_symbol)
+    stock_mask = (
+        ~cleaned["is_etf"]
+        & cleaned["asset_type"].ne("etf")
+        & ~cleaned["symbol"].map(is_known_etf_symbol)
+    )
     return cleaned.loc[stock_mask].reset_index(drop=True)
 
 
@@ -336,7 +339,6 @@ def _load_default_symbols() -> list[str]:
 
 
 DEFAULT_UNIVERSE = _load_default_symbols()
-SAMPLE_UNIVERSE = list(CORE_STOCK_SAMPLE_SYMBOLS)
 
 
 def universe_frame_for_symbols(symbols: list[str] | tuple[str, ...] | str | None) -> pd.DataFrame:
@@ -377,14 +379,22 @@ def parse_sec_company_tickers_exchange(payload: str) -> pd.DataFrame:
     return stock_only_universe_frame(pd.DataFrame(rows))
 
 
-def parse_nasdaq_symbol_directory(payload: str, *, source_name: str, include_etfs: bool = False) -> pd.DataFrame:
-    lines = [line for line in payload.splitlines() if "|" in line and not line.startswith("File Creation Time")]
+def parse_nasdaq_symbol_directory(
+    payload: str, *, source_name: str, include_etfs: bool = False
+) -> pd.DataFrame:
+    lines = [
+        line
+        for line in payload.splitlines()
+        if "|" in line and not line.startswith("File Creation Time")
+    ]
     if not lines:
         return pd.DataFrame(columns=_base_columns())
     reader = csv.DictReader(lines, delimiter="|")
     rows = []
     for row in reader:
-        symbol = normalize_symbol(row.get("Symbol") or row.get("ACT Symbol") or row.get("NASDAQ Symbol") or "")
+        symbol = normalize_symbol(
+            row.get("Symbol") or row.get("ACT Symbol") or row.get("NASDAQ Symbol") or ""
+        )
         if row.get("Test Issue", "N").strip().upper() == "Y":
             continue
         is_etf = row.get("ETF", "N").strip().upper() == "Y"
@@ -435,7 +445,9 @@ def _fetch_text_with_cache(
     last_error = None
     for attempt in range(retry_count + 1):
         try:
-            with urlopen(Request(url, headers={"User-Agent": effective_user_agent(user_agent)}), timeout=30) as response:
+            with urlopen(
+                Request(url, headers={"User-Agent": effective_user_agent(user_agent)}), timeout=30
+            ) as response:
                 text = response.read().decode("utf-8", errors="replace")
             if cache_path is not None:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -487,7 +499,11 @@ def build_public_universe_frame(
     source_rows: list[dict[str, object]] = []
     request_user_agent = effective_user_agent(user_agent)
     fetches = [
-        (SEC_COMPANY_TICKERS_EXCHANGE_URL, "sec_company_tickers_exchange.json", parse_sec_company_tickers_exchange),
+        (
+            SEC_COMPANY_TICKERS_EXCHANGE_URL,
+            "sec_company_tickers_exchange.json",
+            parse_sec_company_tickers_exchange,
+        ),
         (
             NASDAQ_LISTED_URL,
             "nasdaqlisted.txt",
@@ -508,7 +524,11 @@ def build_public_universe_frame(
         ),
     ]
     for url, cache_name, parser in fetches:
-        fetch_kwargs = {"user_agent": request_user_agent} if "user_agent" in inspect.signature(_fetch_text_with_cache).parameters else {}
+        fetch_kwargs = (
+            {"user_agent": request_user_agent}
+            if "user_agent" in inspect.signature(_fetch_text_with_cache).parameters
+            else {}
+        )
         text, source = _fetch_text_with_cache(
             url,
             cache_dir,
@@ -554,7 +574,11 @@ def build_public_universe_frame(
     failed = "failed" in statuses
     stale = "stale_cache_fallback" in statuses
     if failed or stale:
-        summary_status = "partial_or_stale_source_current_universe" if stale else "partial_source_current_universe"
+        summary_status = (
+            "partial_or_stale_source_current_universe"
+            if stale
+            else "partial_source_current_universe"
+        )
     else:
         summary_status = "loaded_current_universe"
     summary = {

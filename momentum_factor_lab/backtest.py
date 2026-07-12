@@ -6,211 +6,946 @@ import numpy as np
 import pandas as pd
 
 from .config import RunConfig
-from .portfolio import balanced_weights
+from .portfolio import TargetAllocation, construct_target_allocation
+
+
+ATTRIBUTION_METHOD = "frozen_realized_share_sleeve_contribution"
+ATTRIBUTION_VERSION = "1"
+ATTRIBUTION_RESIDUAL_TOLERANCE = 1e-10
+
+
+@dataclass(frozen=True, slots=True)
+class ContributionEvent:
+    symbol: str
+    interval_start: pd.Timestamp | None
+    date: pd.Timestamp
+    return_interval_sessions: int
+    contribution: float
+    start_weight: float
+    security_return: float
+    portfolio_return: float
+
+    @property
+    def absolute_contribution(self) -> float:
+        return abs(self.contribution)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "intervalStart": (
+                self.interval_start.date().isoformat() if self.interval_start is not None else None
+            ),
+            "date": self.date.date().isoformat(),
+            "returnIntervalSessions": self.return_interval_sessions,
+            "contribution": self.contribution,
+            "absoluteContribution": self.absolute_contribution,
+            "startWeight": self.start_weight,
+            "securityReturn": self.security_return,
+            "portfolioReturn": self.portfolio_return,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityContributionSummary:
+    symbol: str
+    signed_contribution: float
+    absolute_contribution: float
+    absolute_contribution_share: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "signedContribution": self.signed_contribution,
+            "absoluteContribution": self.absolute_contribution,
+            "absoluteContributionShare": self.absolute_contribution_share,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LeaveOneSecuritySensitivity:
+    symbol: str
+    base_cagr: float
+    leave_one_cagr: float
+    cagr_delta: float
+    absolute_cagr_delta: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "method": "frozen_realized_contribution_deletion",
+            "baseCagr": self.base_cagr,
+            "leaveOneCagr": self.leave_one_cagr,
+            "cagrDelta": self.cagr_delta,
+            "absoluteCagrDelta": self.absolute_cagr_delta,
+            "reoptimized": False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContributionDiagnostics:
+    attribution_method: str
+    attribution_version: str
+    complete: bool
+    reason: str | None
+    evaluation_start: pd.Timestamp | None
+    evaluation_end: pd.Timestamp | None
+    active_calendar_observations: int
+    observed_return_count: int
+    max_exact_single_session_security_contribution: ContributionEvent | None
+    max_observed_interval_security_contribution: ContributionEvent | None
+    largest_absolute_contribution_security: SecurityContributionSummary | None
+    total_absolute_security_contribution: float
+    absolute_contribution_hhi: float
+    max_leave_one_security: LeaveOneSecuritySensitivity | None
+    top_leave_one_security: tuple[LeaveOneSecuritySensitivity, ...]
+    attribution_max_residual: float
+
+    @property
+    def max_abs_security_day_contribution(self) -> float:
+        event = self.max_exact_single_session_security_contribution
+        return event.absolute_contribution if event is not None else 0.0
+
+    @property
+    def max_security_absolute_contribution_share(self) -> float:
+        summary = self.largest_absolute_contribution_security
+        return summary.absolute_contribution_share if summary is not None else 0.0
+
+    @property
+    def max_leave_one_security_cagr_delta(self) -> float:
+        sensitivity = self.max_leave_one_security
+        return sensitivity.absolute_cagr_delta if sensitivity is not None else 0.0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "attributionMethod": self.attribution_method,
+            "attributionVersion": self.attribution_version,
+            "complete": self.complete,
+            "reason": self.reason,
+            "evaluationStart": (
+                self.evaluation_start.date().isoformat()
+                if self.evaluation_start is not None
+                else None
+            ),
+            "evaluationEnd": (
+                self.evaluation_end.date().isoformat() if self.evaluation_end is not None else None
+            ),
+            "activeCalendarObservations": self.active_calendar_observations,
+            "observedReturnCount": self.observed_return_count,
+            "maxAbsSecurityDayContribution": self.max_abs_security_day_contribution,
+            "maxExactSingleSessionSecurityContribution": (
+                self.max_exact_single_session_security_contribution.to_dict()
+                if self.max_exact_single_session_security_contribution is not None
+                else None
+            ),
+            "maxObservedIntervalSecurityContribution": (
+                self.max_observed_interval_security_contribution.to_dict()
+                if self.max_observed_interval_security_contribution is not None
+                else None
+            ),
+            "largestAbsoluteContributionSecurity": (
+                self.largest_absolute_contribution_security.to_dict()
+                if self.largest_absolute_contribution_security is not None
+                else None
+            ),
+            "maxSecurityAbsoluteContributionShare": (self.max_security_absolute_contribution_share),
+            "totalAbsoluteSecurityContribution": self.total_absolute_security_contribution,
+            "absoluteContributionHhi": self.absolute_contribution_hhi,
+            "maxLeaveOneSecurityCagrDelta": self.max_leave_one_security_cagr_delta,
+            "maxLeaveOneSecurity": (
+                self.max_leave_one_security.to_dict()
+                if self.max_leave_one_security is not None
+                else None
+            ),
+            "topLeaveOneSecurity": [row.to_dict() for row in self.top_leave_one_security],
+            "attributionMaxResidual": self.attribution_max_residual,
+            "observedReturnsPreserved": True,
+            "reoptimized": False,
+        }
+
+
+def _event_order_key(event: ContributionEvent) -> tuple[float, int, str]:
+    """Prefer larger absolute events, then the earlier date and symbol."""
+
+    return (-event.absolute_contribution, int(event.date.value), event.symbol)
+
+
+@dataclass(slots=True)
+class _ContributionAccumulator:
+    columns: pd.Index
+    evaluation_start: pd.Timestamp | None
+    evaluation_end: pd.Timestamp | None
+    signed_by_security: np.ndarray
+    absolute_by_security: np.ndarray
+    leave_one_log_ratio: np.ndarray
+    leave_one_valid: np.ndarray
+    observed_return_count: int = 0
+    total_absolute_security_contribution: float = 0.0
+    attribution_max_residual: float = 0.0
+    max_exact_single_session_event: ContributionEvent | None = None
+    max_observed_interval_event: ContributionEvent | None = None
+
+    @classmethod
+    def create(
+        cls,
+        columns: pd.Index,
+        evaluation_start: pd.Timestamp | None,
+        evaluation_end: pd.Timestamp | None,
+    ) -> _ContributionAccumulator:
+        size = len(columns)
+        return cls(
+            columns=columns,
+            evaluation_start=evaluation_start,
+            evaluation_end=evaluation_end,
+            signed_by_security=np.zeros(size, dtype=float),
+            absolute_by_security=np.zeros(size, dtype=float),
+            leave_one_log_ratio=np.zeros(size, dtype=float),
+            leave_one_valid=np.ones(size, dtype=bool),
+        )
+
+    def observe(
+        self,
+        *,
+        date: pd.Timestamp,
+        interval_start: pd.Timestamp | None,
+        return_interval_sessions: int,
+        portfolio_return: float,
+        held_positions: np.ndarray,
+        security_contributions: np.ndarray,
+        start_weights: np.ndarray,
+        security_returns: np.ndarray,
+        cash_contribution: float,
+        cost_contribution: float,
+    ) -> None:
+        contribution_sum = float(security_contributions.sum())
+        residual = float(
+            portfolio_return - contribution_sum - cash_contribution - cost_contribution
+        )
+        self.attribution_max_residual = max(self.attribution_max_residual, abs(residual))
+        self.observed_return_count += 1
+
+        if held_positions.size == 0:
+            return
+        absolute = np.abs(security_contributions)
+        self.signed_by_security[held_positions] += security_contributions
+        self.absolute_by_security[held_positions] += absolute
+        self.total_absolute_security_contribution += float(absolute.sum())
+
+        base_growth_factor = 1.0 + portfolio_return
+        without_growth_factors = base_growth_factor - security_contributions
+        valid = (
+            np.isfinite(without_growth_factors)
+            & np.isfinite(base_growth_factor)
+            & (without_growth_factors > 0.0)
+            & (base_growth_factor > 0.0)
+        )
+        invalid_positions = held_positions[~valid]
+        if invalid_positions.size:
+            self.leave_one_valid[invalid_positions] = False
+        if bool(valid.any()):
+            valid_positions = held_positions[valid]
+            self.leave_one_log_ratio[valid_positions] += np.log(
+                without_growth_factors[valid] / base_growth_factor
+            )
+
+        for local_position in np.flatnonzero(absolute > 0.0):
+            security_position = int(held_positions[local_position])
+            event = ContributionEvent(
+                symbol=str(self.columns[security_position]),
+                interval_start=interval_start,
+                date=date,
+                return_interval_sessions=return_interval_sessions,
+                contribution=float(security_contributions[local_position]),
+                start_weight=float(start_weights[local_position]),
+                security_return=float(security_returns[local_position]),
+                portfolio_return=portfolio_return,
+            )
+            if self.max_observed_interval_event is None or _event_order_key(
+                event
+            ) < _event_order_key(self.max_observed_interval_event):
+                self.max_observed_interval_event = event
+            if return_interval_sessions == 1 and (
+                self.max_exact_single_session_event is None
+                or _event_order_key(event) < _event_order_key(self.max_exact_single_session_event)
+            ):
+                self.max_exact_single_session_event = event
+
+    def finalize(
+        self,
+        returns: pd.Series,
+        strategy_active: pd.Series,
+    ) -> ContributionDiagnostics:
+        window_returns = (
+            returns.loc[self.evaluation_start : self.evaluation_end]
+            if self.evaluation_start is not None and self.evaluation_end is not None
+            else returns.iloc[0:0]
+        )
+        window_active = strategy_active.reindex(window_returns.index).fillna(False).astype(bool)
+        active_positions = np.flatnonzero(window_active.to_numpy())
+        active = (
+            window_returns.iloc[int(active_positions[0]) :]
+            if active_positions.size
+            else window_returns.iloc[0:0]
+        )
+        active_calendar_observations = len(active)
+        observed = pd.to_numeric(active, errors="coerce").dropna()
+        reasons: list[str] = []
+        if active.empty:
+            reasons.append("no_active_strategy_in_evaluation_window")
+        elif pd.isna(active.iloc[-1]):
+            reasons.append("ending_nav_unavailable")
+        if len(observed) != self.observed_return_count:
+            reasons.append("attribution_observation_count_mismatch")
+        if self.attribution_max_residual > ATTRIBUTION_RESIDUAL_TOLERANCE:
+            reasons.append("attribution_residual_exceeds_tolerance")
+
+        contributing_positions = np.flatnonzero(self.absolute_by_security > 0.0)
+        invalid_leave_one = contributing_positions[~self.leave_one_valid[contributing_positions]]
+        if invalid_leave_one.size:
+            reasons.append("non_positive_leave_one_growth_factor")
+
+        largest_summary: SecurityContributionSummary | None = None
+        absolute_contribution_hhi = 0.0
+        total_absolute = self.total_absolute_security_contribution
+        if total_absolute > 0.0 and contributing_positions.size:
+            shares = self.absolute_by_security[contributing_positions] / total_absolute
+            absolute_contribution_hhi = float(np.square(shares).sum())
+            ordered_positions = sorted(
+                contributing_positions.tolist(),
+                key=lambda position: (
+                    -float(self.absolute_by_security[position]),
+                    str(self.columns[position]),
+                ),
+            )
+            largest_position = int(ordered_positions[0])
+            largest_summary = SecurityContributionSummary(
+                symbol=str(self.columns[largest_position]),
+                signed_contribution=float(self.signed_by_security[largest_position]),
+                absolute_contribution=float(self.absolute_by_security[largest_position]),
+                absolute_contribution_share=float(
+                    self.absolute_by_security[largest_position] / total_absolute
+                ),
+            )
+
+        sensitivities: list[LeaveOneSecuritySensitivity] = []
+        ending_available = bool(not active.empty and pd.notna(active.iloc[-1]))
+        if ending_available and not invalid_leave_one.size and not observed.empty:
+            growth_factors = 1.0 + observed.to_numpy(dtype=float)
+            if bool(np.isfinite(growth_factors).all()) and bool((growth_factors > 0.0).all()):
+                base_log_growth = float(np.log(growth_factors).sum())
+                years = max(active_calendar_observations / 252.0, 1e-9)
+                with np.errstate(over="ignore", invalid="ignore"):
+                    base_cagr = float(np.exp(base_log_growth / years) - 1.0)
+                if not np.isfinite(base_cagr):
+                    reasons.append("non_finite_base_cagr")
+                else:
+                    for position in contributing_positions:
+                        leave_one_log_growth = base_log_growth + float(
+                            self.leave_one_log_ratio[position]
+                        )
+                        with np.errstate(over="ignore", invalid="ignore"):
+                            leave_one_cagr = float(np.exp(leave_one_log_growth / years) - 1.0)
+                        if not np.isfinite(leave_one_cagr):
+                            reasons.append("non_finite_leave_one_cagr")
+                            sensitivities = []
+                            break
+                        cagr_delta = base_cagr - leave_one_cagr
+                        sensitivities.append(
+                            LeaveOneSecuritySensitivity(
+                                symbol=str(self.columns[position]),
+                                base_cagr=base_cagr,
+                                leave_one_cagr=leave_one_cagr,
+                                cagr_delta=cagr_delta,
+                                absolute_cagr_delta=abs(cagr_delta),
+                            )
+                        )
+            else:
+                reasons.append("non_positive_base_growth_factor")
+        sensitivities.sort(key=lambda row: (-row.absolute_cagr_delta, row.symbol))
+        top_leave_one = tuple(sensitivities[:10])
+        max_leave_one = top_leave_one[0] if top_leave_one else None
+        complete = not reasons
+        return ContributionDiagnostics(
+            attribution_method=ATTRIBUTION_METHOD,
+            attribution_version=ATTRIBUTION_VERSION,
+            complete=complete,
+            reason=None if complete else ";".join(dict.fromkeys(reasons)),
+            evaluation_start=self.evaluation_start,
+            evaluation_end=self.evaluation_end,
+            active_calendar_observations=active_calendar_observations,
+            observed_return_count=self.observed_return_count,
+            max_exact_single_session_security_contribution=self.max_exact_single_session_event,
+            max_observed_interval_security_contribution=self.max_observed_interval_event,
+            largest_absolute_contribution_security=largest_summary,
+            total_absolute_security_contribution=total_absolute,
+            absolute_contribution_hhi=absolute_contribution_hhi,
+            max_leave_one_security=max_leave_one,
+            top_leave_one_security=top_leave_one,
+            attribution_max_residual=self.attribution_max_residual,
+        )
 
 
 @dataclass(slots=True)
 class BacktestResult:
     factor_name: str
+    policy_id: str
     returns: pd.Series
     equity: pd.Series
     weights: pd.DataFrame
+    cash_weights: pd.Series
     turnover: pd.Series
     costs: pd.Series
     signal_dates: pd.Series
+    contribution_diagnostics: ContributionDiagnostics
     pre_trade_weights: pd.DataFrame = field(default_factory=pd.DataFrame)
-    naive_turnover: pd.Series = field(default_factory=pd.Series)
+    eligible_security_counts: pd.Series = field(default_factory=pd.Series)
+    selected_security_counts: pd.Series = field(default_factory=pd.Series)
+    selection_fractions: pd.Series = field(default_factory=pd.Series)
+    gross_exposure: pd.Series = field(default_factory=pd.Series)
+    strategy_active: pd.Series = field(default_factory=pd.Series)
+    valuation_available: pd.Series = field(default_factory=pd.Series)
+    stale_holding_counts: pd.Series = field(default_factory=pd.Series)
+    stale_holding_weights: pd.Series = field(default_factory=pd.Series)
+    execution_statuses: pd.Series = field(default_factory=pd.Series)
+    unpriceable_target_counts: pd.Series = field(default_factory=pd.Series)
+    return_interval_sessions: pd.Series = field(default_factory=pd.Series)
+    target_cash_weights: pd.Series = field(default_factory=pd.Series)
+    target_hhi: pd.Series = field(default_factory=pd.Series)
+    target_effective_names: pd.Series = field(default_factory=pd.Series)
+    target_top1_weights: pd.Series = field(default_factory=pd.Series)
+    target_top5_weights: pd.Series = field(default_factory=pd.Series)
+    target_max_weights: pd.Series = field(default_factory=pd.Series)
+    policy_input_statuses: pd.Series = field(default_factory=pd.Series)
+    policy_input_reasons: pd.Series = field(default_factory=pd.Series)
+    ending_weights: pd.Series = field(default_factory=pd.Series)
+    ending_cash_weight: float = 1.0
+    last_execution_date: pd.Timestamp | None = None
+    last_signal_date: pd.Timestamp | None = None
+    first_nonempty_execution_date: pd.Timestamp | None = None
+    first_market_exposure_return_date: pd.Timestamp | None = None
 
 
 def _rebalance_dates(index: pd.DatetimeIndex, frequency: str) -> pd.DatetimeIndex:
     if index.empty:
         return index
-    if frequency == "M":
-        frequency = "ME"
-    sampled = pd.Series(index=index, data=index).resample(frequency).last().dropna()
-    dates = pd.DatetimeIndex(sampled.values)
-    return dates.intersection(index)
+    if frequency == "W":
+        groups = index.to_period("W-FRI")
+    elif frequency == "ME":
+        groups = index.to_period("M")
+    elif frequency == "QE":
+        groups = index.to_period("Q")
+    else:
+        raise ValueError("rebalance frequency must be W, ME, or QE")
+    marker = pd.Series(index, index=index)
+    return pd.DatetimeIndex(marker.groupby(groups).last().to_numpy())
 
 
-def _drift_weight_values(
-    weight_values: np.ndarray,
-    start_values: np.ndarray,
-    end_values: np.ndarray,
-) -> np.ndarray:
-    weight_values = np.asarray(weight_values, dtype=float)
-    start_values = np.asarray(start_values, dtype=float)
-    end_values = np.asarray(end_values, dtype=float)
-    held = weight_values != 0.0
-    valid = held & np.isfinite(start_values) & np.isfinite(end_values) & (start_values > 0.0) & (end_values > 0.0)
-    stale_held = held & ~valid
-    drifted_values = np.zeros(len(weight_values), dtype=float)
-    if not (bool(valid.any()) or bool(stale_held.any())):
-        return drifted_values
-    gross = weight_values[valid] * end_values[valid] / start_values[valid]
-    stale_notional = np.clip(weight_values[stale_held], a_min=0.0, a_max=None)
-    cash_weight = max(0.0, 1.0 - float(weight_values.sum()))
-    total = float(gross.sum()) + float(stale_notional.sum()) + cash_weight
-    if total <= 0 or not np.isfinite(total):
-        return drifted_values
-    if gross.size:
-        drifted_values[valid] = gross / total
-    if stale_notional.size:
-        # Missing/nonpositive trade-date prices should not erase a held position
-        # from turnover diagnostics. Carry the last target notional so an exit
-        # still records sell turnover and cost rather than disappearing.
-        drifted_values[stale_held] = stale_notional / total
-    return drifted_values
+def _cash_daily_return(annual_return: float) -> float:
+    if annual_return <= -1.0:
+        raise ValueError("annual_cash_return must be greater than -1")
+    return float((1.0 + annual_return) ** (1.0 / 252.0) - 1.0)
 
 
-def _drift_weight_matrix(
-    weight_values: np.ndarray,
-    start_values: np.ndarray,
-    end_values: np.ndarray,
-) -> np.ndarray:
-    weight_values = np.asarray(weight_values, dtype=float)
-    start_values = np.asarray(start_values, dtype=float)
-    end_values = np.asarray(end_values, dtype=float)
-    if end_values.ndim == 1:
-        return _drift_weight_values(weight_values, start_values, end_values)[np.newaxis, :]
-
-    drifted_values = np.zeros_like(end_values, dtype=float)
-    if end_values.size == 0:
-        return drifted_values
-    held = weight_values != 0.0
-    if not bool(held.any()):
-        return drifted_values
-
-    valid_start = np.isfinite(start_values) & (start_values > 0.0)
-    valid_end = np.isfinite(end_values) & (end_values > 0.0)
-    valid = valid_end & (held & valid_start)
-
-    gross = np.zeros_like(end_values, dtype=float)
-    denominator = np.where(valid_start, start_values, np.nan)
-    np.divide(end_values, denominator, out=gross, where=valid)
-    gross *= weight_values
-    gross = np.where(valid, gross, 0.0)
-
-    stale_held = (~valid) & held
-    stale_notional = np.where(stale_held, np.clip(weight_values, a_min=0.0, a_max=None), 0.0)
-    cash_weight = max(0.0, 1.0 - float(weight_values.sum()))
-    totals = gross.sum(axis=1) + stale_notional.sum(axis=1) + cash_weight
-    usable = np.isfinite(totals) & (totals > 0.0)
-    if not bool(usable.any()):
-        return drifted_values
-    drifted_values[usable] = (gross[usable] + stale_notional[usable]) / totals[usable, np.newaxis]
-    return drifted_values
-
-
-def _drift_weights(
-    weights: pd.Series,
-    start_prices: pd.Series,
-    end_prices: pd.Series,
-) -> pd.Series:
-    index = weights.index
-    weight_values = pd.to_numeric(weights.reindex(index), errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    start_values = pd.to_numeric(start_prices.reindex(index), errors="coerce").to_numpy(dtype=float)
-    end_values = pd.to_numeric(end_prices.reindex(index), errors="coerce").to_numpy(dtype=float)
-    drifted_values = _drift_weight_values(weight_values, start_values, end_values)
-    return pd.Series(drifted_values, index=index, dtype=float)
-
-
-def _eligible_scores_at(
-    scores: pd.Series,
-    eligibility_mask: pd.DataFrame | None,
+def _target_for_signal(
+    policy_id: str,
     signal_date: pd.Timestamp,
-) -> pd.Series:
-    if eligibility_mask is None or eligibility_mask.empty:
-        return scores
-    if signal_date not in eligibility_mask.index:
-        return scores.iloc[0:0]
-    eligible = eligibility_mask.loc[signal_date].reindex(scores.index).fillna(False).astype(bool)
-    return scores.where(eligible)
+    scores: pd.Series,
+    prices: pd.Series,
+    eligibility: pd.Series,
+    config: RunConfig,
+    *,
+    trailing_volatility: pd.Series | None = None,
+    trailing_dollar_volume: pd.Series | None = None,
+) -> TargetAllocation:
+    return construct_target_allocation(
+        policy_id,
+        signal_date,
+        scores,
+        prices,
+        eligibility,
+        config,
+        trailing_volatility=trailing_volatility,
+        trailing_dollar_volume=trailing_dollar_volume,
+    )
+
 
 def run_factor_backtest(
-    prices: pd.DataFrame,
-    factor_scores: pd.DataFrame,
-    config: RunConfig,
     factor_name: str,
+    policy_id: str,
+    prices: pd.DataFrame,
+    scores: pd.DataFrame,
+    config: RunConfig,
+    *,
     eligibility_mask: pd.DataFrame | None = None,
+    trailing_volatility: pd.DataFrame | None = None,
+    trailing_dollar_volume: pd.DataFrame | None = None,
+    retain_weight_history: bool = True,
 ) -> BacktestResult:
-    prices = prices.sort_index().dropna(how="all")
-    factor_scores = factor_scores.reindex_like(prices)
-    numeric_prices = prices.apply(pd.to_numeric, errors="coerce")
-    price_values = numeric_prices.to_numpy(dtype=float)
-    returns = prices.pct_change().fillna(0.0)
-    costs = pd.Series(0.0, index=prices.index)
-    turnover = pd.Series(0.0, index=prices.index)
-    naive_turnover = pd.Series(0.0, index=prices.index)
-    pre_trade_weights = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
-    signal_dates: dict[pd.Timestamp, pd.Timestamp] = {}
-    trade_effective_targets: dict[pd.Timestamp, tuple[pd.Series, pd.Timestamp]] = {}
-    last_target = pd.Series(0.0, index=prices.columns)
-    last_target_values = np.zeros(len(prices.columns), dtype=float)
-    last_trade_price_date: pd.Timestamp | None = None
-    date_positions = {date: position for position, date in enumerate(prices.index)}
+    """Backtest a date-t close signal with next-session-close execution.
 
-    rebalance_dates = _rebalance_dates(prices.index, config.rebalance_frequency)
-    for rebalance_date in rebalance_dates:
-        loc = date_positions[rebalance_date]
-        if loc == 0:
+    The implementation compares model portfolios rather than simulating an
+    order-management system.  Each holding is carried as a persistent share
+    sleeve plus a cash notional.  An internal quote gap therefore makes only
+    that close's total NAV unavailable: no missing asset return is filled with
+    zero, normally quoted sleeves continue to retain their economic value, and
+    the next complete close catches up exactly from the last complete NAV.
+
+    With close-only inputs, a signal formed at close t is traded at close t+1
+    and first earns the close-t+1 to close-t+2 return.  A rebalance is cancelled
+    when an existing holding cannot be valued; an unpriceable new target is
+    omitted while the remaining target can still be implemented.  The
+    unavailable intraday execution return is never approximated.
+    """
+
+    if not prices.index.equals(scores.index):
+        raise ValueError("prices and scores must share the exact same date index")
+    if (
+        prices.index.has_duplicates
+        or not prices.index.is_monotonic_increasing
+        or scores.index.has_duplicates
+        or not scores.index.is_monotonic_increasing
+    ):
+        raise ValueError("price and score dates must be unique and increasing")
+    if eligibility_mask is not None and not eligibility_mask.index.equals(prices.index):
+        raise ValueError("eligibility_mask must share the exact price date index")
+    common_columns = [column for column in prices.columns if column in scores.columns]
+    if not common_columns:
+        raise ValueError("prices and scores have no common symbols")
+    prices = prices.reindex(columns=common_columns).sort_index()
+    scores = scores.reindex(columns=common_columns)
+    eligibility = (
+        eligibility_mask.reindex(index=prices.index, columns=common_columns).fillna(False)
+        if eligibility_mask is not None
+        else prices.notna()
+    )
+    for name, panel in (
+        ("trailing_volatility", trailing_volatility),
+        ("trailing_dollar_volume", trailing_dollar_volume),
+    ):
+        if panel is not None and not panel.index.equals(prices.index):
+            raise ValueError(f"{name} must share the price date index")
+    dates = pd.DatetimeIndex(prices.index)
+    columns = pd.Index(common_columns)
+    price_values = prices.to_numpy(dtype=float, copy=False)
+
+    target_by_date: dict[pd.Timestamp, np.ndarray] = {}
+    allocation_by_date: dict[pd.Timestamp, TargetAllocation] = {}
+    signal_by_date: dict[pd.Timestamp, pd.Timestamp] = {}
+    policy_status_by_date: dict[pd.Timestamp, str] = {}
+    policy_reasons_by_date: dict[pd.Timestamp, tuple[str, ...]] = {}
+    eligible_by_date: dict[pd.Timestamp, int] = {}
+    selected_by_date: dict[pd.Timestamp, int] = {}
+    position_by_date = {date: position for position, date in enumerate(dates)}
+    for signal_date in _rebalance_dates(dates, config.rebalance_frequency):
+        position = position_by_date[pd.Timestamp(signal_date)]
+        if position + 1 >= len(dates):
             continue
-        signal_date = prices.index[int(loc) - 1]
-        scores = _eligible_scores_at(factor_scores.loc[signal_date], eligibility_mask, signal_date)
-        target = balanced_weights(scores, top_n=config.top_n, max_weight=config.max_weight)
-        target = target.reindex(prices.columns).fillna(0.0)
-        target_values = target.to_numpy(dtype=float)
-        if last_trade_price_date is None:
-            drifted_pre_trade_values = np.zeros(len(prices.columns), dtype=float)
+        execution_date = pd.Timestamp(dates[position + 1])
+        allocation = _target_for_signal(
+            policy_id,
+            pd.Timestamp(signal_date),
+            scores.loc[signal_date],
+            prices.loc[signal_date],
+            eligibility.loc[signal_date],
+            config,
+            trailing_volatility=(
+                trailing_volatility.loc[signal_date] if trailing_volatility is not None else None
+            ),
+            trailing_dollar_volume=(
+                trailing_dollar_volume.loc[signal_date]
+                if trailing_dollar_volume is not None
+                else None
+            ),
+        )
+        # A formation date without any finite eligible score is not a strategy
+        # signal.  Recording it would make the preceding cash warm-up look like
+        # factor evidence and can falsely satisfy the minimum-history gate.
+        policy_status_by_date[execution_date] = allocation.status
+        policy_reasons_by_date[execution_date] = tuple(allocation.reasons)
+        if allocation.status == "available" and allocation.selected_security_count > 0:
+            target_by_date[execution_date] = allocation.weights(columns).to_numpy(dtype=float)
+            allocation_by_date[execution_date] = allocation
+            signal_by_date[execution_date] = pd.Timestamp(signal_date)
+            eligible_by_date[execution_date] = allocation.eligible_security_count
+            selected_by_date[execution_date] = allocation.selected_security_count
+
+    # Canonical accounting state.  Shares are never inferred from a missing
+    # quote, and are not changed by valuation gaps.  The absolute NAV scale is
+    # arbitrary (one research currency unit at inception) but internally exact.
+    shares = np.zeros(len(columns), dtype=float)
+    cash_value = 1.0
+    last_complete_nav = 1.0
+    last_complete_weights = np.zeros(len(columns), dtype=float)
+    last_complete_cash_weight = 1.0
+    last_complete_date: pd.Timestamp | None = None
+    strategy_started = False
+    first_nonempty_execution_date: pd.Timestamp | None = None
+    first_market_exposure_return_date: pd.Timestamp | None = None
+    last_execution_date: pd.Timestamp | None = None
+    last_signal_date: pd.Timestamp | None = None
+    daily_cash_return = _cash_daily_return(config.annual_cash_return)
+    cost_rate = config.total_cost_bps / 10_000.0
+    weight_rows: list[np.ndarray] = []
+    pretrade_rows: list[np.ndarray] = []
+    cash_values: list[float] = []
+    return_values: list[float] = []
+    turnover_values: list[float] = []
+    cost_values: list[float] = []
+    exposure_values: list[float] = []
+    active_values: list[bool] = []
+    valuation_values: list[bool] = []
+    stale_count_values: list[int] = []
+    stale_weight_values: list[float] = []
+    execution_status_values: list[str] = []
+    unpriceable_count_values: list[int] = []
+    interval_session_values: list[int] = []
+    target_cash_values: list[float] = []
+    target_hhi_values: list[float] = []
+    target_effective_name_values: list[float] = []
+    target_top1_values: list[float] = []
+    target_top5_values: list[float] = []
+    target_max_values: list[float] = []
+    policy_status_values: list[str] = []
+    policy_reason_values: list[tuple[str, ...]] = []
+    sessions_since_complete_return = 0
+    evaluation_start_position = max(0, len(dates) - config.evaluation_window_days)
+    contribution_accumulator = _ContributionAccumulator.create(
+        columns,
+        (
+            pd.Timestamp(dates[evaluation_start_position])
+            if len(dates) > evaluation_start_position
+            else None
+        ),
+        pd.Timestamp(dates[-1]) if len(dates) else None,
+    )
+
+    for position, date in enumerate(dates):
+        start_weights = last_complete_weights.copy()
+        start_cash_weight = float(last_complete_cash_weight)
+        interval_start = last_complete_date
+        if retain_weight_history:
+            weight_rows.append(start_weights)
+            cash_values.append(start_cash_weight)
+        start_exposure = float(start_weights.sum())
+        exposure_values.append(start_exposure)
+        if (
+            strategy_started
+            and first_market_exposure_return_date is None
+            and start_exposure > 1e-15
+        ):
+            first_market_exposure_return_date = pd.Timestamp(date)
+
+        # Cash accrues close-to-close.  There is no preceding interval for the
+        # first supplied close.
+        if position > 0:
+            cash_value *= 1.0 + daily_cash_return
+        pretrade_cash_value = float(cash_value)
+
+        execution_prices = price_values[position]
+        held = shares > 1e-15
+        stale_held = held & (~np.isfinite(execution_prices) | (execution_prices <= 0.0))
+        valuation_complete = not bool(stale_held.any())
+        valuation_values.append(valuation_complete)
+        stale_count_values.append(int(stale_held.sum()))
+        stale_weight_values.append(float(start_weights[stale_held].sum()))
+
+        if valuation_complete:
+            sleeve_values = shares * np.where(np.isfinite(execution_prices), execution_prices, 0.0)
+            pretrade_nav = float(sleeve_values.sum() + cash_value)
+            if not np.isfinite(pretrade_nav) or pretrade_nav <= 0.0:
+                raise ValueError(f"portfolio NAV is non-positive or non-finite on {date.date()}")
+            pretrade = sleeve_values / pretrade_nav
+            pretrade_cash = float(cash_value / pretrade_nav)
         else:
-            drifted_pre_trade_values = _drift_weight_values(
-                last_target_values,
-                price_values[date_positions[last_trade_price_date]],
-                price_values[date_positions[signal_date]],
-            )
-        trade_turnover = float(np.abs(target_values - drifted_pre_trade_values).sum())
-        target_turnover = float((target - last_target).abs().sum())
-        pre_trade_weights.loc[rebalance_date] = drifted_pre_trade_values
-        turnover.loc[rebalance_date] = trade_turnover
-        naive_turnover.loc[rebalance_date] = target_turnover
-        # Apply transaction/slippage cost on the next trading day after the rebalance signal.
-        if int(loc) + 1 < len(prices.index):
-            effective_date = prices.index[int(loc) + 1]
-            costs.loc[effective_date] += trade_turnover * config.total_cost_rate
-            trade_effective_targets[effective_date] = (target, rebalance_date)
-        signal_dates[rebalance_date] = signal_date
-        last_target = target
-        last_target_values = target_values
-        last_trade_price_date = rebalance_date
+            pretrade_nav = float("nan")
+            pretrade = last_complete_weights.copy()
+            pretrade_cash = float(last_complete_cash_weight)
+        if retain_weight_history:
+            pretrade_rows.append(pretrade.copy())
 
-    effective_weights_values = np.zeros((len(prices.index), len(prices.columns)), dtype=float)
-    effective_events = sorted(trade_effective_targets.items(), key=lambda item: item[0])
-    for event_index, (effective_date, (current_target, current_trade_price_date)) in enumerate(effective_events):
-        start_pos = date_positions[effective_date]
-        stop_pos = (
-            date_positions[effective_events[event_index + 1][0]]
-            if event_index + 1 < len(effective_events)
-            else len(prices.index)
-        )
-        if start_pos >= stop_pos:
-            continue
-        prior_positions = np.arange(start_pos, stop_pos, dtype=int) - 1
-        prior_positions = np.maximum(prior_positions, date_positions[current_trade_price_date])
-        effective_weights_values[start_pos:stop_pos] = _drift_weight_matrix(
-            current_target.to_numpy(dtype=float),
-            price_values[date_positions[current_trade_price_date]],
-            price_values[prior_positions],
-        )
-    effective_weights = pd.DataFrame(effective_weights_values, index=prices.index, columns=prices.columns)
-    portfolio_returns = (effective_weights * returns).sum(axis=1) - costs
-    equity = (1.0 + portfolio_returns).cumprod()
+        turnover = 0.0
+        cost = 0.0
+        execution_status = "none"
+        unpriceable_target_count = 0
+        target_cash_diagnostic = float("nan")
+        target_hhi_diagnostic = float("nan")
+        target_effective_names_diagnostic = float("nan")
+        target_top1_diagnostic = float("nan")
+        target_top5_diagnostic = float("nan")
+        target_max_diagnostic = float("nan")
+        successful_entry = False
+        anchor_nav = float(last_complete_nav)
+        if date in target_by_date:
+            target = target_by_date[date]
+            allocation = allocation_by_date[date]
+            unpriceable = (target > 0.0) & (
+                ~np.isfinite(execution_prices) | (execution_prices <= 0.0)
+            )
+            unpriceable_target_count = int(unpriceable.sum())
+            executable_target = np.where(unpriceable, 0.0, target)
+            selected_by_date[date] = int((executable_target > 0.0).sum())
+            target_cash = max(0.0, 1.0 - float(executable_target.sum()))
+            positive_target = executable_target[executable_target > 0.0]
+            invested_target = float(positive_target.sum())
+            normalized_target = (
+                positive_target / invested_target
+                if invested_target > 0.0
+                else np.asarray([], dtype=float)
+            )
+            target_hhi_diagnostic = (
+                float(np.square(normalized_target).sum()) if invested_target > 0.0 else 0.0
+            )
+            target_effective_names_diagnostic = (
+                float(1.0 / target_hhi_diagnostic) if target_hhi_diagnostic > 0.0 else 0.0
+            )
+            sorted_target = np.sort(positive_target)[::-1]
+            target_cash_diagnostic = target_cash
+            target_top1_diagnostic = float(sorted_target[:1].sum())
+            target_top5_diagnostic = float(sorted_target[:5].sum())
+            target_max_diagnostic = float(sorted_target.max()) if sorted_target.size else 0.0
+            if not valuation_complete:
+                # Trading from an unknown held NAV would assume an unobserved
+                # sale price and corrupt both turnover and the sleeve state.
+                execution_status = "blocked_missing_held_quote"
+                selected_by_date[date] = int(held.sum())
+            elif not bool((executable_target > 0.0).any()):
+                # Do not liquidate a valid research portfolio merely because
+                # every proposed new close is absent.
+                execution_status = "blocked_all_targets_unpriceable"
+                selected_by_date[date] = int(held.sum())
+            else:
+                turnover = 0.5 * (
+                    float(np.abs(executable_target - pretrade).sum())
+                    + abs(target_cash - pretrade_cash)
+                )
+                cost_notional = pretrade_nav * turnover * cost_rate
+                post_cost_nav = pretrade_nav - cost_notional
+                if post_cost_nav <= 0.0:
+                    raise ValueError(f"transaction costs exhaust portfolio NAV on {date.date()}")
+                shares = np.divide(
+                    executable_target * post_cost_nav,
+                    execution_prices,
+                    out=np.zeros_like(executable_target),
+                    where=(executable_target > 0.0)
+                    & np.isfinite(execution_prices)
+                    & (execution_prices > 0.0),
+                )
+                cash_value = target_cash * post_cost_nav
+                last_complete_nav = float(post_cost_nav)
+                last_complete_weights = executable_target.copy()
+                last_complete_cash_weight = float(target_cash)
+                cost = (
+                    float(cost_notional / anchor_nav)
+                    if strategy_started
+                    else float(cost_notional / pretrade_nav)
+                )
+                execution_status = (
+                    "executed_partial_unpriceable_targets"
+                    if unpriceable_target_count
+                    else "executed"
+                )
+                if not strategy_started:
+                    strategy_started = True
+                    successful_entry = True
+                    first_nonempty_execution_date = pd.Timestamp(date)
+                last_execution_date = pd.Timestamp(date)
+                last_signal_date = allocation.signal_date
+
+        if valuation_complete and not execution_status.startswith("executed"):
+            # Normal mark-to-market close, or a cancelled rebalance.  The
+            # canonical share sleeves are unchanged.
+            last_complete_nav = float(pretrade_nav)
+            last_complete_weights = pretrade.copy()
+            last_complete_cash_weight = float(pretrade_cash)
+
+        if successful_entry:
+            # The entry close is the first strategy observation.  It contains
+            # the execution cost exactly once but excludes the preceding
+            # cash-only warm-up return.
+            portfolio_return = -float(cost)
+            return_interval_sessions = 1
+            sessions_since_complete_return = 0
+        elif not strategy_started:
+            portfolio_return = float("nan")
+            return_interval_sessions = 0
+        elif not valuation_complete:
+            portfolio_return = float("nan")
+            sessions_since_complete_return += 1
+            return_interval_sessions = 0
+        else:
+            portfolio_return = float(last_complete_nav / anchor_nav - 1.0)
+            return_interval_sessions = sessions_since_complete_return + 1
+            sessions_since_complete_return = 0
+
+        if (
+            position >= evaluation_start_position
+            and strategy_started
+            and np.isfinite(portfolio_return)
+        ):
+            if successful_entry:
+                held_positions = np.asarray([], dtype=int)
+                security_contributions = np.asarray([], dtype=float)
+                contribution_start_weights = np.asarray([], dtype=float)
+                security_returns = np.asarray([], dtype=float)
+                cash_contribution = 0.0
+            else:
+                held_positions = np.flatnonzero(start_weights > 1e-15)
+                contribution_start_weights = start_weights[held_positions]
+                starting_sleeve_values = contribution_start_weights * anchor_nav
+                security_contributions = (
+                    sleeve_values[held_positions] / anchor_nav - contribution_start_weights
+                )
+                security_returns = (
+                    np.divide(
+                        sleeve_values[held_positions],
+                        starting_sleeve_values,
+                        out=np.zeros_like(security_contributions),
+                        where=starting_sleeve_values > 0.0,
+                    )
+                    - 1.0
+                )
+                cash_contribution = float(pretrade_cash_value / anchor_nav - start_cash_weight)
+            contribution_accumulator.observe(
+                date=pd.Timestamp(date),
+                interval_start=interval_start,
+                return_interval_sessions=return_interval_sessions,
+                portfolio_return=portfolio_return,
+                held_positions=held_positions,
+                security_contributions=security_contributions,
+                start_weights=contribution_start_weights,
+                security_returns=security_returns,
+                cash_contribution=cash_contribution,
+                cost_contribution=-float(cost),
+            )
+        if valuation_complete:
+            last_complete_date = pd.Timestamp(date)
+        return_values.append(portfolio_return)
+        turnover_values.append(turnover)
+        cost_values.append(cost)
+        active_values.append(strategy_started)
+        execution_status_values.append(execution_status)
+        unpriceable_count_values.append(unpriceable_target_count)
+        interval_session_values.append(return_interval_sessions)
+        target_cash_values.append(target_cash_diagnostic)
+        target_hhi_values.append(target_hhi_diagnostic)
+        target_effective_name_values.append(target_effective_names_diagnostic)
+        target_top1_values.append(target_top1_diagnostic)
+        target_top5_values.append(target_top5_diagnostic)
+        target_max_values.append(target_max_diagnostic)
+        policy_status_values.append(policy_status_by_date.get(pd.Timestamp(date), "not_scheduled"))
+        policy_reason_values.append(policy_reasons_by_date.get(pd.Timestamp(date), ()))
+
+    returns = pd.Series(return_values, index=dates, name=factor_name, dtype=float)
+    equity = (1.0 + returns).cumprod(skipna=True).rename(factor_name)
+    weights = (
+        pd.DataFrame(weight_rows, index=dates, columns=columns)
+        if retain_weight_history
+        else pd.DataFrame(columns=columns, dtype=float)
+    )
+    pretrade = (
+        pd.DataFrame(pretrade_rows, index=dates, columns=columns)
+        if retain_weight_history
+        else pd.DataFrame(columns=columns, dtype=float)
+    )
+    turnover = pd.Series(turnover_values, index=dates, name="turnover", dtype=float)
+    costs = pd.Series(cost_values, index=dates, name="cost", dtype=float)
+    cash_weights = (
+        pd.Series(cash_values, index=dates, name="cash_weight", dtype=float)
+        if retain_weight_history
+        else pd.Series(name="cash_weight", dtype=float)
+    )
+    signal_dates = pd.Series(signal_by_date, name="signal_date", dtype="datetime64[ns]")
+    eligible_counts = pd.Series(eligible_by_date, name="eligible_security_count", dtype=float)
+    selected_counts = pd.Series(selected_by_date, name="selected_security_count", dtype=float)
+    selection_fractions = selected_counts.divide(eligible_counts.replace(0.0, np.nan)).rename(
+        "selection_fraction"
+    )
+    gross_exposure = pd.Series(exposure_values, index=dates, name="gross_exposure", dtype=float)
+    strategy_active = pd.Series(active_values, index=dates, name="strategy_active", dtype=bool)
+    valuation_available = pd.Series(
+        valuation_values, index=dates, name="valuation_available", dtype=bool
+    )
+    stale_holding_counts = pd.Series(
+        stale_count_values, index=dates, name="stale_holding_count", dtype=int
+    )
+    stale_holding_weights = pd.Series(
+        stale_weight_values, index=dates, name="stale_holding_weight", dtype=float
+    )
+    execution_statuses = pd.Series(
+        execution_status_values, index=dates, name="execution_status", dtype=object
+    )
+    unpriceable_target_counts = pd.Series(
+        unpriceable_count_values,
+        index=dates,
+        name="unpriceable_target_count",
+        dtype=int,
+    )
+    return_interval_sessions = pd.Series(
+        interval_session_values,
+        index=dates,
+        name="return_interval_sessions",
+        dtype=int,
+    )
+    target_cash_weights = pd.Series(
+        target_cash_values, index=dates, name="target_cash_weight", dtype=float
+    )
+    target_hhi = pd.Series(target_hhi_values, index=dates, name="target_hhi", dtype=float)
+    target_effective_names = pd.Series(
+        target_effective_name_values,
+        index=dates,
+        name="target_effective_names",
+        dtype=float,
+    )
+    target_top1_weights = pd.Series(
+        target_top1_values, index=dates, name="target_top1_weight", dtype=float
+    )
+    target_top5_weights = pd.Series(
+        target_top5_values, index=dates, name="target_top5_weight", dtype=float
+    )
+    target_max_weights = pd.Series(
+        target_max_values, index=dates, name="target_max_weight", dtype=float
+    )
+    policy_input_statuses = pd.Series(
+        policy_status_values, index=dates, name="policy_input_status", dtype=object
+    )
+    policy_input_reasons = pd.Series(
+        policy_reason_values, index=dates, name="policy_input_reasons", dtype=object
+    )
+    contribution_diagnostics = contribution_accumulator.finalize(returns, strategy_active)
     return BacktestResult(
         factor_name=factor_name,
-        returns=portfolio_returns.rename(factor_name),
-        equity=equity.rename(factor_name),
-        weights=effective_weights,
-        turnover=turnover[turnover > 0].rename(factor_name),
-        costs=costs.rename(factor_name),
-        signal_dates=pd.Series(signal_dates, name="signal_date"),
-        pre_trade_weights=pre_trade_weights,
-        naive_turnover=naive_turnover[naive_turnover > 0].rename(factor_name),
+        policy_id=policy_id,
+        returns=returns,
+        equity=equity,
+        weights=weights,
+        cash_weights=cash_weights,
+        turnover=turnover,
+        costs=costs,
+        signal_dates=signal_dates,
+        contribution_diagnostics=contribution_diagnostics,
+        pre_trade_weights=pretrade,
+        eligible_security_counts=eligible_counts,
+        selected_security_counts=selected_counts,
+        selection_fractions=selection_fractions,
+        gross_exposure=gross_exposure,
+        strategy_active=strategy_active,
+        valuation_available=valuation_available,
+        stale_holding_counts=stale_holding_counts,
+        stale_holding_weights=stale_holding_weights,
+        execution_statuses=execution_statuses,
+        unpriceable_target_counts=unpriceable_target_counts,
+        return_interval_sessions=return_interval_sessions,
+        target_cash_weights=target_cash_weights,
+        target_hhi=target_hhi,
+        target_effective_names=target_effective_names,
+        target_top1_weights=target_top1_weights,
+        target_top5_weights=target_top5_weights,
+        target_max_weights=target_max_weights,
+        policy_input_statuses=policy_input_statuses,
+        policy_input_reasons=policy_input_reasons,
+        ending_weights=pd.Series(last_complete_weights, index=columns, dtype=float),
+        ending_cash_weight=float(last_complete_cash_weight),
+        last_execution_date=last_execution_date,
+        last_signal_date=last_signal_date,
+        first_nonempty_execution_date=first_nonempty_execution_date,
+        first_market_exposure_return_date=first_market_exposure_return_date,
     )

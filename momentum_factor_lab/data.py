@@ -1,27 +1,50 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
-import time
+import shutil
+import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-from io import StringIO
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
+import rfc8785
 
 from .config import RunConfig
 from .universe import (
-    SAMPLE_UNIVERSE,
-    build_public_universe_frame,
-    is_known_etf_symbol,
+    DEFAULT_UNIVERSE,
+    DEFAULT_UNIVERSE_PATH,
+    is_supported_symbol,
     normalize_symbol,
-    stock_only_universe_frame,
     universe_frame_for_symbols,
+)
+
+DEMO_GENERATOR_VERSION = "demo-v2"
+RECORD_CANONICALIZATION_VERSION = "rfc8785-jcs-records-v1"
+SNAPSHOT_READ_CONTRACT = {
+    "format": "gzip_csv",
+    "indexColumn": 0,
+    "parseDates": True,
+    "pandasFloatPrecision": "round_trip",
+    "recordCanonicalization": RECORD_CANONICALIZATION_VERSION,
+    "note": (
+        "Use pandas.read_csv(..., index_col=0, parse_dates=True, "
+        "float_precision='round_trip') before recomputing canonical matrix hashes."
+    ),
+}
+LIVE_SNAPSHOT_HASH_FIELDS = (
+    "prices",
+    "volumes",
+    "dollarVolumes",
+    "rawCloses",
+    "requestedSymbols",
+    "returnedSymbols",
+    "universeRecords",
+    "priceSources",
+    "dataSources",
 )
 
 
@@ -29,1384 +52,480 @@ from .universe import (
 class MarketData:
     prices: pd.DataFrame
     volumes: pd.DataFrame
-    provider: str
-    fetched_at: datetime
-    as_of: pd.Timestamp | None
-    exclusions: pd.DataFrame
-    offline_sample: bool
-    candidate_universe: pd.DataFrame
-    eligible_universe: pd.DataFrame
-    price_sources: pd.DataFrame
-    data_sources: pd.DataFrame
-    live_error: str | None = None
-    data_quality: pd.DataFrame = field(default_factory=pd.DataFrame)
+    dollar_volumes: pd.DataFrame
+    raw_closes: pd.DataFrame
+    eligibility_mask: pd.DataFrame
+    quality: pd.DataFrame
+    universe: pd.DataFrame
+    as_of: pd.Timestamp
+    source_mode: str
+    source_label: str
+    price_basis: str
+    volume_basis: str
+    input_sha256: dict[str, str | None]
+    benchmark: str
+    notes: list[str] = field(default_factory=list)
+    requested_through: str | None = None
+    requested_candidate_count: int | None = None
+    provider_returned_candidate_count: int | None = None
+    provider: str | None = None
+    price_sources: pd.DataFrame = field(default_factory=pd.DataFrame)
+    data_sources: pd.DataFrame = field(default_factory=pd.DataFrame)
+    raw_close_proxy_symbol_count: int = 0
 
     @property
-    def is_live(self) -> bool:
-        return not self.offline_sample and self.live_error is None
+    def candidate_symbols(self) -> list[str]:
+        benchmark = normalize_symbol(self.benchmark)
+        return [column for column in self.prices.columns if normalize_symbol(column) != benchmark]
+
+
+def _normalize_matrix(frame: pd.DataFrame, *, source: str) -> pd.DataFrame:
+    if frame.empty:
+        raise ValueError(f"{source} contains no rows")
+    normalized = frame.copy()
+    normalized.index = pd.to_datetime(normalized.index, errors="coerce")
+    if normalized.index.isna().any():
+        raise ValueError(f"{source} contains invalid dates")
+    if getattr(normalized.index, "tz", None) is not None:
+        normalized.index = normalized.index.tz_convert("UTC").tz_localize(None)
+    normalized.index = normalized.index.normalize()
+    if normalized.index.has_duplicates:
+        raise ValueError(f"{source} contains duplicate dates")
+    normalized = normalized.sort_index()
+
+    symbols = [normalize_symbol(column) for column in normalized.columns]
+    if any(not symbol for symbol in symbols):
+        raise ValueError(f"{source} contains blank symbols")
+    unsupported = [symbol for symbol in symbols if not is_supported_symbol(symbol)]
+    if unsupported:
+        rendered = ", ".join(repr(symbol) for symbol in sorted(set(unsupported)))
+        raise ValueError(f"{source} contains unsupported security symbols: {rendered}")
+    if len(set(symbols)) != len(symbols):
+        raise ValueError(f"{source} contains duplicate normalized symbols")
+    normalized.columns = symbols
+    try:
+        normalized = normalized.apply(pd.to_numeric, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} contains non-numeric observations") from exc
+    if bool(np.isinf(normalized.to_numpy(dtype=float, na_value=np.nan)).any()):
+        raise ValueError(f"{source} contains non-finite observations")
+    return normalized.dropna(axis=0, how="all").dropna(axis=1, how="all")
+
+
+def _validate_raw_csv_headers(path: Path) -> None:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        header = next(csv.reader(handle), None)
+    if not header:
+        raise ValueError(f"{path} contains no CSV header")
+    duplicates = sorted(name for name, count in Counter(header).items() if count > 1)
+    if duplicates:
+        rendered = ", ".join(repr(name) for name in duplicates)
+        raise ValueError(f"{path} contains duplicate raw CSV headers: {rendered}")
+
+
+def _strict_numeric_column(
+    values: pd.Series,
+    *,
+    path: Path,
+    kind: str,
+    dates: pd.Series,
+    symbols: pd.Series | str,
+) -> pd.Series:
+    stripped = values.astype(str).str.strip()
+    blank = stripped.eq("")
+    parsed = pd.to_numeric(stripped.where(~blank, np.nan), errors="coerce")
+    finite = pd.Series(
+        np.isfinite(parsed.to_numpy(dtype=float, na_value=np.nan)),
+        index=parsed.index,
+    )
+    invalid = ~blank & ~finite
+    if bool(invalid.any()):
+        position = int(np.flatnonzero(invalid.to_numpy())[0])
+        csv_row = position + 2
+        date = dates.iloc[position]
+        symbol = symbols.iloc[position] if isinstance(symbols, pd.Series) else symbols
+        value = values.iloc[position]
+        raise ValueError(
+            f"{kind} input {path} contains malformed or non-finite numeric value: "
+            f"row={csv_row}, date={date!r}, symbol={symbol!r}, value={value!r}"
+        )
+    return parsed.astype(float)
+
+
+def _read_local_matrix(path: Path, *, kind: str) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"{kind} file not found: {path}")
+    if path.suffix.lower() not in {".csv", ".txt"}:
+        raise ValueError(f"{kind} input must be CSV")
+    _validate_raw_csv_headers(path)
+    raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+    lower = {str(column).strip().lower(): column for column in raw.columns}
+    if len(lower) != len(raw.columns):
+        raise ValueError(f"{kind} input {path} contains duplicate normalized CSV headers")
+    date_column = lower.get("date") or lower.get("timestamp")
+    symbol_column = lower.get("symbol") or lower.get("ticker")
+    value_candidates = (
+        ("price", "adjusted_close", "adj_close") if kind == "prices" else ("volume", "share_volume")
+    )
+    value_column = next((lower[name] for name in value_candidates if name in lower), None)
+    if date_column is not None and symbol_column is not None and value_column is not None:
+        if raw.duplicated([date_column, symbol_column]).any():
+            raise ValueError(f"{kind} long-form input has duplicate date/symbol rows")
+        strict_values = _strict_numeric_column(
+            raw[value_column],
+            path=path,
+            kind=kind,
+            dates=raw[date_column],
+            symbols=raw[symbol_column],
+        )
+        pivot_input = raw[[date_column, symbol_column]].copy()
+        pivot_input[value_column] = strict_values
+        matrix = pivot_input.pivot(
+            index=date_column,
+            columns=symbol_column,
+            values=value_column,
+        )
+    elif date_column is not None and symbol_column is not None:
+        accepted = ", ".join(value_candidates)
+        raise ValueError(f"{kind} long-form input requires one of: {accepted}")
+    else:
+        if raw.shape[1] < 2:
+            raise ValueError(
+                f"{kind} wide-form input requires a date column and at least one symbol"
+            )
+        date_values = raw.iloc[:, 0]
+        strict_columns = {
+            column: _strict_numeric_column(
+                raw[column],
+                path=path,
+                kind=kind,
+                dates=date_values,
+                symbols=str(column),
+            )
+            for column in raw.columns[1:]
+        }
+        matrix = pd.DataFrame(strict_columns, index=raw.index)
+        matrix.index = date_values
+    return _normalize_matrix(matrix, source=str(path))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_records_json_bytes(
+    frame: pd.DataFrame | list[dict[str, object]],
+) -> bytes:
+    """Serialize tabular provenance as RFC 8785 canonical finite JSON records."""
+
+    records = (
+        json.loads(
+            frame.to_json(
+                orient="records",
+                date_format="iso",
+                date_unit="ns",
+                double_precision=15,
+                force_ascii=False,
+            )
+        )
+        if isinstance(frame, pd.DataFrame)
+        else json.loads(json.dumps(frame, ensure_ascii=False, allow_nan=False))
+    )
+    return rfc8785.dumps(records)
+
+
+def canonical_records_sha256(frame: pd.DataFrame | list[dict[str, object]]) -> str:
+    """Hash ordered provenance rows after deterministic finite JSON serialization."""
+
+    return hashlib.sha256(_canonical_records_json_bytes(frame)).hexdigest()
+
+
+def _validated_provenance_frames(
+    price_sources: pd.DataFrame,
+    data_sources: pd.DataFrame,
+    candidate_symbols: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    normalized_prices = price_sources.copy()
+    normalized_health = data_sources.copy()
+    if (
+        normalized_prices.empty
+        or not {"symbol", "price_source"}.issubset(normalized_prices.columns)
+        or normalized_health.empty
+        or not {"source", "status"}.issubset(normalized_health.columns)
+    ):
+        raise ValueError("actual-market provider provenance is incomplete")
+    normalized_prices["symbol"] = normalized_prices["symbol"].map(
+        lambda value: "" if pd.isna(value) else normalize_symbol(str(value))
+    )
+    normalized_prices["price_source"] = normalized_prices["price_source"].map(
+        lambda value: "" if pd.isna(value) else str(value).strip()
+    )
+    symbols = normalized_prices["symbol"].tolist()
+    if (
+        any(not symbol for symbol in symbols)
+        or normalized_prices["price_source"].eq("").any()
+        or len(set(symbols)) != len(symbols)
+        or not set(candidate_symbols).issubset(symbols)
+    ):
+        raise ValueError("actual-market price-source coverage is invalid")
+    normalized_health["source"] = normalized_health["source"].map(
+        lambda value: "" if pd.isna(value) else str(value).strip()
+    )
+    normalized_health["status"] = normalized_health["status"].map(
+        lambda value: "" if pd.isna(value) else str(value).strip()
+    )
+    if normalized_health["source"].eq("").any() or normalized_health["status"].eq("").any():
+        raise ValueError("actual-market source-health rows are invalid")
+    return normalized_prices, normalized_health
+
+
+def _ordered_symbols_sha256(symbols: list[str]) -> str:
+    payload = json.dumps(symbols, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_matrix_sha256(frame: pd.DataFrame) -> str:
+    """Hash ordered labels, dates, missingness, and finite float64 values."""
+
+    numeric = frame.to_numpy(dtype=np.float64, na_value=np.nan)
+    missing = np.isnan(numeric)
+    if bool((~missing & ~np.isfinite(numeric)).any()):
+        raise ValueError("cannot hash a matrix containing non-finite non-missing values")
+    stable_values = numeric.copy()
+    stable_values[missing] = 0.0
+
+    digest = hashlib.sha256()
+    digest.update(b"momentum-factor-lab-matrix-v1\0")
+    digest.update(np.asarray(frame.shape, dtype="<i8").tobytes())
+    for column in frame.columns:
+        encoded = str(column).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "little"))
+        digest.update(encoded)
+    dates = pd.DatetimeIndex(frame.index).asi8.astype("<i8", copy=False)
+    digest.update(dates.tobytes())
+    digest.update(np.packbits(missing.reshape(-1), bitorder="little").tobytes())
+    digest.update(stable_values.astype("<f8", copy=False).tobytes(order="C"))
+    return digest.hexdigest()
 
 
 def _business_dates(config: RunConfig) -> pd.DatetimeIndex:
-    end = pd.Timestamp(config.end_date or "2025-12-31")
-    return pd.bdate_range(config.start_date, end)
+    end = config.end_date or "2025-12-31"
+    dates = pd.bdate_range(config.start_date, end)
+    if len(dates) < config.min_history_days + 2:
+        raise ValueError("demo date range is too short for the configured history requirement")
+    return dates
 
 
-def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
-    columns = [
-        "source",
-        "status",
-        "records",
-        "candidate_symbols",
-        "requested_price_symbols",
-        "returned_price_symbols",
-        "eligible_price_symbols",
-        "liquidity_eligible_symbols",
-        "excluded_symbols",
-        "subset_run",
-        "point_in_time_universe",
-        "tradable_universe_approved",
-        "universe_provenance",
-        "cache_path",
-        "retries",
-        "error",
-        "note",
-        "benchmark_symbol",
-        "benchmark_price_available",
-        "chart_benchmark_symbol",
-        "chart_benchmark_price_available",
-        "requested_download_symbols",
-        "requested_symbols",
-        "returned_symbols",
-        "missing_symbols",
-        "as_of_min",
-        "as_of_max",
-        "cache_hit",
-        "provider_adjustment_note",
-    ]
-    if not rows:
-        return pd.DataFrame(columns=columns)
-    frame = pd.DataFrame(rows)
-    for col in columns:
-        if col not in frame:
-            frame[col] = None
-    return frame[columns]
-
-
-def _candidate_universe(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
-    refresh_requested = config.universe_source_mode == "refresh" or config.universe_profile in {
-        "extended_current",
-        "aggressive_stock_only",
-    }
-    if refresh_requested and not config.offline_sample:
-        result = build_public_universe_frame(
-            cache_dir=config.cache_dir / "universe",
-            retry_count=config.retry_count,
-            retry_backoff_seconds=config.retry_backoff_seconds,
-            user_agent=config.sec_user_agent,
+def _resolved_demo_symbols(config: RunConfig) -> list[str]:
+    benchmark = normalize_symbol(config.benchmark)
+    available = [symbol for symbol in DEFAULT_UNIVERSE if symbol != benchmark]
+    if len(available) < config.demo_symbol_count:
+        available.extend(
+            f"DEMO{i:04d}" for i in range(1, config.demo_symbol_count - len(available) + 1)
         )
-        data_sources = result.data_sources.copy()
-        data_sources["universe_profile"] = config.universe_profile
-        data_sources["universe_source_mode"] = "refresh"
-        data_sources["point_in_time_universe"] = False
-        data_sources["tradable_universe_approved"] = False
-        return result.frame, data_sources
-    frame = universe_frame_for_symbols(config.universe)
-    source_name = "packaged-default-universe" if len(frame) > len(SAMPLE_UNIVERSE) else "user-supplied-universe"
-    status = "loaded"
-    note = None
-    if refresh_requested and config.offline_sample:
-        status = "packaged_fallback_for_offline_profile"
-        note = (
-            "Offline/sample mode keeps the reproducible packaged stock-only universe; current refresh "
-            "profiles need a live run for current recommendations; missing PIT evidence is reported as a limitation."
-        )
-    return frame, pd.DataFrame(
-        [
-            {
-                "source": source_name,
-                "status": status,
-                "records": len(frame),
-                "candidate_symbols": len(frame),
-                "point_in_time_universe": False,
-                "tradable_universe_approved": False,
-                "universe_provenance": source_name.replace("-", " "),
-                "universe_profile": config.universe_profile,
-                "universe_source_mode": config.universe_source_mode,
-                "cache_path": "package-resource",
-                "retries": 0,
-                "note": note,
-            }
-        ]
-    )
+    return available[: config.demo_symbol_count]
 
 
-def _point_in_time_provenance_source(config: RunConfig, candidate: pd.DataFrame) -> pd.DataFrame:
-    if config.point_in_time_universe_provenance is None and not config.approved_tradable_universe:
-        return _source_frame([])
-    provenance = (config.point_in_time_universe_provenance or "").strip()
-    return _source_frame(
-        [
-            {
-                "source": "user-point-in-time-universe-provenance",
-                "status": "attested" if provenance else "missing_provenance",
-                "records": len(candidate),
-                "candidate_symbols": len(candidate),
-                "point_in_time_universe": bool(provenance),
-                "tradable_universe_approved": bool(config.approved_tradable_universe),
-                "universe_provenance": provenance,
-                "retries": 0,
-                "note": (
-                    "User-supplied point-in-time/tradable-universe provenance. The lab records this evidence "
-                    "for gating but does not independently validate survivorship-free historical membership."
-                ),
-            }
-        ]
-    )
-
-
-
-def _comparator_symbols(config: RunConfig) -> list[str]:
-    """Symbols fetched only for benchmark/comparison charts, never holdings."""
-
-    symbols = [normalize_symbol(config.benchmark), normalize_symbol(config.chart_benchmark)]
-    return list(dict.fromkeys(symbol for symbol in symbols if symbol))
-
-def _requested_symbols(config: RunConfig, candidate: pd.DataFrame) -> tuple[list[str], bool]:
-    comparators = _comparator_symbols(config)
-    comparator_set = set(comparators)
-    candidate_symbols = [
-        symbol
-        for symbol in candidate["symbol"].tolist()
-        if symbol not in comparator_set and not is_known_etf_symbol(symbol)
-    ]
-    symbols = list(dict.fromkeys([*comparators, *candidate_symbols]))
-    if config.max_price_symbols is not None and len(symbols) > config.max_price_symbols:
-        keep = [comparators[0]]
-        for symbol in [*comparators[1:], *candidate_symbols]:
-            if symbol not in keep and len(keep) < config.max_price_symbols:
-                keep.append(symbol)
-            if len(keep) >= config.max_price_symbols:
-                break
-        return keep, True
-    return symbols, False
-
-
-def _price_source_frame(symbols: Iterable[str], source: str) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "symbol": list(symbols),
-            "price_source": source,
-            "provider_adjustment_note": (
-                "Deterministic synthetic adjusted-close sample; not executable market data."
-                if source == "deterministic-offline-sample"
-                else None
-            ),
-        }
-    )
-
-
-DATA_QUALITY_COLUMNS = [
-    "symbol",
-    "role",
-    "price_source",
-    "provider",
-    "first_price_date",
-    "last_price_date",
-    "observation_count",
-    "missing_ratio",
-    "volume_missing_ratio",
-    "latest_price",
-    "volume_obs_count",
-    "avg_share_volume_63d",
-    "avg_dollar_volume_63d",
-    "non_positive_price_observations",
-    "max_abs_daily_return",
-    "extreme_return_observations",
-    "full_history_max_abs_daily_return",
-    "full_history_extreme_return_observations",
-    "stale_days",
-    "exclusion_reason",
-    "data_quality_status",
-    "data_quality_pass",
-    "data_quality_warning",
-]
-
-YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
-YAHOO_CHART_TIMEOUT_SECONDS = 20
-
-
-def _exclusion_status(reason: object) -> str:
-    text = str(reason or "").strip().lower()
-    if not text:
-        return "pass"
-    if "missing from price" in text:
-        return "missing_price"
-    if "excessive missing price" in text:
-        return "excessive_missing_price"
-    if "excessive missing volume" in text:
-        return "excessive_missing_volume"
-    if "non-positive price" in text:
-        return "non_positive_price"
-    if "extreme adjusted daily return" in text:
-        return "extreme_return_anomaly"
-    if "provider adjustment" in text or "provider-adjustment" in text:
-        return "provider_adjustment_incompatible"
-    if "insufficient price history" in text:
-        return "insufficient_history"
-    if "stale" in text:
-        return "stale_price"
-    if "minimum price" in text:
-        return "below_minimum_price"
-    if "missing volume" in text:
-        return "missing_volume"
-    if "dollar-volume" in text or "share-volume" in text:
-        return "below_liquidity_floor"
-    if "benchmark" in text:
-        return "insufficient_benchmark_history"
-    if "etf" in text:
-        return "known_etf_excluded"
-    if "not in stock candidate" in text:
-        return "not_in_stock_candidate_universe"
-    return "excluded"
-
-
-def _matching_column(frame: pd.DataFrame, symbol: str) -> str | None:
-    normalized = normalize_symbol(symbol)
-    return next((column for column in frame.columns if normalize_symbol(str(column)) == normalized), None)
-
-
-def _price_source_map(price_sources: pd.DataFrame) -> dict[str, str]:
-    if price_sources.empty or "symbol" not in price_sources or "price_source" not in price_sources:
-        return {}
-    return {
-        normalize_symbol(str(row["symbol"])): str(row["price_source"])
-        for _, row in price_sources.dropna(subset=["symbol"]).iterrows()
-    }
-
-
-def build_data_quality_frame(
+def _inject_demo_gaps(
     prices: pd.DataFrame,
     volumes: pd.DataFrame,
-    requested_symbols: Iterable[str],
-    candidate: pd.DataFrame,
+    symbols: list[str],
     config: RunConfig,
-    *,
-    provider: str,
-    price_sources: pd.DataFrame | None = None,
-    exclusions: pd.DataFrame | None = None,
-    as_of: pd.Timestamp | None = None,
-) -> pd.DataFrame:
-    """Build auditable per-symbol price/volume quality diagnostics.
-
-    The manifest separates hard price-integrity evidence from advisory
-    volume/liquidity/provider-compatibility warnings so broad live runs can keep
-    coverage without hiding source quality limitations.
-    """
-
-    requested = list(dict.fromkeys(normalize_symbol(symbol) for symbol in requested_symbols))
-    if not requested:
-        return pd.DataFrame(columns=DATA_QUALITY_COLUMNS)
-    prices = prices.sort_index()
-    volumes = volumes.reindex(index=prices.index)
-    benchmark = normalize_symbol(config.benchmark)
-    comparator_symbols = set(_comparator_symbols(config))
-    candidate_symbols = set(candidate["symbol"].map(normalize_symbol)) if "symbol" in candidate else set()
-    price_source_frame = price_sources if price_sources is not None else pd.DataFrame()
-    source_by_symbol = _price_source_map(price_source_frame)
-    exclusions_by_symbol: dict[str, object] = {}
-    if exclusions is not None and not exclusions.empty and {"symbol", "reason"}.issubset(exclusions.columns):
-        exclusions_by_symbol = {
-            normalize_symbol(str(row["symbol"])): row["reason"]
-            for _, row in exclusions.dropna(subset=["symbol"]).iterrows()
-        }
-    data_as_of = pd.Timestamp(as_of).normalize() if as_of is not None else None
-    if data_as_of is None and not prices.empty:
-        data_as_of = pd.Timestamp(prices.dropna(how="all").index.max()).normalize()
-
-    rows: list[dict[str, object]] = []
-    for symbol in requested:
-        price_column = _matching_column(prices, symbol)
-        volume_column = _matching_column(volumes, symbol)
-        price_series = (
-            pd.to_numeric(prices[price_column], errors="coerce")
-            if price_column is not None
-            else pd.Series(index=prices.index, dtype=float)
-        )
-        volume_series = (
-            pd.to_numeric(volumes[volume_column], errors="coerce")
-            if volume_column is not None
-            else pd.Series(index=prices.index, dtype=float)
-        )
-        valid_prices = price_series.dropna()
-        valid_volumes = volume_series.dropna()
-        first_price_date = valid_prices.index.min() if not valid_prices.empty else None
-        last_price_date = valid_prices.index.max() if not valid_prices.empty else None
-        latest_price = float(valid_prices.iloc[-1]) if not valid_prices.empty else np.nan
-        stale_days = (
-            (data_as_of - pd.Timestamp(last_price_date).normalize()).days
-            if data_as_of is not None and last_price_date is not None
-            else np.nan
-        )
-        quality_prices = price_series.tail(config.data_quality_lookback_days)
-        quality_volumes = volume_series.tail(config.data_quality_lookback_days)
-        tail_prices = price_series.tail(63)
-        tail_volumes = volume_series.tail(63)
-        avg_share_volume = float(tail_volumes.mean()) if not tail_volumes.dropna().empty else np.nan
-        avg_dollar_volume = (
-            float(tail_prices.mul(tail_volumes).mean())
-            if not tail_prices.dropna().empty and not tail_volumes.dropna().empty
-            else np.nan
-        )
-        missing_ratio = (
-            float(quality_prices.isna().mean())
-            if len(quality_prices.index) > 0 and price_column is not None
-            else np.nan
-        )
-        volume_missing_ratio = (
-            float(quality_volumes.isna().mean())
-            if len(quality_volumes.index) > 0 and volume_column is not None
-            else np.nan
-        )
-        non_positive_prices = int(quality_prices.le(0).fillna(False).sum())
-        daily_returns = quality_prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).abs()
-        max_abs_daily_return = float(daily_returns.max()) if not daily_returns.dropna().empty else np.nan
-        extreme_return_observations = int(
-            daily_returns.gt(config.max_extreme_daily_return).fillna(False).sum()
-        )
-        full_history_returns = price_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).abs()
-        full_history_max_abs_daily_return = (
-            float(full_history_returns.max()) if not full_history_returns.dropna().empty else np.nan
-        )
-        full_history_extreme_return_observations = int(
-            full_history_returns.gt(config.max_extreme_daily_return).fillna(False).sum()
-        )
-        exclusion_reason = exclusions_by_symbol.get(symbol)
-        price_source = source_by_symbol.get(symbol, "unavailable" if price_column is None else provider)
-        if symbol in comparator_symbols:
-            role = "benchmark" if symbol == benchmark else "chart_benchmark"
-            status = "benchmark_comparator_only" if len(valid_prices) >= 2 else "insufficient_benchmark_history"
-        elif price_column is None or valid_prices.empty:
-            role = "missing"
-            status = "missing_price"
-            exclusion_reason = exclusion_reason or "missing from price providers"
-        elif exclusion_reason:
-            role = "excluded"
-            status = _exclusion_status(exclusion_reason)
-        elif symbol not in candidate_symbols or is_known_etf_symbol(symbol):
-            role = "excluded"
-            exclusion_reason = "not in stock candidate universe"
-            status = _exclusion_status(exclusion_reason)
-        else:
-            role = "candidate"
-            status = "pass"
-            if pd.notna(stale_days) and int(stale_days) > config.stale_after_days:
-                status = "stale_price"
-            elif "close-fallback" in price_source:
-                status = "provider_adjustment_incompatible"
-            elif len(valid_prices) < config.min_history_days:
-                status = "insufficient_history"
-            elif non_positive_prices > 0:
-                status = "non_positive_price"
-            elif pd.notna(missing_ratio) and missing_ratio > config.max_price_missing_ratio:
-                status = "excessive_missing_price"
-            elif pd.isna(latest_price) or latest_price < config.min_price:
-                status = "below_minimum_price"
-            elif valid_volumes.empty:
-                status = "missing_volume"
-            elif (
-                config.min_avg_dollar_volume > 0 or config.min_avg_volume > 0
-            ) and pd.notna(volume_missing_ratio) and volume_missing_ratio > config.max_volume_missing_ratio:
-                status = "excessive_missing_volume"
-            elif int(tail_volumes.count()) < config.min_liquidity_observations:
-                status = "insufficient_liquidity_observations"
-            elif config.min_avg_volume > 0 and avg_share_volume < config.min_avg_volume:
-                status = "below_liquidity_floor"
-            elif config.min_avg_dollar_volume > 0 and avg_dollar_volume < config.discovery_min_avg_dollar_volume:
-                status = "below_liquidity_floor"
-            elif extreme_return_observations > 0 or full_history_extreme_return_observations > 0:
-                status = "extreme_return_anomaly"
-            if status != "pass":
-                role = "excluded"
-                exclusion_reason = exclusion_reason or status
-
-        warning = (
-            "pass"
-            if status in {"pass", "benchmark_comparator_only"}
-            else f"{status}: inspect source data before practical use"
-        )
-
-        rows.append(
-            {
-                "symbol": symbol,
-                "role": role,
-                "price_source": price_source,
-                "provider": provider,
-                "first_price_date": first_price_date.date().isoformat() if first_price_date is not None else None,
-                "last_price_date": last_price_date.date().isoformat() if last_price_date is not None else None,
-                "observation_count": int(valid_prices.count()),
-                "missing_ratio": missing_ratio,
-                "volume_missing_ratio": volume_missing_ratio,
-                "latest_price": latest_price,
-                "volume_obs_count": int(valid_volumes.count()),
-                "avg_share_volume_63d": avg_share_volume,
-                "avg_dollar_volume_63d": avg_dollar_volume,
-                "non_positive_price_observations": non_positive_prices,
-                "max_abs_daily_return": max_abs_daily_return,
-                "extreme_return_observations": extreme_return_observations,
-                "full_history_max_abs_daily_return": full_history_max_abs_daily_return,
-                "full_history_extreme_return_observations": full_history_extreme_return_observations,
-                "stale_days": int(stale_days) if pd.notna(stale_days) else np.nan,
-                "exclusion_reason": exclusion_reason,
-                "data_quality_status": status,
-                "data_quality_pass": status in {"pass", "benchmark_comparator_only"},
-                "data_quality_warning": warning,
-            }
-        )
-    return pd.DataFrame(rows, columns=DATA_QUALITY_COLUMNS)
-
-
-def generate_offline_sample_data(config: RunConfig) -> MarketData:
-    candidate, universe_sources = _candidate_universe(config)
-    comparator_symbols = _comparator_symbols(config)
-    symbols = list(dict.fromkeys([*comparator_symbols, *SAMPLE_UNIVERSE, *config.universe[:8]]))[:24]
-    dates = _business_dates(config)
-    rng = np.random.default_rng(42)
-    common = rng.normal(0.00025, 0.008, len(dates))
-    prices: dict[str, np.ndarray] = {}
-    volumes: dict[str, np.ndarray] = {}
-    for i, symbol in enumerate(symbols):
-        style = (i % 6) - 2
-        drift = 0.00012 + 0.00004 * style
-        vol = 0.011 + 0.0015 * (i % 5)
-        seasonal = 0.0008 * np.sin(np.linspace(0, 10 + i / 3, len(dates)))
-        shock = rng.normal(drift, vol, len(dates)) + 0.35 * common + seasonal
-        if symbol in {"NVDA", "MSFT", "AAPL", "AVGO", "TSLA"}:
-            shock += np.linspace(-0.0001, 0.00045, len(dates))
-        if symbol in {"JPM", "XOM"}:
-            shock += 0.00015 * np.sin(np.linspace(0, 22, len(dates)))
-        series = 80 * np.exp(np.cumsum(shock))
-        prices[symbol] = np.maximum(series, 1.0)
-        volumes[symbol] = rng.integers(1_000_000, 25_000_000, len(dates)) * (1 + i / 25)
-    price_df = pd.DataFrame(prices, index=dates).round(4)
-    volume_df = pd.DataFrame(volumes, index=dates).round(0)
-    exclusions = pd.DataFrame(columns=["symbol", "reason"])
-    candidate_symbol_set = set(candidate["symbol"])
-    eligible_symbols = [symbol for symbol in symbols if symbol in candidate_symbol_set]
-    eligible = stock_only_universe_frame(candidate[candidate["symbol"].isin(eligible_symbols)])
-    price_sources = _price_source_frame(symbols, "deterministic-offline-sample")
-    data_quality = build_data_quality_frame(
-        price_df,
-        volume_df,
-        symbols,
-        candidate,
-        config,
-        provider="deterministic-offline-sample",
-        price_sources=price_sources,
-        exclusions=exclusions,
-        as_of=price_df.index.max(),
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if config.demo_missing_ratio == 0.0:
+        return prices, volumes
+    eligible_cells = (len(prices.index) - 1) * len(symbols)
+    gap_count = min(
+        eligible_cells,
+        max(1, int(np.ceil(eligible_cells * config.demo_missing_ratio))),
     )
-    data_sources = pd.concat(
-        [
-            universe_sources,
-            _source_frame(
-                [
-                    {
-                        "source": "deterministic-offline-sample",
-                        "status": "generated",
-                        "records": len(symbols),
-                        "candidate_symbols": len(candidate),
-                        "requested_price_symbols": len(eligible_symbols),
-                        "returned_price_symbols": len(eligible_symbols),
-                        "eligible_price_symbols": len(eligible_symbols),
-                        "requested_download_symbols": len(symbols),
-                        "requested_symbols": ",".join(symbols),
-                        "returned_symbols": ",".join(price_df.columns),
-                        "missing_symbols": "",
-                        "as_of_min": str(price_df.dropna(how="all").index.min().date()),
-                        "as_of_max": str(price_df.dropna(how="all").index.max().date()),
-                        "cache_hit": False,
-                        "benchmark_symbol": normalize_symbol(config.benchmark),
-                        "benchmark_price_available": normalize_symbol(config.benchmark) in price_df.columns,
-                        "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
-                        "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark) in price_df.columns,
-                        "excluded_symbols": 0,
-                        "subset_run": True,
-                        "point_in_time_universe": False,
-                        "tradable_universe_approved": False,
-                        "provider_adjustment_note": "Synthetic adjusted-close sample for deterministic CI/reporting only.",
-                        "note": "Offline CI/sample mode uses deterministic synthetic prices while preserving broad candidate-universe metadata.",
-                    }
-                ]
-            ),
-            _point_in_time_provenance_source(config, candidate),
-        ],
-        ignore_index=True,
-    )
-    return MarketData(
-        prices=price_df,
-        volumes=volume_df,
-        provider="deterministic-offline-sample",
-        fetched_at=datetime.now(UTC),
-        as_of=price_df.index.max(),
-        exclusions=exclusions,
-        offline_sample=True,
-        candidate_universe=candidate,
-        eligible_universe=eligible,
-        price_sources=price_sources,
-        data_sources=data_sources,
-        data_quality=data_quality,
-    )
+    seed_material = f"{DEMO_GENERATOR_VERSION}|missing|{config.demo_seed}".encode("utf-8")
+    missing_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "little")
+    rng = np.random.default_rng(missing_seed)
+    selected = rng.choice(eligible_cells, size=gap_count, replace=False)
+    mask = np.zeros((len(prices.index), len(symbols)), dtype=bool)
+    mask[:-1].flat[selected] = True
 
-
-def _extract_yfinance(download: pd.DataFrame, symbols: Iterable[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if download.empty:
-        return pd.DataFrame(), pd.DataFrame()
-    symbols = list(symbols)
-    if isinstance(download.columns, pd.MultiIndex):
-        lvl0 = set(map(str, download.columns.get_level_values(0)))
-        if "Close" in lvl0 or "Adj Close" in lvl0:
-            close_key = "Close" if "Close" in lvl0 else "Adj Close"
-            prices = download[close_key].copy()
-            volumes = download["Volume"].copy() if "Volume" in lvl0 else pd.DataFrame(index=prices.index)
-        else:
-            price_cols = {}
-            volume_cols = {}
-            for symbol in symbols:
-                if symbol in download.columns.get_level_values(0):
-                    sub = download[symbol]
-                    if "Adj Close" in sub:
-                        price_cols[symbol] = sub["Adj Close"]
-                    elif "Close" in sub:
-                        price_cols[symbol] = sub["Close"]
-                    if "Volume" in sub:
-                        volume_cols[symbol] = sub["Volume"]
-            prices = pd.DataFrame(price_cols)
-            volumes = pd.DataFrame(volume_cols)
-    else:
-        prices = pd.DataFrame({symbols[0]: download.get("Adj Close", download.get("Close"))})
-        volumes = pd.DataFrame({symbols[0]: download.get("Volume")})
-    prices.index = pd.to_datetime(prices.index).tz_localize(None)
-    volumes.index = pd.to_datetime(volumes.index).tz_localize(None)
-    return prices.dropna(axis=1, how="all"), volumes.reindex(columns=prices.columns)
-
-
-def _chunks(items: list[str], size: int) -> Iterable[list[str]]:
-    for start in range(0, len(items), size):
-        yield items[start : start + size]
-
-
-def _price_cache_path(config: RunConfig, provider: str, symbols: list[str]) -> Path:
-    key = json.dumps(
-        {
-            "provider": provider,
-            "symbols": symbols,
-            "start_date": config.start_date,
-            "end_date": config.effective_end_date,
-            "download_end_date": (
-                _yfinance_download_end_date(config)
-                if provider == "yfinance"
-                else config.effective_end_date
-            ),
-            "auto_adjust": True,
-        },
-        sort_keys=True,
-    )
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
-    return config.cache_dir / "prices" / f"{provider}_{digest}.json"
-
-
-def _price_cache_component_paths(metadata_path: Path) -> dict[str, Path]:
-    return {
-        "metadata": metadata_path,
-        "prices": metadata_path.with_suffix(".prices.csv"),
-        "volumes": metadata_path.with_suffix(".volumes.csv"),
-    }
-
-
-def _read_price_cache(metadata_path: Path) -> tuple[pd.DataFrame, pd.DataFrame] | None:
-    paths = _price_cache_component_paths(metadata_path)
-    if not all(path.exists() for path in paths.values()):
-        return None
-    try:
-        metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
-        prices = pd.read_csv(paths["prices"], index_col=0, parse_dates=True)
-        volumes = pd.read_csv(paths["volumes"], index_col=0, parse_dates=True)
-        symbols = [str(symbol) for symbol in metadata.get("symbols", prices.columns.tolist())]
-        prices = prices.reindex(columns=symbols)
-        volumes = volumes.reindex(index=prices.index, columns=symbols)
-    except Exception:
-        return None
+    prices = prices.copy()
+    volumes = volumes.copy()
+    prices.loc[:, symbols] = prices.loc[:, symbols].mask(mask)
+    volumes.loc[:, symbols] = volumes.loc[:, symbols].mask(mask)
     return prices, volumes
 
 
-def _write_price_cache(metadata_path: Path, prices: pd.DataFrame, volumes: pd.DataFrame, *, provider: str, symbols: list[str]) -> None:
-    paths = _price_cache_component_paths(metadata_path)
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    metadata = {
-        "version": 1,
-        "provider": provider,
-        "symbols": symbols,
-        "price_file": paths["prices"].name,
-        "volume_file": paths["volumes"].name,
-        "format": "csv+json",
-        "created_at_utc": datetime.now(UTC).isoformat(),
-    }
-    paths["metadata"].write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-    prices.to_csv(paths["prices"])
-    volumes.reindex(index=prices.index, columns=prices.columns).to_csv(paths["volumes"])
+def generate_demo_data(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Generate a broad deterministic fixture for UI and regression testing.
 
-
-def _yfinance_download_end_date(config: RunConfig) -> str | None:
-    """Return the yfinance `end` argument for an inclusive user end date.
-
-    yfinance treats `end` as an exclusive bound. The lab's CLI/config dates are
-    user-facing analysis dates, and the offline/Stooq/FinanceDataReader paths
-    already treat an explicit `end_date` as inclusive. Add one calendar day only
-    for explicit yfinance downloads so `--end-date 2026-06-08` can include the
-    2026-06-08 trading session when the provider has it available.
+    The paths are deliberately stylized and must never be described as observed
+    prices or empirical factor evidence.
     """
 
-    if config.end_date is None:
-        return None
-    return (pd.Timestamp(config.end_date).date() + timedelta(days=1)).isoformat()
+    symbols = _resolved_demo_symbols(config)
+    benchmark = normalize_symbol(config.benchmark)
+    dates = _business_dates(config)
+    rng = np.random.default_rng(config.demo_seed)
+    common = rng.normal(0.00028, 0.009, len(dates))
+    time = np.arange(len(dates), dtype=float)
+    prices: dict[str, np.ndarray] = {}
+    volumes: dict[str, np.ndarray] = {}
 
+    benchmark_returns = common + rng.normal(0.0, 0.0025, len(dates))
+    prices[benchmark] = 100.0 * np.exp(np.cumsum(benchmark_returns))
+    volumes[benchmark] = rng.integers(30_000_000, 100_000_000, len(dates))
 
-def _stooq_cache_path(config: RunConfig, symbol: str) -> Path:
-    safe = symbol.replace("/", "_").replace("-", "_")
-    return config.cache_dir / "prices" / "stooq" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
+    for index, symbol in enumerate(symbols):
+        cohort = index % 12
+        drift = 0.00008 + 0.000025 * ((index % 7) - 3)
+        idiosyncratic = rng.normal(drift, 0.010 + 0.001 * (index % 5), len(dates))
+        regime = np.zeros(len(dates), dtype=float)
+        if cohort == 0:
+            regime += 0.00038
+        elif cohort == 1:
+            regime += 0.00034
+            regime[-126:] -= 0.00095
+        elif cohort == 2:
+            regime[-63:] += 0.00110
+        elif cohort == 3:
+            regime += np.linspace(-0.00020, 0.00060, len(dates))
+        elif cohort == 4:
+            regime += np.linspace(0.00060, -0.00020, len(dates))
+        elif cohort == 5:
+            regime += 0.00042 * np.sin(time / 18.0)
+        elif cohort == 6:
+            regime += 0.00022
+        elif cohort == 7:
+            regime[-21:] += 0.00130
+        elif cohort == 8:
+            regime[-21:] -= 0.00130
+        elif cohort == 9:
+            regime += 0.00042 * np.sin(time / 45.0 + index)
+        elif cohort == 10:
+            idiosyncratic *= 0.70
+            regime += 0.00018
+        else:
+            idiosyncratic *= 1.25
+        returns = 0.42 * common + idiosyncratic + regime
+        prices[symbol] = 35.0 * np.exp(np.cumsum(returns))
+        base_volume = rng.integers(1_000_000, 18_000_000, len(dates)).astype(float)
+        volumes[symbol] = base_volume * (1.0 + (index % 10) / 12.0)
 
-
-def _yahoo_chart_cache_path(config: RunConfig, symbol: str) -> Path:
-    safe = symbol.replace("/", "_").replace("-", "_").replace("^", "INDEX_")
-    return config.cache_dir / "prices" / "yahoo_chart" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
-
-
-def _nasdaq_cache_path(config: RunConfig, symbol: str) -> Path:
-    safe = symbol.replace("/", "_").replace("-", "_").replace("^", "INDEX_")
-    return config.cache_dir / "prices" / "nasdaq" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
-
-
-def _finance_datareader_cache_path(config: RunConfig, symbol: str) -> Path:
-    safe = symbol.replace("/", "_").replace("-", "_")
-    return config.cache_dir / "prices" / "finance_datareader" / f"{safe}_{config.start_date}_{config.effective_end_date}.csv"
-
-
-def _download_yfinance_chunk(symbols: list[str], config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
-    cache_path = _price_cache_path(config, "yfinance", symbols)
-    cached = _read_price_cache(cache_path)
-    if cached is not None:
-        prices, volumes = cached
-        return prices, volumes, {
-            "status": "cache_hit",
-            "retries": 0,
-            "error": None,
-            "cache_path": str(cache_path),
-            "cache_format": "csv+json",
-        }
-
-    import yfinance as yf  # type: ignore
-
-    last_error = None
-    for attempt in range(config.retry_count + 1):
-        try:
-            raw = yf.download(
-                tickers=symbols,
-                start=config.start_date,
-                end=_yfinance_download_end_date(config),
-                auto_adjust=True,
-                group_by="column",
-                progress=False,
-                threads=False,
-                timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
-            )
-            prices, volumes = _extract_yfinance(raw, symbols)
-            _write_price_cache(cache_path, prices, volumes, provider="yfinance", symbols=symbols)
-            return prices, volumes, {
-                "status": "fetched",
-                "retries": attempt,
-                "error": None,
-                "cache_path": str(cache_path),
-                "cache_format": "csv+json",
-            }
-        except Exception as exc:  # pragma: no cover - network dependent
-            last_error = exc
-            if attempt < config.retry_count:
-                time.sleep(config.retry_backoff_seconds)
-    return pd.DataFrame(), pd.DataFrame(), {
-        "status": "failed",
-        "retries": config.retry_count,
-        "error": str(last_error),
-        "cache_path": str(cache_path),
-        "cache_format": "csv+json",
-    }
-
-
-def _download_yfinance(symbols: list[str], config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    price_frames: list[pd.DataFrame] = []
-    volume_frames: list[pd.DataFrame] = []
-    rows: list[dict[str, object]] = []
-    for chunk in _chunks(symbols, config.price_chunk_size):
-        prices, volumes, status = _download_yfinance_chunk(chunk, config)
-        price_frames.append(prices)
-        volume_frames.append(volumes)
-        returned = [symbol for symbol in chunk if symbol in prices.columns]
-        missing = [symbol for symbol in chunk if symbol not in prices.columns]
-        rows.append(
-            {
-                "source": "yfinance-adjusted-daily",
-                "status": status["status"],
-                "records": len(prices.columns),
-                "requested_price_symbols": len(chunk),
-                "requested_symbols": ",".join(chunk),
-                "returned_symbols": ",".join(returned),
-                "missing_symbols": ",".join(missing),
-                "as_of_min": (
-                    str(prices.dropna(how="all").index.min().date()) if not prices.empty else None
-                ),
-                "as_of_max": (
-                    str(prices.dropna(how="all").index.max().date()) if not prices.empty else None
-                ),
-                "cache_hit": status["status"] == "cache_hit",
-                "cache_path": status.get("cache_path"),
-                "retries": status["retries"],
-                "error": status["error"],
-                "provider_adjustment_note": "yfinance auto_adjust=True daily close series.",
-            }
-        )
-    prices = pd.concat(price_frames, axis=1) if price_frames else pd.DataFrame()
-    volumes = pd.concat(volume_frames, axis=1) if volume_frames else pd.DataFrame(index=prices.index)
-    prices = prices.loc[:, ~prices.columns.duplicated()].sort_index()
-    volumes = volumes.loc[:, ~volumes.columns.duplicated()].reindex(index=prices.index, columns=prices.columns)
-    return prices, volumes, pd.DataFrame(rows)
-
-
-def _unix_seconds_for_date(value: str, *, add_days: int = 0) -> int:
-    timestamp = pd.Timestamp(value).normalize() + pd.Timedelta(days=add_days)
-    return int(timestamp.tz_localize(UTC).timestamp())
-
-
-def _yahoo_chart_symbol(symbol: str) -> str:
-    # Yahoo chart expects Yahoo-style tickers. The project stores normalized
-    # tickers, so only slash-class shares need translation back to Yahoo's dash
-    # form here.
-    return quote(symbol.replace("/", "-"), safe="")
-
-
-def _frame_from_yahoo_chart_payload(payload: dict[str, object], symbol: str) -> tuple[pd.DataFrame | None, str | None]:
-    chart = payload.get("chart")
-    if not isinstance(chart, dict):
-        return None, "invalid Yahoo chart payload: missing chart object"
-    errors = chart.get("error")
-    if errors:
-        return None, f"Yahoo chart error: {errors}"
-    results = chart.get("result")
-    if not isinstance(results, list) or not results:
-        return None, "empty Yahoo chart response"
-    result = results[0]
-    if not isinstance(result, dict):
-        return None, "invalid Yahoo chart response"
-    timestamps = result.get("timestamp")
-    indicators = result.get("indicators")
-    if not isinstance(timestamps, list) or not timestamps or not isinstance(indicators, dict):
-        return None, "empty Yahoo chart timestamp/indicator response"
-    quotes = indicators.get("quote")
-    adjcloses = indicators.get("adjclose")
-    if not isinstance(quotes, list) or not quotes or not isinstance(quotes[0], dict):
-        return None, "Yahoo chart response missing quote data"
-    if not isinstance(adjcloses, list) or not adjcloses or not isinstance(adjcloses[0], dict):
-        return None, "Yahoo chart response missing adjusted close data"
-    adjusted = adjcloses[0].get("adjclose")
-    if not isinstance(adjusted, list) or not adjusted:
-        return None, "Yahoo chart response missing adjusted close values"
-    volume = quotes[0].get("volume", [])
-    if not isinstance(volume, list):
-        volume = []
-    dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None).normalize()
-    frame = pd.DataFrame(
-        {
-            "Date": dates,
-            "Close": pd.to_numeric(pd.Series(adjusted), errors="coerce"),
-            "Volume": pd.to_numeric(pd.Series(volume), errors="coerce"),
-        }
+    price_frame = pd.DataFrame(prices, index=dates).round(4)
+    volume_frame = pd.DataFrame(volumes, index=dates).round(0)
+    return _inject_demo_gaps(
+        price_frame,
+        volume_frame,
+        symbols,
+        config,
     )
-    frame = frame.dropna(subset=["Date", "Close"])
-    if frame.empty:
-        return None, f"Yahoo chart response for {symbol} had no numeric adjusted close rows"
-    return frame, None
 
 
-def _download_yahoo_chart_symbol(
-    symbol: str,
-    config: RunConfig,
-) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
-    cache_path = _yahoo_chart_cache_path(config, symbol)
-    if cache_path.exists():
-        try:
-            frame = pd.read_csv(cache_path)
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "Yahoo chart cache")
-            if price is None:
-                return None, None, error, "cache_hit_invalid", str(cache_path), 0
-            return price, volume, None, "cache_hit", str(cache_path), 0
-        except Exception as exc:
-            return None, None, f"invalid Yahoo chart cache: {exc}", "cache_hit_invalid", str(cache_path), 0
+def _slice_dates(frame: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
+    start = pd.Timestamp(config.start_date)
+    end = pd.Timestamp(config.end_date) if config.end_date else None
+    sliced = frame.loc[frame.index >= start]
+    if end is not None:
+        sliced = sliced.loc[sliced.index <= end]
+    return sliced
 
-    params = urlencode(
-        {
-            "period1": _unix_seconds_for_date(config.start_date),
-            "period2": _unix_seconds_for_date(config.effective_end_date, add_days=1),
-            "interval": "1d",
-            "events": "history",
-            "includeAdjustedClose": "true",
-        }
+
+def _rolling_observation_ratio(frame: pd.DataFrame, window: int) -> pd.DataFrame:
+    counts = frame.notna().rolling(window, min_periods=1).sum()
+    denominators = pd.Series(
+        np.minimum(np.arange(1, len(frame.index) + 1), window),
+        index=frame.index,
+        dtype=float,
     )
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{_yahoo_chart_symbol(symbol)}?{params}"
-    last_error = None
-    for attempt in range(config.retry_count + 1):
-        try:
-            with urlopen(Request(url, headers={"User-Agent": "momentum-factor-lab/0.1"}), timeout=YAHOO_CHART_TIMEOUT_SECONDS) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="replace"))
-            frame, error = _frame_from_yahoo_chart_payload(payload, symbol)
-            if frame is None:
-                return None, None, error, "failed", str(cache_path), attempt
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "Yahoo chart response")
-            if price is None:
-                return None, None, error, "failed", str(cache_path), attempt
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            frame.to_csv(cache_path, index=False)
-            return price, volume, None, "fetched", str(cache_path), attempt
-        except Exception as exc:  # pragma: no cover - network dependent
-            last_error = exc
-            if attempt < config.retry_count:
-                time.sleep(config.retry_backoff_seconds)
-    return None, None, str(last_error), "failed", str(cache_path), config.retry_count
+    return counts.div(denominators, axis=0)
 
 
-def _apply_yahoo_chart_fallback(
+def _eligibility_components(
     prices: pd.DataFrame,
     volumes: pd.DataFrame,
-    symbols: list[str],
     config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    missing_all = _fallback_candidate_symbols(prices, volumes, symbols, config)
-    limit = len(missing_all) if config.yahoo_chart_fallback_limit is None else config.yahoo_chart_fallback_limit
-    missing = missing_all[:limit]
-    rows = []
-    for symbol in missing:
-        price, volume, error, status, cache_path, retries = _download_yahoo_chart_symbol(symbol, config)
-        if price is None:
-            rows.append(
-                {
-                    "source": "yahoo-chart-adjusted-daily-fallback",
-                    "symbol": symbol,
-                    "status": "failed" if not status.startswith("cache") else status,
-                    "records": 0,
-                    "requested_price_symbols": 1,
-                    "requested_symbols": symbol,
-                    "returned_symbols": "",
-                    "missing_symbols": symbol,
-                    "cache_hit": status.startswith("cache"),
-                    "cache_path": cache_path,
-                    "retries": retries,
-                    "error": error,
-                    "provider_adjustment_note": "Yahoo chart fallback returned no usable adjusted-close series.",
-                    "note": symbol,
-                }
-            )
-            continue
-        prices = prices.drop(columns=[symbol], errors="ignore").join(price, how="outer")
-        volumes = volumes.drop(columns=[symbol], errors="ignore").join(volume, how="outer")
-        rows.append(
-            {
-                "source": "yahoo-chart-adjusted-daily-fallback",
-                "symbol": symbol,
-                "status": status,
-                "records": 1,
-                "requested_price_symbols": 1,
-                "requested_symbols": symbol,
-                "returned_symbols": symbol,
-                "missing_symbols": "",
-                "as_of_min": str(price.dropna().index.min().date()) if not price.dropna().empty else None,
-                "as_of_max": str(price.dropna().index.max().date()) if not price.dropna().empty else None,
-                "cache_hit": status == "cache_hit",
-                "cache_path": cache_path,
-                "retries": retries,
-                "error": None,
-                "provider_adjustment_note": "Yahoo chart adjusted-close fallback; used when yfinance bulk data was stale, sparse, or missing.",
-                "note": f"{symbol}; adjusted close from Yahoo chart endpoint",
-            }
-        )
-    return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
+    *,
+    dollar_volumes: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Return date-t eligibility components using only information known through t."""
 
-
-def _parse_nasdaq_number(value: object) -> float:
-    text = str(value or "").strip().replace("$", "").replace(",", "")
-    if not text or text.lower() in {"n/a", "nan", "none", "--"}:
-        return np.nan
-    try:
-        return float(text)
-    except ValueError:
-        return np.nan
-
-
-def _frame_from_nasdaq_payload(payload: dict[str, object], symbol: str) -> tuple[pd.DataFrame | None, str | None]:
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        return None, "invalid Nasdaq payload: missing data object"
-    table = data.get("tradesTable")
-    if not isinstance(table, dict):
-        return None, "invalid Nasdaq payload: missing tradesTable"
-    rows = table.get("rows")
-    if not isinstance(rows, list) or not rows:
-        return None, "empty Nasdaq historical response"
-    parsed_rows: list[dict[str, object]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        parsed_rows.append(
-            {
-                "Date": pd.to_datetime(row.get("date"), errors="coerce"),
-                "Close": _parse_nasdaq_number(row.get("close")),
-                "Volume": _parse_nasdaq_number(row.get("volume")),
-            }
-        )
-    frame = pd.DataFrame(parsed_rows).dropna(subset=["Date", "Close"])
-    if frame.empty:
-        return None, f"Nasdaq historical response for {symbol} had no numeric close rows"
-    return frame.sort_values("Date"), None
-
-
-def _download_nasdaq_symbol(
-    symbol: str,
-    config: RunConfig,
-) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
-    cache_path = _nasdaq_cache_path(config, symbol)
-    if cache_path.exists():
-        try:
-            frame = pd.read_csv(cache_path)
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "Nasdaq cache")
-            if price is None:
-                return None, None, error, "cache_hit_invalid", str(cache_path), 0
-            return price, volume, None, "cache_hit", str(cache_path), 0
-        except Exception as exc:
-            return None, None, f"invalid Nasdaq cache: {exc}", "cache_hit_invalid", str(cache_path), 0
-
-    params = urlencode(
-        {
-            "assetclass": "stocks",
-            "fromdate": config.start_date,
-            "todate": config.effective_end_date,
-            "limit": "9999",
-        }
+    numeric_prices = prices.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    numeric_volumes = (
+        volumes.reindex(index=prices.index, columns=prices.columns)
+        .apply(pd.to_numeric, errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
     )
-    url = f"https://api.nasdaq.com/api/quote/{quote(symbol, safe='')}/historical?{params}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://www.nasdaq.com",
-        "Referer": "https://www.nasdaq.com/",
-    }
-    last_error = None
-    for attempt in range(config.retry_count + 1):
-        try:
-            with urlopen(Request(url, headers=headers), timeout=YAHOO_CHART_TIMEOUT_SECONDS) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="replace"))
-            frame, error = _frame_from_nasdaq_payload(payload, symbol)
-            if frame is None:
-                return None, None, error, "failed", str(cache_path), attempt
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "Nasdaq historical response")
-            if price is None:
-                return None, None, error, "failed", str(cache_path), attempt
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            frame.to_csv(cache_path, index=False)
-            return price, volume, None, "fetched", str(cache_path), attempt
-        except Exception as exc:  # pragma: no cover - network dependent
-            last_error = exc
-            if attempt < config.retry_count:
-                time.sleep(config.retry_backoff_seconds)
-    return None, None, str(last_error), "failed", str(cache_path), config.retry_count
+    observed = numeric_prices.notna()
+    history_ok = observed.cumsum().ge(config.min_history_days)
+    price_ok = numeric_prices.ge(config.min_price)
+    price_coverage_ok = _rolling_observation_ratio(
+        numeric_prices,
+        config.data_quality_lookback_days,
+    ).ge(1.0 - config.max_price_missing_ratio)
+    exact_returns = numeric_prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+    extreme_observed = exact_returns.abs().gt(config.max_extreme_daily_return)
+    extreme_return_ok = ~extreme_observed.rolling(
+        config.data_quality_lookback_days,
+        min_periods=1,
+    ).max().fillna(False).astype(bool)
 
-
-def _apply_nasdaq_latest_repair(
-    prices: pd.DataFrame,
-    volumes: pd.DataFrame,
-    symbols: list[str],
-    config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    fallback_all = [
-        symbol
-        for symbol in _fallback_candidate_symbols(prices, volumes, symbols, config)
-        if symbol in prices.columns and not pd.to_numeric(prices[symbol], errors="coerce").dropna().empty
-    ]
-    limit = len(fallback_all) if config.nasdaq_fallback_limit is None else config.nasdaq_fallback_limit
-    candidates = fallback_all[:limit]
-    rows = []
-    for symbol in candidates:
-        before_price_full = pd.to_numeric(prices[symbol], errors="coerce").rename(symbol)
-        before_price = before_price_full.dropna()
-        before_last = before_price.index.max() if not before_price.empty else None
-        before_volume = (
-            pd.to_numeric(volumes[symbol], errors="coerce").rename(symbol)
-            if symbol in volumes.columns
-            else pd.Series(index=before_price_full.index, dtype=float, name=symbol)
-        )
-        price, volume, error, status, cache_path, retries = _download_nasdaq_symbol(symbol, config)
-        if price is None:
-            rows.append(
-                {
-                    "source": "nasdaq-latest-close-repair",
-                    "symbol": symbol,
-                    "status": "failed" if not status.startswith("cache") else status,
-                    "records": 0,
-                    "requested_price_symbols": 1,
-                    "requested_symbols": symbol,
-                    "returned_symbols": "",
-                    "missing_symbols": symbol,
-                    "cache_hit": status.startswith("cache"),
-                    "cache_path": cache_path,
-                    "retries": retries,
-                    "error": error,
-                    "provider_adjustment_note": "Nasdaq latest-close repair returned no usable close rows.",
-                    "note": symbol,
-                }
-            )
-            continue
-        tail_price = price[price.index > before_last].dropna() if before_last is not None else pd.Series(dtype=float, name=symbol)
-        tail_volume = (
-            volume.reindex(tail_price.index)
-            if volume is not None and not tail_price.empty
-            else pd.Series(index=tail_price.index, dtype=float, name=symbol)
-        )
-        repaired_price = before_price_full.combine_first(tail_price).sort_index().rename(symbol)
-        repaired_volume = before_volume.combine_first(tail_volume).sort_index().rename(symbol)
-        after_last = repaired_price.dropna().index.max() if not repaired_price.dropna().empty else None
-        added_dates = list(tail_price.index)
-        if after_last is None or before_last is None or after_last <= before_last or not added_dates:
-            rows.append(
-                {
-                    "source": "nasdaq-latest-close-repair",
-                    "symbol": symbol,
-                    "status": "no_newer_rows",
-                    "records": 0,
-                    "requested_price_symbols": 1,
-                    "requested_symbols": symbol,
-                    "returned_symbols": "",
-                    "missing_symbols": symbol,
-                    "as_of_min": str(price.dropna().index.min().date()) if not price.dropna().empty else None,
-                    "as_of_max": str(price.dropna().index.max().date()) if not price.dropna().empty else None,
-                    "cache_hit": status == "cache_hit",
-                    "cache_path": cache_path,
-                    "retries": retries,
-                    "error": None,
-                    "provider_adjustment_note": "Nasdaq response did not extend the existing adjusted-price history.",
-                    "note": f"{symbol}; no fresher Nasdaq rows than existing series",
-                }
-            )
-            continue
-        prices = prices.drop(columns=[symbol], errors="ignore").join(repaired_price, how="outer")
-        volumes = volumes.drop(columns=[symbol], errors="ignore").join(repaired_volume, how="outer")
-        rows.append(
-            {
-                "source": "nasdaq-latest-close-repair",
-                "symbol": symbol,
-                "status": status,
-                "records": int(len(added_dates)),
-                "requested_price_symbols": 1,
-                "requested_symbols": symbol,
-                "returned_symbols": symbol,
-                "missing_symbols": "",
-                "as_of_min": str(repaired_price.dropna().index.min().date()),
-                "as_of_max": str(repaired_price.dropna().index.max().date()),
-                "cache_hit": status == "cache_hit",
-                "cache_path": cache_path,
-                "retries": retries,
-                "error": None,
-                "provider_adjustment_note": (
-                    "Nasdaq historical close filled only dates missing from an existing Yahoo adjusted-price series; "
-                    "historical adjusted prices were preserved."
-                ),
-                "note": f"{symbol}; added {len(added_dates)} newer close row(s) after {before_last.date()}",
-            }
-        )
-    return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
-
-
-def _stooq_symbol(symbol: str) -> str:
-    return quote(symbol.lower().replace("/", ".").replace("-", ".") + ".us")
-
-
-def _validated_provider_close_volume(
-    frame: pd.DataFrame,
-    symbol: str,
-    provider_name: str,
-) -> tuple[pd.Series | None, pd.Series | None, str | None]:
-    if frame.empty or "Date" not in frame or "Close" not in frame:
-        return None, None, f"empty {provider_name} payload"
-    parsed = frame.copy()
-    parsed["Date"] = pd.to_datetime(parsed["Date"], errors="coerce")
-    parsed["Close"] = pd.to_numeric(parsed["Close"], errors="coerce")
-    if "Volume" in parsed:
-        parsed["Volume"] = pd.to_numeric(parsed["Volume"], errors="coerce")
+    volume_required = config.min_avg_dollar_volume > 0.0 or config.min_avg_volume > 0.0
+    if volume_required:
+        volume_coverage_ok = _rolling_observation_ratio(
+            numeric_volumes,
+            config.data_quality_lookback_days,
+        ).ge(1.0 - config.max_volume_missing_ratio)
     else:
-        parsed["Volume"] = np.nan
-    parsed = parsed.dropna(subset=["Date", "Close"]).set_index("Date").sort_index()
-    if parsed.empty:
-        return None, None, f"invalid {provider_name} payload: no numeric close prices"
-    return (
-        parsed["Close"].rename(symbol),
-        parsed["Volume"].rename(symbol),
-        None,
-    )
+        volume_coverage_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
 
-
-def _download_stooq_symbol(
-    symbol: str,
-    config: RunConfig,
-) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
-    cache_path = _stooq_cache_path(config, symbol)
-    if cache_path.exists():
-        try:
-            frame = pd.read_csv(cache_path)
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "stooq cache")
-            if price is None:
-                return None, None, error, "cache_hit_invalid", str(cache_path), 0
-            return price, volume, None, "cache_hit", str(cache_path), 0
-        except Exception as exc:
-            return None, None, f"invalid stooq cache: {exc}", "cache_hit_invalid", str(cache_path), 0
-
-    start = config.start_date.replace("-", "")
-    end = config.effective_end_date.replace("-", "")
-    url = f"https://stooq.com/q/d/l/?s={_stooq_symbol(symbol)}&d1={start}&d2={end}&i=d"
-    last_error = None
-    for attempt in range(config.retry_count + 1):
-        try:
-            with urlopen(Request(url, headers={"User-Agent": "momentum-factor-lab/0.1"}), timeout=20) as response:
-                text = response.read().decode("utf-8", errors="replace")
-            frame = pd.read_csv(StringIO(text))
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "stooq response")
-            if price is None:
-                return None, None, error, "failed", str(cache_path), attempt
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            frame.to_csv(cache_path, index=False)
-            return price, volume, None, "fetched", str(cache_path), attempt
-        except Exception as exc:  # pragma: no cover - network dependent
-            last_error = exc
-            if attempt < config.retry_count:
-                time.sleep(config.retry_backoff_seconds)
-    return None, None, str(last_error), "failed", str(cache_path), config.retry_count
-
-
-def _apply_stooq_fallback(
-    prices: pd.DataFrame,
-    volumes: pd.DataFrame,
-    symbols: list[str],
-    config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    missing_all = _fallback_candidate_symbols(prices, volumes, symbols, config)
-    limit = len(missing_all) if config.stooq_fallback_limit is None else config.stooq_fallback_limit
-    missing = missing_all[:limit]
-    rows = []
-    for symbol in missing:
-        price, volume, error, status, cache_path, retries = _download_stooq_symbol(symbol, config)
-        if price is None:
-            rows.append(
-                {
-                    "source": "stooq-daily-close-fallback",
-                    "symbol": symbol,
-                    "status": "failed" if not status.startswith("cache") else status,
-                    "records": 0,
-                    "requested_price_symbols": 1,
-                    "requested_symbols": symbol,
-                    "returned_symbols": "",
-                    "missing_symbols": symbol,
-                    "cache_hit": status.startswith("cache"),
-                    "cache_path": cache_path,
-                    "retries": retries,
-                    "error": error,
-                    "provider_adjustment_note": "Stooq fallback returned no usable close series.",
-                    "note": symbol,
-                }
-            )
-            continue
-        prices = prices.drop(columns=[symbol], errors="ignore").join(price, how="outer")
-        volumes = volumes.drop(columns=[symbol], errors="ignore").join(volume, how="outer")
-        rows.append(
-            {
-                "source": "stooq-daily-close-fallback",
-                "symbol": symbol,
-                "status": status,
-                "records": 1,
-                "requested_price_symbols": 1,
-                "requested_symbols": symbol,
-                "returned_symbols": symbol,
-                "missing_symbols": "",
-                "as_of_min": str(price.dropna().index.min().date()) if not price.dropna().empty else None,
-                "as_of_max": str(price.dropna().index.max().date()) if not price.dropna().empty else None,
-                "cache_hit": status == "cache_hit",
-                "cache_path": cache_path,
-                "retries": retries,
-                "error": None,
-                "provider_adjustment_note": "Stooq close-price fallback; adjusted-price compatibility may differ from yfinance.",
-                "note": f"{symbol}; close-price compatibility may differ from yfinance auto-adjusted prices",
-            }
+    share_volume_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    if config.min_avg_volume > 0.0:
+        share_count = numeric_volumes.rolling(
+            config.liquidity_lookback_days,
+            min_periods=1,
+        ).count()
+        share_mean = numeric_volumes.rolling(
+            config.liquidity_lookback_days,
+            min_periods=1,
+        ).mean()
+        share_volume_ok = share_count.ge(config.min_liquidity_observations) & share_mean.ge(
+            config.min_avg_volume
         )
-    return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
 
-
-def _download_finance_datareader_symbol(
-    symbol: str,
-    config: RunConfig,
-) -> tuple[pd.Series | None, pd.Series | None, str | None, str, str, int]:
-    cache_path = _finance_datareader_cache_path(config, symbol)
-    if cache_path.exists():
-        try:
-            frame = pd.read_csv(cache_path)
-            price, volume, error = _validated_provider_close_volume(frame, symbol, "FinanceDataReader cache")
-            if price is None:
-                return None, None, error, "cache_hit_invalid", str(cache_path), 0
-            return price, volume, None, "cache_hit", str(cache_path), 0
-        except Exception as exc:
-            return None, None, f"invalid FinanceDataReader cache: {exc}", "cache_hit_invalid", str(cache_path), 0
-
-    try:
-        import FinanceDataReader as fdr  # type: ignore
-    except Exception as exc:  # pragma: no cover - optional dependency
-        return None, None, f"FinanceDataReader unavailable: {exc}", "unavailable", str(cache_path), 0
-
-    last_error = None
-    for attempt in range(config.retry_count + 1):
-        try:
-            frame = fdr.DataReader(symbol, config.start_date, config.effective_end_date)
-            if frame is None or frame.empty or "Close" not in frame:
-                return None, None, "empty FinanceDataReader response", "failed", str(cache_path), attempt
-            frame = frame.copy()
-            frame.index = pd.to_datetime(frame.index).tz_localize(None)
-            export = frame.reset_index().rename(columns={frame.index.name or "index": "Date"})
-            if "Date" not in export.columns:
-                export = export.rename(columns={export.columns[0]: "Date"})
-            price, volume, error = _validated_provider_close_volume(export, symbol, "FinanceDataReader response")
-            if price is None:
-                return None, None, error, "failed", str(cache_path), attempt
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            export.to_csv(cache_path, index=False)
-            return price, volume, None, "fetched", str(cache_path), attempt
-        except Exception as exc:  # pragma: no cover - network/provider dependent
-            last_error = exc
-            if attempt < config.retry_count:
-                time.sleep(config.retry_backoff_seconds)
-    return None, None, str(last_error), "failed", str(cache_path), config.retry_count
-
-
-def _apply_finance_datareader_fallback(
-    prices: pd.DataFrame,
-    volumes: pd.DataFrame,
-    symbols: list[str],
-    config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    missing_all = _fallback_candidate_symbols(prices, volumes, symbols, config)
-    limit = len(missing_all) if config.finance_datareader_fallback_limit is None else config.finance_datareader_fallback_limit
-    missing = missing_all[:limit]
-    rows = []
-    for symbol in missing:
-        price, volume, error, status, cache_path, retries = _download_finance_datareader_symbol(symbol, config)
-        if price is None:
-            rows.append(
-                {
-                    "source": "finance-datareader-close-fallback",
-                    "symbol": symbol,
-                    "status": status,
-                    "records": 0,
-                    "requested_price_symbols": 1,
-                    "requested_symbols": symbol,
-                    "returned_symbols": "",
-                    "missing_symbols": symbol,
-                    "cache_hit": status.startswith("cache"),
-                    "cache_path": cache_path,
-                    "retries": retries,
-                    "error": error,
-                    "provider_adjustment_note": "FinanceDataReader fallback returned no usable close series.",
-                    "note": symbol,
-                }
-            )
-            continue
-        prices = prices.drop(columns=[symbol], errors="ignore").join(price, how="outer")
-        volumes = volumes.drop(columns=[symbol], errors="ignore").join(volume, how="outer")
-        rows.append(
-            {
-                "source": "finance-datareader-close-fallback",
-                "symbol": symbol,
-                "status": status,
-                "records": 1,
-                "requested_price_symbols": 1,
-                "requested_symbols": symbol,
-                "returned_symbols": symbol,
-                "missing_symbols": "",
-                "as_of_min": str(price.dropna().index.min().date()) if not price.dropna().empty else None,
-                "as_of_max": str(price.dropna().index.max().date()) if not price.dropna().empty else None,
-                "cache_hit": status == "cache_hit",
-                "cache_path": cache_path,
-                "retries": retries,
-                "error": None,
-                "provider_adjustment_note": "FinanceDataReader close fallback; adjusted-price compatibility may differ from yfinance.",
-                "note": f"{symbol}; close-price compatibility may differ from yfinance auto-adjusted prices",
-            }
+    dollar_volume_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    if config.min_avg_dollar_volume > 0.0:
+        supplied_dollar_volume = (
+            dollar_volumes.reindex(index=prices.index, columns=prices.columns)
+            if dollar_volumes is not None and not dollar_volumes.empty
+            else pd.DataFrame()
         )
-    return prices.sort_index(), volumes.reindex(index=prices.sort_index().index), pd.DataFrame(rows)
-
-
-def _fallback_candidate_symbols(
-    prices: pd.DataFrame,
-    volumes: pd.DataFrame,
-    symbols: list[str],
-    config: RunConfig,
-) -> list[str]:
-    """Return symbols that deserve a free-provider fallback attempt.
-
-    A yfinance column can exist while still being unusable for the current run
-    because it is stale, too short, too sparse, non-positive, anomalous, or lacks
-    enough liquidity evidence. Treat those cases like missing symbols so a free
-    Configured free-provider fallbacks can improve coverage before the run falls closed,
-    while source labels preserve adjusted-close compatibility evidence.
-    """
-
-    fallback: list[str] = []
-    as_of = prices.dropna(how="all").index.max() if not prices.empty else None
-    for symbol in symbols:
-        if symbol not in prices.columns:
-            fallback.append(symbol)
-            continue
-        series = pd.to_numeric(prices[symbol], errors="coerce").dropna()
-        if series.empty:
-            fallback.append(symbol)
-            continue
-        if len(series) < config.min_history_days:
-            fallback.append(symbol)
-            continue
-        latest_date = series.index.max()
-        if as_of is not None and (pd.Timestamp(as_of).normalize() - pd.Timestamp(latest_date).normalize()).days > config.stale_after_days:
-            fallback.append(symbol)
-            continue
-        recent_prices = pd.to_numeric(prices[symbol].tail(config.data_quality_lookback_days), errors="coerce")
-        if recent_prices.le(0).fillna(False).any():
-            fallback.append(symbol)
-            continue
-        if float(recent_prices.isna().mean()) > config.max_price_missing_ratio:
-            fallback.append(symbol)
-            continue
-        recent_returns = recent_prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).abs()
-        if recent_returns.gt(config.max_extreme_daily_return).fillna(False).any():
-            fallback.append(symbol)
-            continue
-        if symbol in volumes.columns and config.min_liquidity_observations > 0:
-            recent_volume = pd.to_numeric(volumes[symbol].tail(63), errors="coerce")
-            if int(recent_volume.notna().sum()) < config.min_liquidity_observations:
-                fallback.append(symbol)
-                continue
-        elif config.min_liquidity_observations > 0:
-            fallback.append(symbol)
-    return list(dict.fromkeys(fallback))
+        dollar_volume = (
+            supplied_dollar_volume
+            if not supplied_dollar_volume.empty
+            else numeric_prices.mul(numeric_volumes)
+        )
+        liquidity_count = dollar_volume.rolling(
+            config.liquidity_lookback_days,
+            min_periods=1,
+        ).count()
+        liquidity_mean = dollar_volume.rolling(
+            config.liquidity_lookback_days,
+            min_periods=1,
+        ).mean()
+        dollar_volume_ok = liquidity_count.ge(
+            config.min_liquidity_observations
+        ) & liquidity_mean.ge(config.min_avg_dollar_volume)
+    return {
+        "history_ok": history_ok.fillna(False),
+        "price_ok": price_ok.fillna(False),
+        "recent_price_coverage_ok": price_coverage_ok.fillna(False),
+        "recent_extreme_return_ok": extreme_return_ok.fillna(False),
+        "recent_volume_coverage_ok": volume_coverage_ok.fillna(False),
+        "share_volume_ok": share_volume_ok.fillna(False),
+        "dollar_volume_ok": dollar_volume_ok.fillna(False),
+    }
 
 
 def build_eligibility_mask(
@@ -1414,420 +533,835 @@ def build_eligibility_mask(
     volumes: pd.DataFrame,
     config: RunConfig,
     *,
-    liquidity_window: int = 63,
+    dollar_volumes: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    prices = prices.sort_index()
-    volumes = volumes.reindex(index=prices.index, columns=prices.columns)
-    price_observations = prices.notna().rolling(config.min_history_days, min_periods=1).sum()
-    history_ok = price_observations >= config.min_history_days
-    price_ok = prices >= config.min_price
-    fresh_ok = prices.notna()
-    dollar_volume = prices.mul(volumes)
-    price_liquidity_obs = prices.notna().rolling(liquidity_window, min_periods=1).sum()
-    share_liquidity_obs = volumes.notna().rolling(liquidity_window, min_periods=1).sum()
-    dollar_liquidity_obs = dollar_volume.notna().rolling(liquidity_window, min_periods=1).sum()
-    liquidity_observations_ok = (
-        (price_liquidity_obs >= config.min_liquidity_observations)
-        & (share_liquidity_obs >= config.min_liquidity_observations)
-        & (dollar_liquidity_obs >= config.min_liquidity_observations)
+    """Build causal date-t eligibility; an event can affect only t and later signals."""
+
+    components = _eligibility_components(
+        prices,
+        volumes,
+        config,
+        dollar_volumes=dollar_volumes,
     )
-    avg_share_volume = volumes.rolling(liquidity_window, min_periods=1).mean()
-    avg_dollar_volume = dollar_volume.rolling(liquidity_window, min_periods=1).mean()
-    share_volume_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
-    if config.min_avg_volume > 0:
-        share_volume_ok = avg_share_volume >= config.min_avg_volume
-    dollar_volume_ok = pd.DataFrame(True, index=prices.index, columns=prices.columns)
-    if config.min_avg_dollar_volume > 0:
-        dollar_volume_ok = avg_dollar_volume >= config.min_avg_dollar_volume
-    mask = history_ok & price_ok & fresh_ok & liquidity_observations_ok & share_volume_ok & dollar_volume_ok
-    return mask.fillna(False).astype(bool)
+    eligible = pd.DataFrame(True, index=prices.index, columns=prices.columns)
+    for component in components.values():
+        eligible &= component
+    benchmark = normalize_symbol(config.benchmark)
+    if benchmark in eligible:
+        eligible[benchmark] = False
+    return eligible.fillna(False).astype(bool)
 
 
-def _eligible_filter(
+def latest_eligibility_exclusion_reasons(
     prices: pd.DataFrame,
     volumes: pd.DataFrame,
-    candidate: pd.DataFrame,
     config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    exclusions: list[dict[str, object]] = []
-    keep: list[str] = []
-    candidate_symbols = set(candidate["symbol"].map(normalize_symbol)) if "symbol" in candidate else set()
-    comparator_symbols = set(_comparator_symbols(config))
-    as_of = prices.dropna(how="all").index.max() if not prices.empty else None
-    for raw_symbol in prices.columns:
-        symbol = normalize_symbol(raw_symbol)
-        is_benchmark = symbol in comparator_symbols
-        is_candidate = symbol in candidate_symbols
-        if not is_benchmark and not is_candidate:
-            exclusions.append({"symbol": symbol, "reason": "not in stock candidate universe", "observed": np.nan})
-            continue
-        if is_candidate and is_known_etf_symbol(symbol):
-            exclusions.append({"symbol": symbol, "reason": "known ETF excluded from stock-only universe", "observed": np.nan})
-            continue
-        series = prices[raw_symbol].dropna()
-        if is_benchmark:
-            if len(series) < 2:
-                exclusions.append({"symbol": symbol, "reason": "insufficient benchmark price history", "observed": len(series)})
-                continue
-            keep.append(raw_symbol)
-            continue
-        if series.empty:
-            exclusions.append({"symbol": symbol, "reason": "missing from price providers", "observed": np.nan})
-            continue
-        latest_date = series.index.max()
-        if as_of is not None and (pd.Timestamp(as_of).normalize() - pd.Timestamp(latest_date).normalize()).days > config.stale_after_days:
-            exclusions.append({"symbol": symbol, "reason": "stale symbol price", "observed": str(latest_date.date())})
-            continue
-        if len(series) < config.min_history_days:
-            exclusions.append({"symbol": symbol, "reason": "insufficient price history", "observed": len(series)})
-            continue
-        recent_prices = prices[raw_symbol].tail(config.data_quality_lookback_days)
-        non_positive_prices = int(recent_prices.le(0).fillna(False).sum())
-        if non_positive_prices > 0:
-            exclusions.append(
-                {
-                    "symbol": symbol,
-                    "reason": "non-positive price observations",
-                    "observed": non_positive_prices,
-                }
-            )
-            continue
-        missing_price_ratio = float(recent_prices.isna().mean()) if len(recent_prices.index) > 0 else 1.0
-        if missing_price_ratio > config.max_price_missing_ratio:
-            exclusions.append(
-                {
-                    "symbol": symbol,
-                    "reason": "excessive missing price data",
-                    "observed": missing_price_ratio,
-                }
-            )
-            continue
-        recent_returns = recent_prices.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).abs()
-        extreme_returns = int(recent_returns.gt(config.max_extreme_daily_return).fillna(False).sum())
-        full_history_returns = prices[raw_symbol].pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).abs()
-        full_history_extreme_returns = int(full_history_returns.gt(config.max_extreme_daily_return).fillna(False).sum())
-        if extreme_returns > 0 or full_history_extreme_returns > 0:
-            exclusions.append(
-                {
-                    "symbol": symbol,
-                    "reason": "extreme adjusted daily return anomaly",
-                    "observed": extreme_returns or full_history_extreme_returns,
-                }
-            )
-            continue
-        latest_price = float(series.iloc[-1])
-        if latest_price < config.min_price:
-            exclusions.append({"symbol": symbol, "reason": "below minimum price", "observed": latest_price})
-            continue
-        keep.append(raw_symbol)
-    for symbol in candidate["symbol"]:
-        if symbol not in prices.columns:
-            exclusions.append({"symbol": symbol, "reason": "missing from price providers", "observed": np.nan})
-    keep = list(dict.fromkeys(keep))
-    price_keep = prices[keep].dropna(how="all") if keep else pd.DataFrame(index=prices.index)
-    volume_keep = volumes.reindex(index=price_keep.index, columns=keep)
-    comparator_symbols = set(_comparator_symbols(config))
-    eligible_symbols = [
-        symbol
-        for symbol in keep
-        if normalize_symbol(symbol) in candidate_symbols and normalize_symbol(symbol) not in comparator_symbols
-    ]
-    normalized_eligible = {normalize_symbol(symbol) for symbol in eligible_symbols}
-    eligible = stock_only_universe_frame(candidate[candidate["symbol"].map(normalize_symbol).isin(normalized_eligible)])
-    exclusions_df = pd.DataFrame(exclusions, columns=["symbol", "reason", "observed"])
-    return price_keep, volume_keep, eligible, exclusions_df
+    *,
+    dollar_volumes: pd.DataFrame | None = None,
+) -> dict[str, list[str]]:
+    """Return stable, possibly overlapping reasons for the latest causal mask."""
 
-
-def _has_positive_records(frame: pd.DataFrame | None) -> bool:
-    if frame is None or frame.empty or "records" not in frame:
-        return False
-    return pd.to_numeric(frame["records"], errors="coerce").fillna(0).astype(int).gt(0).any()
-
-
-def _provider_label_from_sources(
-    stooq_sources: pd.DataFrame,
-    finance_datareader_sources: pd.DataFrame | None = None,
-    yfinance_sources: pd.DataFrame | None = None,
-    yahoo_chart_sources: pd.DataFrame | None = None,
-    nasdaq_sources: pd.DataFrame | None = None,
-) -> str:
-    providers: list[str] = []
-    if yfinance_sources is None or _has_positive_records(yfinance_sources):
-        providers.append("yfinance-free-public-data")
-    yahoo_chart = yahoo_chart_sources if yahoo_chart_sources is not None else pd.DataFrame()
-    yahoo_chart_records = yahoo_chart.get("records", pd.Series(dtype=float)) if not yahoo_chart.empty else pd.Series(dtype=float)
-    if not yahoo_chart.empty and yahoo_chart_records.fillna(0).astype(int).gt(0).any():
-        providers.append("yahoo-chart-fallback")
-    nasdaq = nasdaq_sources if nasdaq_sources is not None else pd.DataFrame()
-    nasdaq_records = nasdaq.get("records", pd.Series(dtype=float)) if not nasdaq.empty else pd.Series(dtype=float)
-    if not nasdaq.empty and nasdaq_records.fillna(0).astype(int).gt(0).any():
-        providers.append("nasdaq-latest-repair")
-    records = stooq_sources.get("records", pd.Series(dtype=float)) if not stooq_sources.empty else pd.Series(dtype=float)
-    if not stooq_sources.empty and records.fillna(0).astype(int).gt(0).any():
-        providers.append("stooq-fallback")
-    fdr = finance_datareader_sources if finance_datareader_sources is not None else pd.DataFrame()
-    fdr_records = fdr.get("records", pd.Series(dtype=float)) if not fdr.empty else pd.Series(dtype=float)
-    if not fdr.empty and fdr_records.fillna(0).astype(int).gt(0).any():
-        providers.append("finance-datareader-fallback")
-    return "+".join(providers) if providers else "no-live-price-provider"
-
-
-def download_live_data(config: RunConfig) -> MarketData:
-    fetched_at = datetime.now(UTC)
-    candidate, universe_sources = _candidate_universe(config)
-    symbols, subset_run = _requested_symbols(config, candidate)
-    prices = pd.DataFrame()
-    volumes = pd.DataFrame()
-    yf_sources = pd.DataFrame()
-    try:
-        import yfinance  # noqa: F401  # type: ignore
-    except Exception as exc:  # pragma: no cover - depends on optional extra
-        yf_sources = _source_frame(
-            [
-                {
-                    "source": "yfinance-adjusted-daily",
-                    "status": "unavailable",
-                    "records": 0,
-                    "requested_price_symbols": len(symbols),
-                    "requested_symbols": ",".join(symbols),
-                    "returned_symbols": "",
-                    "missing_symbols": ",".join(symbols),
-                    "error": f"yfinance unavailable: {exc}",
-                    "provider_adjustment_note": "yfinance import failed; configured free fallback providers were attempted.",
-                }
-            ]
-        )
-    else:
-        try:
-            prices, volumes, yf_sources = _download_yfinance(symbols, config)
-        except Exception as exc:  # pragma: no cover - network dependent
-            yf_sources = _source_frame(
-                [
-                    {
-                        "source": "yfinance-adjusted-daily",
-                        "status": "failed",
-                        "records": 0,
-                        "requested_price_symbols": len(symbols),
-                        "requested_symbols": ",".join(symbols),
-                        "returned_symbols": "",
-                        "missing_symbols": ",".join(symbols),
-                        "error": f"yfinance download failed: {exc}",
-                        "provider_adjustment_note": "yfinance failed; configured free fallback providers were attempted.",
-                    }
-                ]
-            )
-
-    try:
-        if config.yahoo_chart_fallback_limit != 0:
-            prices, volumes, yahoo_chart_sources = _apply_yahoo_chart_fallback(prices, volumes, symbols, config)
-        else:
-            yahoo_chart_sources = pd.DataFrame()
-        if config.nasdaq_fallback_limit != 0:
-            prices, volumes, nasdaq_sources = _apply_nasdaq_latest_repair(prices, volumes, symbols, config)
-        else:
-            nasdaq_sources = pd.DataFrame()
-        if config.stooq_fallback_limit != 0:
-            prices, volumes, stooq_sources = _apply_stooq_fallback(prices, volumes, symbols, config)
-        else:
-            stooq_sources = pd.DataFrame()
-        if config.finance_datareader_fallback_limit != 0:
-            prices, volumes, finance_datareader_sources = _apply_finance_datareader_fallback(prices, volumes, symbols, config)
-        else:
-            finance_datareader_sources = pd.DataFrame()
-    except Exception as exc:  # pragma: no cover - network dependent
-        sample = generate_offline_sample_data(config)
-        sample.live_error = f"live download failed: {exc}"
-        return sample
-
-    if prices.empty:
-        sample = generate_offline_sample_data(config)
-        sample.live_error = "live download returned no prices"
-        return sample
-
-    benchmark = normalize_symbol(config.benchmark)
-    comparator_symbols = set(_comparator_symbols(config))
-    requested_candidate_symbols = [symbol for symbol in symbols if symbol not in comparator_symbols and symbol in set(candidate["symbol"])]
-    downloaded_prices = prices.copy()
-    downloaded_volumes = volumes.copy()
-    prices, volumes, eligible, exclusions = _eligible_filter(prices, volumes, candidate[candidate["symbol"].isin(requested_candidate_symbols)], config)
-    liquidity_eligible_symbols = 0
-    if not prices.empty and not volumes.empty and not eligible.empty and "symbol" in eligible:
-        eligible_columns = [
-            symbol
-            for symbol in prices.columns
-            if normalize_symbol(symbol) in set(eligible["symbol"].map(normalize_symbol))
+    components = _eligibility_components(
+        prices,
+        volumes,
+        config,
+        dollar_volumes=dollar_volumes,
+    )
+    reason_by_component = {
+        "history_ok": "insufficient_history",
+        "price_ok": "missing_or_below_min_price",
+        "recent_price_coverage_ok": "recent_price_coverage",
+        "recent_extreme_return_ok": "recent_extreme_return",
+        "recent_volume_coverage_ok": "recent_volume_coverage",
+        "share_volume_ok": "share_volume_requirement",
+        "dollar_volume_ok": "liquidity_requirement",
+    }
+    result: dict[str, list[str]] = {}
+    for symbol in prices.columns:
+        result[str(symbol)] = [
+            reason_by_component[name]
+            for name, component in components.items()
+            if not bool(component.iloc[-1].get(symbol, False))
         ]
-        if eligible_columns:
-            liquidity_mask = build_eligibility_mask(
-                prices[eligible_columns],
-                volumes.reindex(index=prices.index, columns=eligible_columns),
-                config,
-            )
-            if not liquidity_mask.empty:
-                liquidity_eligible_symbols = int(liquidity_mask.iloc[-1].fillna(False).sum())
-    stooq_symbols = set()
-    if not stooq_sources.empty and "symbol" in stooq_sources:
-        stooq_symbols = set(stooq_sources.loc[stooq_sources["records"].fillna(0).astype(int).gt(0), "symbol"].astype(str))
-    yahoo_chart_symbols = set()
-    if not yahoo_chart_sources.empty and "symbol" in yahoo_chart_sources:
-        yahoo_chart_symbols = set(
-            yahoo_chart_sources.loc[
-                yahoo_chart_sources["records"].fillna(0).astype(int).gt(0),
-                "symbol",
-            ].astype(str)
+    return result
+
+
+def _quality_frame(
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    dollar_volumes: pd.DataFrame,
+    eligibility: pd.DataFrame,
+    config: RunConfig,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    benchmark = normalize_symbol(config.benchmark)
+    reasons_by_symbol = latest_eligibility_exclusion_reasons(
+        prices,
+        volumes,
+        config,
+        dollar_volumes=dollar_volumes,
+    )
+    for symbol in prices.columns:
+        series = prices[symbol]
+        valid = series.dropna()
+        volume = volumes[symbol].dropna() if symbol in volumes else pd.Series(dtype=float)
+        trailing_prices = series.tail(config.min_history_days)
+        trailing_dollar_volume = (
+            dollar_volumes[symbol].tail(config.liquidity_lookback_days)
+            if symbol in dollar_volumes
+            else pd.Series(dtype=float)
         )
-    nasdaq_symbols = set()
-    if not nasdaq_sources.empty and "symbol" in nasdaq_sources:
-        nasdaq_symbols = set(
-            nasdaq_sources.loc[
-                nasdaq_sources["records"].fillna(0).astype(int).gt(0),
-                "symbol",
-            ].astype(str)
-        )
-    finance_datareader_symbols = set()
-    if not finance_datareader_sources.empty and "symbol" in finance_datareader_sources:
-        finance_datareader_symbols = set(
-            finance_datareader_sources.loc[
-                finance_datareader_sources["records"].fillna(0).astype(int).gt(0),
-                "symbol",
-            ].astype(str)
-        )
-    price_source_rows = []
-    for symbol in downloaded_prices.columns:
-        if symbol in nasdaq_symbols:
-            source = "nasdaq-latest-close-repair"
-            note = (
-                "Nasdaq historical close filled only dates missing from an existing Yahoo adjusted-price series; "
-                "historical adjusted prices were preserved."
-            )
-        elif symbol in yahoo_chart_symbols:
-            source = "yahoo-chart-adjusted-daily-fallback"
-            note = "Yahoo chart adjusted-close fallback; used when yfinance bulk data was stale, sparse, or missing."
-        elif symbol in stooq_symbols:
-            source = "stooq-daily-close-fallback"
-            note = "Stooq close-price fallback; adjusted-price compatibility may differ from yfinance."
-        elif symbol in finance_datareader_symbols:
-            source = "finance-datareader-close-fallback"
-            note = "FinanceDataReader close fallback; adjusted-price compatibility may differ from yfinance."
-        else:
-            source = "yfinance-adjusted-daily"
-            note = "yfinance auto_adjust=True daily close series."
-        price_source_rows.append(
+        latest_price = pd.to_numeric(pd.Series([series.iloc[-1]]), errors="coerce").iloc[0]
+        exclusion_reasons = reasons_by_symbol.get(str(symbol), []) if symbol != benchmark else []
+        rows.append(
             {
                 "symbol": symbol,
-                "price_source": source,
-                "adjustment_note": note,
-                "provider_adjustment_note": note,
+                "role": "benchmark" if symbol == benchmark else "candidate",
+                "first_date": valid.index.min().date().isoformat() if not valid.empty else None,
+                "last_date": valid.index.max().date().isoformat() if not valid.empty else None,
+                "observations": int(valid.size),
+                "latest_price": float(latest_price) if pd.notna(latest_price) else None,
+                "recent_missing_ratio": float(trailing_prices.isna().mean()),
+                "volume_observations": int(volume.size),
+                "avg_dollar_volume": (
+                    float(trailing_dollar_volume.mean())
+                    if not trailing_dollar_volume.dropna().empty
+                    else None
+                ),
+                "eligible_latest": bool(eligibility.iloc[-1].get(symbol, False)),
+                "exclusion_reasons": exclusion_reasons,
             }
         )
-    price_sources = pd.DataFrame(price_source_rows)
-    as_of = prices.dropna(how="all").index.max() if not prices.empty else None
-    data_quality = build_data_quality_frame(
-        downloaded_prices,
-        downloaded_volumes,
-        symbols,
-        candidate,
-        config,
-        provider=_provider_label_from_sources(
-            stooq_sources,
-            finance_datareader_sources,
-            yf_sources,
-            yahoo_chart_sources,
-            nasdaq_sources,
-        ),
-        price_sources=price_sources,
-        exclusions=exclusions,
-        as_of=downloaded_prices.dropna(how="all").index.max() if not downloaded_prices.empty else None,
-    )
-    provider = _provider_label_from_sources(
-        stooq_sources,
-        finance_datareader_sources,
-        yf_sources,
-        yahoo_chart_sources,
-        nasdaq_sources,
-    )
-    returned_symbols = [symbol for symbol in symbols if symbol in downloaded_prices.columns]
-    returned_candidate_symbols = [symbol for symbol in requested_candidate_symbols if symbol in downloaded_prices.columns]
-    missing_symbols = [symbol for symbol in symbols if symbol not in downloaded_prices.columns]
-    summary = _source_frame(
-        [
-            {
-                "source": "live-run-summary",
-                "status": "partial_subset" if subset_run else "full_requested_universe",
-                "records": len(prices.columns),
-                "candidate_symbols": len(candidate),
-                "requested_price_symbols": len(requested_candidate_symbols),
-                "returned_price_symbols": len(returned_candidate_symbols),
-                "eligible_price_symbols": len(eligible),
-                "liquidity_eligible_symbols": liquidity_eligible_symbols,
-                "requested_download_symbols": len(symbols),
-                "requested_symbols": ",".join(requested_candidate_symbols),
-                "returned_symbols": ",".join(symbol for symbol in returned_symbols if symbol not in comparator_symbols),
-                "missing_symbols": ",".join(symbol for symbol in missing_symbols if symbol not in comparator_symbols),
-                "as_of_min": (
-                    str(downloaded_prices.dropna(how="all").index.min().date())
-                    if not downloaded_prices.empty
-                    else None
-                ),
-                "as_of_max": (
-                    str(downloaded_prices.dropna(how="all").index.max().date())
-                    if not downloaded_prices.empty
-                    else None
-                ),
-                "cache_hit": bool(
-                    not yf_sources.empty
-                    and "cache_hit" in yf_sources
-                    and yf_sources["cache_hit"].fillna(False).astype(bool).all()
-                ),
-                "benchmark_symbol": benchmark,
-                "benchmark_price_available": benchmark in prices.columns,
-                "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
-                "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark) in prices.columns,
-                "excluded_symbols": len(exclusions),
-                "subset_run": subset_run,
-                "point_in_time_universe": False,
-                "tradable_universe_approved": False,
-                "provider_adjustment_note": (
-                    "yfinance auto_adjust=True; Yahoo chart adjusted-close, Nasdaq latest-close repair, Stooq close, and FinanceDataReader close fallback rows are separately labeled when used."
-                ),
-                "note": (
-                    "Model-portfolio outputs are based only on eligible stock candidate price symbols after history, "
-                    "liquidity, and freshness filters; benchmark prices are retained only for comparison; practical execution limitations are exported "
-                    "as advisory metadata alongside the ranked recommendations."
-                ),
-            }
+    return pd.DataFrame(rows)
+
+
+def _local_or_demo_inputs(
+    config: RunConfig,
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    str,
+    str,
+    str,
+    str,
+    dict[str, str | None],
+    list[str],
+]:
+    if config.demo:
+        prices, volumes = generate_demo_data(config)
+        dollar_volumes = prices.mul(volumes)
+        source_mode = "demo"
+        source_label = f"deterministic demo ({config.demo_symbol_count} candidates)"
+        price_basis = "synthetic_total_return_like"
+        volume_basis = "synthetic_split_consistent"
+        resolved_symbols = _resolved_demo_symbols(config)
+        default_universe_sha256 = _sha256_file(DEFAULT_UNIVERSE_PATH)
+        resolved_universe_sha256 = _ordered_symbols_sha256(resolved_symbols)
+        generator_source_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        demo_specification = {
+            "version": DEMO_GENERATOR_VERSION,
+            "startDate": config.start_date,
+            "endDate": config.end_date or "2025-12-31",
+            "benchmark": normalize_symbol(config.benchmark),
+            "candidateSymbolCount": config.demo_symbol_count,
+            "seed": config.demo_seed,
+            "missingRatio": config.demo_missing_ratio,
+            "defaultUniverseFileSha256": default_universe_sha256,
+            "resolvedOrderedUniverseSha256": resolved_universe_sha256,
+            "generatorSourceSha256": generator_source_sha256,
+        }
+        specification_bytes = json.dumps(
+            demo_specification,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        input_sha256 = {
+            "prices": None,
+            "volumes": None,
+            "rawCloses": None,
+            "dollarVolumes": None,
+            "demoSpecification": hashlib.sha256(specification_bytes).hexdigest(),
+            "generatorSource": generator_source_sha256,
+            "defaultUniverseFile": default_universe_sha256,
+            "resolvedOrderedUniverse": resolved_universe_sha256,
+        }
+        notes = [
+            "Synthetic demo paths exist only for tests and explicitly labeled UI examples.",
+            "Demo output must never replace a failed live-market run.",
         ]
+        if config.demo_missing_ratio > 0.0:
+            notes.append(
+                f"Deterministic demo sparsity uses missing_ratio={config.demo_missing_ratio:g}; "
+                "the final date is preserved."
+            )
+    else:
+        assert config.prices_path is not None
+        prices = _read_local_matrix(config.prices_path, kind="prices")
+        volumes = (
+            _read_local_matrix(config.volumes_path, kind="volumes")
+            if config.volumes_path is not None
+            else pd.DataFrame(index=prices.index)
+        )
+        dollar_volumes = (
+            prices.mul(volumes) if not volumes.empty else pd.DataFrame(index=prices.index)
+        )
+        source_mode = "local_file"
+        source_label = config.prices_path.name
+        price_basis = "user_supplied_adjusted"
+        volume_basis = "user_attested_split_adjusted" if config.volumes_path else "not_provided"
+        input_sha256 = {
+            "prices": _sha256_file(config.prices_path),
+            "volumes": _sha256_file(config.volumes_path) if config.volumes_path else None,
+            "rawCloses": None,
+            "dollarVolumes": (
+                _canonical_matrix_sha256(dollar_volumes) if not dollar_volumes.empty else None
+            ),
+        }
+        notes = [
+            "Local prices are interpreted as split- and distribution-adjusted research prices."
+        ]
+    return (
+        prices,
+        volumes,
+        dollar_volumes,
+        source_mode,
+        source_label,
+        price_basis,
+        volume_basis,
+        input_sha256,
+        notes,
     )
-    data_sources = pd.concat(
-        [
-            universe_sources,
-            yf_sources,
-            yahoo_chart_sources,
-            nasdaq_sources,
-            stooq_sources,
-            finance_datareader_sources,
-            summary,
-            _point_in_time_provenance_source(config, candidate),
-        ],
-        ignore_index=True,
+
+
+def _live_inputs(
+    config: RunConfig,
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    str,
+    dict[str, str | None],
+    list[str],
+    int,
+]:
+    from .live_data import download_live_data
+
+    acquired = download_live_data(config)
+    if acquired.live_error:
+        raise RuntimeError("live acquisition did not return an actual-market dataset")
+    full_prices = acquired.raw_prices if not acquired.raw_prices.empty else acquired.prices
+    full_volumes = acquired.raw_volumes if not acquired.raw_volumes.empty else acquired.volumes
+    raw_closes = acquired.raw_closes.reindex(index=full_prices.index, columns=full_prices.columns)
+    non_positive_price_cells = int(full_prices.le(0.0).fillna(False).to_numpy().sum())
+    non_positive_raw_close_cells = int(raw_closes.le(0.0).fillna(False).to_numpy().sum())
+    negative_volume_cells = int(full_volumes.lt(0.0).fillna(False).to_numpy().sum())
+    # Public providers occasionally encode an unavailable quote as zero. A stock price
+    # cannot be zero, so treating those cells as observations would create log(0),
+    # artificial -100% returns, and ticker-reuse joins. Preserve the symbol and expose
+    # the sanitation count, but keep the invalid cells missing in the canonical input.
+    full_prices = full_prices.mask(full_prices.le(0.0))
+    raw_closes = raw_closes.mask(raw_closes.le(0.0))
+    full_volumes = full_volumes.mask(full_volumes.lt(0.0))
+    candidate_symbols = set(acquired.candidate_universe["symbol"].astype(str))
+    benchmark = normalize_symbol(config.benchmark)
+    returned_candidates = [
+        symbol
+        for symbol in acquired.candidate_universe["symbol"].astype(str)
+        if symbol in full_prices and full_prices[symbol].notna().any()
+    ]
+    columns = ([benchmark] if benchmark in full_prices else []) + returned_candidates
+    prices = (
+        full_prices.reindex(columns=columns).dropna(axis=0, how="all").dropna(axis=1, how="all")
     )
+    volumes = full_volumes.reindex(index=prices.index, columns=prices.columns)
+    raw_closes = raw_closes.reindex(index=prices.index, columns=prices.columns)
+    raw_close_proxy = raw_closes.isna() & prices.notna()
+    effective_raw_closes = raw_closes.combine_first(prices)
+    dollar_volumes = effective_raw_closes.mul(volumes)
+    proxy_symbol_count = int(raw_close_proxy.any(axis=0).sum())
+    input_sha256 = {
+        "prices": _canonical_matrix_sha256(prices),
+        "volumes": _canonical_matrix_sha256(volumes),
+        "rawCloses": _canonical_matrix_sha256(raw_closes),
+        "dollarVolumes": _canonical_matrix_sha256(dollar_volumes),
+        "requestedSymbols": _ordered_symbols_sha256(
+            [symbol for symbol in acquired.candidate_universe["symbol"].astype(str)]
+        ),
+        "returnedSymbols": _ordered_symbols_sha256(returned_candidates),
+        "universeRecords": canonical_records_sha256(acquired.candidate_universe),
+        "priceSources": canonical_records_sha256(acquired.price_sources),
+        "dataSources": canonical_records_sha256(acquired.data_sources),
+    }
+    notes = [
+        "Actual-market analysis uses provider adjusted close for factor returns.",
+        "Historical dollar volume uses provider raw close times raw share volume where available.",
+        (
+            f"{proxy_symbol_count} symbols required adjusted/close proxy dollar volume because a "
+            "distinct raw close was unavailable; the count is disclosed and the literal size policy "
+            "remains unavailable without point-in-time market-cap data."
+        ),
+    ]
+    if non_positive_price_cells or non_positive_raw_close_cells or negative_volume_cells:
+        notes.append(
+            "Invalid provider cells were treated as missing before hashing and analysis: "
+            f"adjusted_price_non_positive={non_positive_price_cells}, "
+            f"raw_close_non_positive={non_positive_raw_close_cells}, "
+            f"share_volume_negative={negative_volume_cells}."
+        )
+    returned_set = set(returned_candidates)
+    missing_candidates = len(candidate_symbols - returned_set)
+    if missing_candidates:
+        notes.append(
+            f"Provider returned no usable price history for {missing_candidates} candidates."
+        )
+    return (
+        prices,
+        volumes,
+        dollar_volumes,
+        raw_closes,
+        acquired.candidate_universe,
+        acquired.price_sources,
+        acquired.data_sources,
+        acquired.provider,
+        input_sha256,
+        notes,
+        proxy_symbol_count,
+    )
+
+
+def _finalize_market_data(
+    config: RunConfig,
+    *,
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    dollar_volumes: pd.DataFrame,
+    raw_closes: pd.DataFrame | None,
+    source_mode: str,
+    source_label: str,
+    price_basis: str,
+    volume_basis: str,
+    input_sha256: dict[str, str | None],
+    notes: list[str],
+    universe: pd.DataFrame | None = None,
+    requested_candidate_count: int | None = None,
+    provider_returned_candidate_count: int | None = None,
+    provider: str | None = None,
+    price_sources: pd.DataFrame | None = None,
+    data_sources: pd.DataFrame | None = None,
+    raw_close_proxy_symbol_count: int = 0,
+) -> MarketData:
+    prices = _slice_dates(prices, config).dropna(axis=0, how="all").dropna(axis=1, how="all")
+    volumes = _slice_dates(volumes, config).reindex(index=prices.index, columns=prices.columns)
+    dollar_volumes = _slice_dates(dollar_volumes, config).reindex(
+        index=prices.index,
+        columns=prices.columns,
+    )
+    canonical_raw_closes = (
+        _slice_dates(raw_closes, config).reindex(index=prices.index, columns=prices.columns)
+        if raw_closes is not None and not raw_closes.empty
+        else pd.DataFrame(index=prices.index)
+    )
+    if prices.empty or len(prices.index) < config.min_history_days + 2:
+        raise ValueError("price input does not contain enough observed rows after date filtering")
+    if not prices.index.is_monotonic_increasing or prices.index.has_duplicates:
+        raise ValueError("price dates must be unique and increasing")
+    if bool(prices.le(0.0).fillna(False).to_numpy().any()):
+        raise ValueError("prices must be strictly positive when observed")
+    if not volumes.empty and bool(volumes.lt(0.0).fillna(False).to_numpy().any()):
+        raise ValueError("volumes must be non-negative when observed")
+    if not canonical_raw_closes.empty and bool(
+        canonical_raw_closes.le(0.0).fillna(False).to_numpy().any()
+    ):
+        raise ValueError("raw closes must be strictly positive when observed")
+    benchmark = normalize_symbol(config.benchmark)
+    candidate_columns = [column for column in prices.columns if column != benchmark]
+    if len(candidate_columns) < config.top_n:
+        raise ValueError(
+            f"analyzed universe has {len(candidate_columns)} candidates but top_n={config.top_n}"
+        )
+    eligibility = build_eligibility_mask(
+        prices,
+        volumes,
+        config,
+        dollar_volumes=dollar_volumes,
+    )
+    quality = _quality_frame(prices, volumes, dollar_volumes, eligibility, config)
+    resolved_universe = (
+        universe if universe is not None else universe_frame_for_symbols(candidate_columns)
+    )
+    if config.min_avg_dollar_volume <= 0.0:
+        notes.append("Liquidity filtering is disabled because min_avg_dollar_volume is 0.")
+    elif dollar_volumes.empty:
+        notes.append(
+            "Liquidity filtering was requested but no dollar-volume evidence was supplied."
+        )
+    as_of = pd.Timestamp(prices.dropna(axis=0, how="all").index.max())
     return MarketData(
         prices=prices,
         volumes=volumes,
-        provider=provider,
-        fetched_at=fetched_at,
+        dollar_volumes=dollar_volumes,
+        raw_closes=canonical_raw_closes,
+        eligibility_mask=eligibility,
+        quality=quality,
+        universe=resolved_universe,
         as_of=as_of,
-        exclusions=exclusions,
-        offline_sample=False,
-        candidate_universe=candidate,
-        eligible_universe=eligible,
-        price_sources=price_sources,
-        data_sources=data_sources,
-        data_quality=data_quality,
+        source_mode=source_mode,
+        source_label=source_label,
+        price_basis=price_basis,
+        volume_basis=volume_basis,
+        input_sha256=input_sha256,
+        benchmark=benchmark,
+        notes=notes,
+        requested_through=config.effective_end_date,
+        requested_candidate_count=(
+            requested_candidate_count
+            if requested_candidate_count is not None
+            else len(candidate_columns)
+        ),
+        provider_returned_candidate_count=(
+            provider_returned_candidate_count
+            if provider_returned_candidate_count is not None
+            else len(candidate_columns)
+        ),
+        provider=provider,
+        price_sources=price_sources if price_sources is not None else pd.DataFrame(),
+        data_sources=data_sources if data_sources is not None else pd.DataFrame(),
+        raw_close_proxy_symbol_count=raw_close_proxy_symbol_count,
     )
 
 
 def load_market_data(config: RunConfig) -> MarketData:
-    if config.offline_sample:
-        return generate_offline_sample_data(config)
-    return download_live_data(config)
+    config.validate()
+    if config.live:
+        (
+            prices,
+            volumes,
+            dollar_volumes,
+            raw_closes,
+            universe,
+            price_sources,
+            data_sources,
+            provider,
+            input_sha256,
+            notes,
+            proxy_symbol_count,
+        ) = _live_inputs(config)
+        return _finalize_market_data(
+            config,
+            prices=prices,
+            volumes=volumes,
+            dollar_volumes=dollar_volumes,
+            raw_closes=raw_closes,
+            source_mode="live_market",
+            source_label=provider,
+            price_basis="provider_adjusted_close",
+            volume_basis="raw_close_x_raw_volume_with_disclosed_fallback_proxy",
+            input_sha256=input_sha256,
+            notes=notes,
+            universe=universe,
+            requested_candidate_count=len(universe),
+            provider_returned_candidate_count=len(
+                [
+                    column
+                    for column in prices.columns
+                    if column != normalize_symbol(config.benchmark)
+                ]
+            ),
+            provider=provider,
+            price_sources=price_sources,
+            data_sources=data_sources,
+            raw_close_proxy_symbol_count=proxy_symbol_count,
+        )
+    (
+        prices,
+        volumes,
+        dollar_volumes,
+        source_mode,
+        source_label,
+        price_basis,
+        volume_basis,
+        input_sha256,
+        notes,
+    ) = _local_or_demo_inputs(config)
+    finalized = _finalize_market_data(
+        config,
+        prices=prices,
+        volumes=volumes,
+        dollar_volumes=dollar_volumes,
+        raw_closes=None,
+        source_mode=source_mode,
+        source_label=source_label,
+        price_basis=price_basis,
+        volume_basis=volume_basis,
+        input_sha256=input_sha256,
+        notes=notes,
+    )
+    if config.demo:
+        finalized.input_sha256["prices"] = _canonical_matrix_sha256(finalized.prices)
+        finalized.input_sha256["volumes"] = _canonical_matrix_sha256(finalized.volumes)
+        finalized.input_sha256["dollarVolumes"] = _canonical_matrix_sha256(finalized.dollar_volumes)
+    return finalized
+
+
+def write_market_data_snapshot(market: MarketData, output_dir: Path) -> dict[str, str]:
+    """Persist the exact canonical input matrices for reproducible actual runs."""
+
+    if market.source_mode != "live_market":
+        raise ValueError("market-data snapshots require actual live-market data")
+    universe = market.universe.copy()
+    if universe.empty or "symbol" not in universe:
+        raise ValueError("market-data snapshot universe must contain symbols")
+    universe["symbol"] = universe["symbol"].map(lambda value: normalize_symbol(str(value)))
+    universe_symbols = universe["symbol"].tolist()
+    if any(not symbol for symbol in universe_symbols) or len(set(universe_symbols)) != len(
+        universe_symbols
+    ):
+        raise ValueError("market-data snapshot universe symbols are blank or duplicated")
+    candidate_symbols = market.candidate_symbols
+    candidate_set = set(candidate_symbols)
+    if [symbol for symbol in universe_symbols if symbol in candidate_set] != candidate_symbols:
+        raise ValueError("market-data snapshot universe order differs from analyzed symbols")
+    if market.requested_candidate_count != len(universe_symbols):
+        raise ValueError("market-data snapshot requested count differs from its universe")
+    if market.provider_returned_candidate_count != len(candidate_symbols):
+        raise ValueError("market-data snapshot provider-returned count differs from prices")
+    if market.source_mode == "live_market" and (
+        not isinstance(market.source_label, str)
+        or not market.source_label.strip()
+        or not isinstance(market.provider, str)
+        or not market.provider.strip()
+        or not isinstance(market.price_basis, str)
+        or not market.price_basis.strip()
+        or not isinstance(market.volume_basis, str)
+        or not market.volume_basis.strip()
+        or not isinstance(market.requested_through, str)
+        or not market.requested_through.strip()
+        or not isinstance(market.raw_close_proxy_symbol_count, int)
+        or isinstance(market.raw_close_proxy_symbol_count, bool)
+        or not 0 <= market.raw_close_proxy_symbol_count <= len(candidate_symbols) + 1
+    ):
+        raise ValueError("live market snapshot metadata contract is incomplete")
+    price_sources, data_sources = _validated_provenance_frames(
+        market.price_sources,
+        market.data_sources,
+        candidate_symbols,
+    )
+
+    canonical_volumes = market.volumes.reindex(
+        index=market.prices.index,
+        columns=market.prices.columns,
+    )
+    canonical_dollar_volumes = market.dollar_volumes.reindex(
+        index=market.prices.index,
+        columns=market.prices.columns,
+    )
+    canonical_raw_closes = market.raw_closes.reindex(
+        index=market.prices.index,
+        columns=market.prices.columns,
+    )
+    input_hashes = {
+        "prices": _canonical_matrix_sha256(market.prices),
+        "volumes": _canonical_matrix_sha256(canonical_volumes),
+        "dollarVolumes": _canonical_matrix_sha256(canonical_dollar_volumes),
+        "requestedSymbols": _ordered_symbols_sha256(universe_symbols),
+        "returnedSymbols": _ordered_symbols_sha256(candidate_symbols),
+        "universeRecords": canonical_records_sha256(universe),
+        "priceSources": canonical_records_sha256(price_sources),
+        "dataSources": canonical_records_sha256(data_sources),
+    }
+    if market.source_mode == "live_market":
+        input_hashes["rawCloses"] = _canonical_matrix_sha256(canonical_raw_closes)
+        if set(market.input_sha256) != set(LIVE_SNAPSHOT_HASH_FIELDS):
+            raise ValueError("live market input hash contract is incomplete")
+        for field in LIVE_SNAPSHOT_HASH_FIELDS:
+            if market.input_sha256.get(field) != input_hashes[field]:
+                raise ValueError(f"live market input hash differs from observed {field}")
+
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError("market-data snapshot destination must be a directory")
+    staging_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}.staging-",
+            dir=output_dir.parent,
+        )
+    )
+    compression = {"method": "gzip", "compresslevel": 6, "mtime": 0}
+    paths = {
+        "prices": staging_dir / "adjusted_prices.csv.gz",
+        "volumes": staging_dir / "share_volumes.csv.gz",
+        "dollarVolumes": staging_dir / "dollar_volumes.csv.gz",
+        "universe": staging_dir / "universe.json",
+        "priceSources": staging_dir / "price_sources.json",
+        "dataSources": staging_dir / "data_sources.json",
+        "manifest": staging_dir / "market_data_manifest.json",
+        "rawCloses": staging_dir / "raw_closes.csv.gz",
+    }
+    try:
+        market.prices.to_csv(paths["prices"], compression=compression)
+        canonical_volumes.to_csv(paths["volumes"], compression=compression)
+        canonical_dollar_volumes.to_csv(paths["dollarVolumes"], compression=compression)
+        paths["universe"].write_bytes(_canonical_records_json_bytes(universe))
+        paths["priceSources"].write_bytes(_canonical_records_json_bytes(price_sources))
+        paths["dataSources"].write_bytes(_canonical_records_json_bytes(data_sources))
+        canonical_raw_closes.to_csv(
+            paths["rawCloses"],
+            compression=compression,
+        )
+        manifest = {
+            "schemaVersion": 2,
+            "mode": market.source_mode,
+            "sourceLabel": market.source_label,
+            "provider": market.provider,
+            "requestedThrough": market.requested_through,
+            "actualAsOf": market.as_of.date().isoformat(),
+            "requestedCandidateCount": market.requested_candidate_count,
+            "providerReturnedCandidateCount": market.provider_returned_candidate_count,
+            "latestEligibleCandidateCount": int(
+                market.eligibility_mask.drop(columns=[market.benchmark], errors="ignore")
+                .iloc[-1]
+                .sum()
+            ),
+            "priceBasis": market.price_basis,
+            "volumeBasis": market.volume_basis,
+            "rawCloseProxySymbolCount": market.raw_close_proxy_symbol_count,
+            "readContract": SNAPSHOT_READ_CONTRACT,
+            "matrixSha256": input_hashes,
+            "fileSha256": {
+                key: _sha256_file(path) for key, path in paths.items() if key != "manifest"
+            },
+            "files": {key: path.name for key, path in paths.items() if key != "manifest"},
+            "notes": market.notes,
+        }
+        paths["manifest"].write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if output_dir.exists():
+            backup_dir = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{output_dir.name}.backup-",
+                    dir=output_dir.parent,
+                )
+            )
+            backup_dir.rmdir()
+            output_dir.replace(backup_dir)
+            try:
+                staging_dir.replace(output_dir)
+            except Exception:
+                backup_dir.replace(output_dir)
+                raise
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        else:
+            staging_dir.replace(output_dir)
+    except Exception:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return {key: str(output_dir / path.name) for key, path in paths.items()}
+
+
+def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketData:
+    """Read and verify a previously exported actual-market snapshot.
+
+    This is an explicit reproducibility path, not a provider or synthetic
+    fallback. Every persisted file and canonical matrix digest is checked before
+    the panels are admitted to the current research engine.
+    """
+
+    config.validate()
+    if not config.live or config.demo or config.prices_path is not None:
+        raise ValueError("actual-market snapshots require a live RunConfig")
+    manifest_path = snapshot_dir / "market_data_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("market-data snapshot manifest is missing or invalid") from exc
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+        raise ValueError("unsupported market-data snapshot manifest")
+    if manifest.get("mode") != "live_market":
+        raise ValueError("market-data snapshot must contain actual live-market data")
+    if (
+        manifest.get("readContract") != SNAPSHOT_READ_CONTRACT
+        or not isinstance(manifest.get("sourceLabel"), str)
+        or not str(manifest["sourceLabel"]).strip()
+        or not isinstance(manifest.get("provider"), str)
+        or not str(manifest["provider"]).strip()
+        or not isinstance(manifest.get("priceBasis"), str)
+        or not str(manifest["priceBasis"]).strip()
+        or not isinstance(manifest.get("volumeBasis"), str)
+        or not str(manifest["volumeBasis"]).strip()
+        or not isinstance(manifest.get("requestedThrough"), str)
+        or not str(manifest["requestedThrough"]).strip()
+    ):
+        raise ValueError("market-data snapshot metadata contract is incomplete")
+    files = manifest.get("files")
+    file_hashes = manifest.get("fileSha256")
+    matrix_hashes = manifest.get("matrixSha256")
+    if not isinstance(files, dict) or not isinstance(file_hashes, dict):
+        raise ValueError("market-data snapshot file contract is incomplete")
+    if not isinstance(matrix_hashes, dict):
+        raise ValueError("market-data snapshot matrix hashes are missing")
+    if set(matrix_hashes) != set(LIVE_SNAPSHOT_HASH_FIELDS) or any(
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        for digest in matrix_hashes.values()
+    ):
+        raise ValueError("market-data snapshot input hash contract is incomplete")
+    required = (
+        "prices",
+        "volumes",
+        "dollarVolumes",
+        "rawCloses",
+        "universe",
+        "priceSources",
+        "dataSources",
+    )
+    if set(files) != set(required) or set(file_hashes) != set(required):
+        raise ValueError("market-data snapshot file contract is incomplete")
+    paths: dict[str, Path] = {}
+    for component in required:
+        filename = files.get(component)
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            raise ValueError(f"market-data snapshot has an unsafe {component} filename")
+        path = snapshot_dir / filename
+        if not path.is_file() or _sha256_file(path) != file_hashes.get(component):
+            raise ValueError(f"market-data snapshot {component} file hash mismatch")
+        paths[component] = path
+
+    def read_frame(field: str) -> pd.DataFrame:
+        try:
+            frame = pd.read_csv(
+                paths[field],
+                index_col=0,
+                parse_dates=True,
+                float_precision="round_trip",
+            )
+        except Exception as exc:
+            raise ValueError(f"market-data snapshot {field} cannot be read") from exc
+        frame.index = pd.to_datetime(frame.index).tz_localize(None).normalize()
+        frame.columns = [normalize_symbol(column) for column in frame.columns]
+        return frame.apply(pd.to_numeric, errors="coerce")
+
+    prices = read_frame("prices")
+    volumes = read_frame("volumes").reindex(index=prices.index, columns=prices.columns)
+    dollar_volumes = read_frame("dollarVolumes").reindex(
+        index=prices.index,
+        columns=prices.columns,
+    )
+    raw_closes = read_frame("rawCloses").reindex(index=prices.index, columns=prices.columns)
+
+    def read_records(field: str) -> pd.DataFrame:
+        try:
+            records = json.loads(paths[field].read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"market-data snapshot {field} cannot be read") from exc
+        if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+            raise ValueError(f"market-data snapshot {field} must contain JSON records")
+        return pd.DataFrame(records)
+
+    universe = read_records("universe")
+    price_sources = read_records("priceSources")
+    data_sources = read_records("dataSources")
+    if universe.empty or "symbol" not in universe:
+        raise ValueError("market-data snapshot universe is missing symbols")
+    universe["symbol"] = universe["symbol"].map(lambda value: normalize_symbol(str(value)))
+    universe_symbols = universe["symbol"].tolist()
+    if any(not symbol for symbol in universe_symbols) or len(set(universe_symbols)) != len(
+        universe_symbols
+    ):
+        raise ValueError("market-data snapshot universe symbols are blank or duplicated")
+    benchmark = normalize_symbol(config.benchmark)
+    candidate_columns = [column for column in prices.columns if column != benchmark]
+    candidate_set = set(candidate_columns)
+    if [symbol for symbol in universe_symbols if symbol in candidate_set] != candidate_columns:
+        raise ValueError("market-data snapshot universe order differs from price columns")
+    price_sources, data_sources = _validated_provenance_frames(
+        price_sources,
+        data_sources,
+        candidate_columns,
+    )
+    observed_hashes = {
+        "prices": _canonical_matrix_sha256(prices),
+        "volumes": _canonical_matrix_sha256(volumes),
+        "dollarVolumes": _canonical_matrix_sha256(dollar_volumes),
+        "rawCloses": _canonical_matrix_sha256(raw_closes),
+        "requestedSymbols": _ordered_symbols_sha256(universe_symbols),
+        "returnedSymbols": _ordered_symbols_sha256(candidate_columns),
+        "universeRecords": canonical_records_sha256(universe),
+        "priceSources": canonical_records_sha256(price_sources),
+        "dataSources": canonical_records_sha256(data_sources),
+    }
+    for component, digest in observed_hashes.items():
+        if matrix_hashes.get(component) != digest:
+            raise ValueError(f"market-data snapshot {component} matrix hash mismatch")
+    expected_as_of = str(manifest.get("actualAsOf") or "")
+    observed_as_of = prices.index.max().date().isoformat() if not prices.empty else ""
+    if observed_as_of != expected_as_of:
+        raise ValueError("market-data snapshot actualAsOf does not match prices")
+
+    requested_candidate_count = manifest.get("requestedCandidateCount")
+    provider_returned_candidate_count = manifest.get("providerReturnedCandidateCount")
+    latest_eligible_candidate_count = manifest.get("latestEligibleCandidateCount")
+    if (
+        not isinstance(requested_candidate_count, int)
+        or isinstance(requested_candidate_count, bool)
+        or requested_candidate_count != len(universe_symbols)
+        or not isinstance(provider_returned_candidate_count, int)
+        or isinstance(provider_returned_candidate_count, bool)
+        or provider_returned_candidate_count != len(candidate_columns)
+        or provider_returned_candidate_count > requested_candidate_count
+        or not isinstance(latest_eligible_candidate_count, int)
+        or isinstance(latest_eligible_candidate_count, bool)
+        or not 0 <= latest_eligible_candidate_count <= provider_returned_candidate_count
+    ):
+        raise ValueError("market-data snapshot universe counts are inconsistent")
+    raw_close_proxy_symbol_count = manifest.get("rawCloseProxySymbolCount")
+    if (
+        not isinstance(raw_close_proxy_symbol_count, int)
+        or isinstance(raw_close_proxy_symbol_count, bool)
+        or not 0 <= raw_close_proxy_symbol_count <= provider_returned_candidate_count + 1
+    ):
+        raise ValueError("market-data snapshot raw-close proxy count is inconsistent")
+    market = _finalize_market_data(
+        config,
+        prices=prices,
+        volumes=volumes,
+        dollar_volumes=dollar_volumes,
+        raw_closes=raw_closes,
+        source_mode="live_market",
+        source_label=str(manifest["sourceLabel"]),
+        price_basis=str(manifest["priceBasis"]),
+        volume_basis=str(manifest["volumeBasis"]),
+        input_sha256={str(key): value for key, value in matrix_hashes.items()},
+        notes=[
+            *[
+                str(note)
+                for note in manifest.get("notes", [])
+                if str(note).strip()
+                and "literal size policy" not in str(note).lower()
+                and "point-in-time market-cap" not in str(note).lower()
+            ],
+            (
+                f"Raw-close proxy count is {raw_close_proxy_symbol_count}; "
+                "the score-liquidity policy uses trailing raw dollar volume and no size factor."
+            ),
+            "Verified replay of an exported actual-market snapshot; no synthetic fallback used.",
+        ],
+        universe=universe,
+        requested_candidate_count=requested_candidate_count,
+        provider_returned_candidate_count=provider_returned_candidate_count,
+        provider=str(manifest["provider"]),
+        price_sources=price_sources,
+        data_sources=data_sources,
+        raw_close_proxy_symbol_count=raw_close_proxy_symbol_count,
+    )
+    market.requested_through = str(manifest["requestedThrough"])
+    return market

@@ -24,12 +24,16 @@ def _write_dashboard(path: Path, *, data_as_of: str, run_timestamp: str) -> Path
                             "run_timestamp_utc": run_timestamp,
                             "selected_factor": "mom_9_1",
                         },
-                        "latest_output_rows": [{"symbol": f"S{index:02d}", "rank": index + 1} for index in range(12)],
+                        "latest_output_rows": [
+                            {"symbol": f"S{index:02d}", "rank": index + 1} for index in range(12)
+                        ],
                         "factor_score_snapshots": [
                             {
                                 "date": data_as_of,
                                 "factor": "mom_9_1",
-                                "rows": [[f"S{index:02d}", 1.0 - index / 100] for index in range(12)],
+                                "rows": [
+                                    [f"S{index:02d}", 1.0 - index / 100] for index in range(12)
+                                ],
                             }
                         ],
                     }
@@ -41,12 +45,102 @@ def _write_dashboard(path: Path, *, data_as_of: str, run_timestamp: str) -> Path
     return path
 
 
-def test_monotonic_guard_allows_equal_or_newer_candidate(tmp_path: Path) -> None:
+def _write_dashboard_v4(
+    path: Path,
+    *,
+    data_as_of: str,
+    run_timestamp: str,
+    holding_count: int = 20,
+    analyzed_count: int = 2_857,
+) -> Path:
+    weights = [
+        {"symbol": f"S{index:02d}", "weight": 1.0 / holding_count} for index in range(holding_count)
+    ]
+    path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 4,
+                "resultKey": "a" * 64,
+                "resultIdentity": {
+                    "identityVersion": "momentum-result-identity-v1",
+                    "resultKey": "a" * 64,
+                    "keyParts": {},
+                },
+                "generatedAtUtc": run_timestamp,
+                "selectedFactor": "mom_12m",
+                "data": {
+                    "asOf": data_as_of,
+                    "analyzedSecurityCount": analyzed_count,
+                },
+                "currentResearchTarget": {"weights": weights},
+                "factorPortfolios": {"mom_12m": {"weights": weights}},
+                "gridAccounting": {
+                    "expectedIndependentPairCount": 244,
+                    "evaluatedIndependentPairCount": 244,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_schema_v4_snapshot_uses_current_target_identity_and_counts(tmp_path: Path) -> None:
+    snapshot = load_dashboard_snapshot(
+        _write_dashboard_v4(
+            tmp_path / "v3.json",
+            data_as_of="2026-07-10",
+            run_timestamp="2026-07-11T01:00:00Z",
+        )
+    )
+
+    assert snapshot.data_as_of is not None
+    assert snapshot.data_as_of.isoformat() == "2026-07-10"
+    assert snapshot.run_timestamp is not None
+    assert snapshot.latest_output_rows == 20
+    assert snapshot.selected_factor_snapshot_rows == 20
+    assert snapshot.primary_entities == 2_857
+    assert snapshot.result_key == "a" * 64
+    assert snapshot.evaluated_factor_policy_pairs == 244
+
+
+def test_schema_v4_monotonic_guard_rejects_collapsed_holdings(tmp_path: Path) -> None:
     baseline = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "baseline.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:00:00Z")
+        _write_dashboard_v4(
+            tmp_path / "baseline-v4.json",
+            data_as_of="2026-07-10",
+            run_timestamp="2026-07-11T01:00:00Z",
+        )
     )
     candidate = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "candidate.json", data_as_of="2026-06-10", run_timestamp="2026-06-11T01:00:00Z")
+        _write_dashboard_v4(
+            tmp_path / "candidate-v4.json",
+            data_as_of="2026-07-10",
+            run_timestamp="2026-07-11T02:00:00Z",
+            holding_count=5,
+        )
+    )
+
+    decision = decide_monotonic_dashboard(baseline, candidate)
+
+    assert decision.passed is False
+    assert "publication floor" in decision.reason
+
+
+def test_monotonic_guard_allows_equal_or_newer_candidate(tmp_path: Path) -> None:
+    baseline = load_dashboard_snapshot(
+        _write_dashboard(
+            tmp_path / "baseline.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-10T12:00:00Z",
+        )
+    )
+    candidate = load_dashboard_snapshot(
+        _write_dashboard(
+            tmp_path / "candidate.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-11T01:00:00Z",
+        )
     )
 
     decision = decide_monotonic_dashboard(baseline, candidate)
@@ -57,10 +151,18 @@ def test_monotonic_guard_allows_equal_or_newer_candidate(tmp_path: Path) -> None
 
 def test_monotonic_guard_blocks_older_data_as_of(tmp_path: Path) -> None:
     baseline = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "baseline.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:00:00Z")
+        _write_dashboard(
+            tmp_path / "baseline.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-10T12:00:00Z",
+        )
     )
     candidate = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "candidate.json", data_as_of="2026-06-09", run_timestamp="2026-06-11T01:00:00Z")
+        _write_dashboard(
+            tmp_path / "candidate.json",
+            data_as_of="2026-06-09",
+            run_timestamp="2026-06-11T01:00:00Z",
+        )
     )
 
     decision = decide_monotonic_dashboard(baseline, candidate)
@@ -71,10 +173,18 @@ def test_monotonic_guard_blocks_older_data_as_of(tmp_path: Path) -> None:
 
 def test_monotonic_guard_blocks_older_run_timestamp(tmp_path: Path) -> None:
     baseline = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "baseline.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:00:00Z")
+        _write_dashboard(
+            tmp_path / "baseline.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-10T12:00:00Z",
+        )
     )
     candidate = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "candidate.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T11:59:00Z")
+        _write_dashboard(
+            tmp_path / "candidate.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-10T11:59:00Z",
+        )
     )
 
     decision = decide_monotonic_dashboard(baseline, candidate)
@@ -85,10 +195,18 @@ def test_monotonic_guard_blocks_older_run_timestamp(tmp_path: Path) -> None:
 
 def test_monotonic_guard_normalizes_naive_timestamps(tmp_path: Path) -> None:
     baseline = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "baseline.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:00:00Z")
+        _write_dashboard(
+            tmp_path / "baseline.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-10T12:00:00Z",
+        )
     )
     candidate = load_dashboard_snapshot(
-        _write_dashboard(tmp_path / "candidate.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:01:00")
+        _write_dashboard(
+            tmp_path / "candidate.json",
+            data_as_of="2026-06-10",
+            run_timestamp="2026-06-10T12:01:00",
+        )
     )
 
     decision = decide_monotonic_dashboard(baseline, candidate)
@@ -97,8 +215,12 @@ def test_monotonic_guard_normalizes_naive_timestamps(tmp_path: Path) -> None:
 
 
 def test_monotonic_guard_cli_returns_nonzero_on_regression(tmp_path: Path, capsys) -> None:
-    baseline = _write_dashboard(tmp_path / "baseline.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:00:00Z")
-    candidate = _write_dashboard(tmp_path / "candidate.json", data_as_of="2026-06-09", run_timestamp="2026-06-11T01:00:00Z")
+    baseline = _write_dashboard(
+        tmp_path / "baseline.json", data_as_of="2026-06-10", run_timestamp="2026-06-10T12:00:00Z"
+    )
+    candidate = _write_dashboard(
+        tmp_path / "candidate.json", data_as_of="2026-06-09", run_timestamp="2026-06-11T01:00:00Z"
+    )
 
     exit_code = main(["--baseline", str(baseline), "--candidate", str(candidate)])
 

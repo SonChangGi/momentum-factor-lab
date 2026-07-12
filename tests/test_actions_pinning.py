@@ -14,7 +14,9 @@ class ActionsPinningTest(unittest.TestCase):
         self.assertTrue(workflows, "expected at least one workflow to validate")
         offenders = []
         for workflow in workflows:
-            for line_number, line in enumerate(workflow.read_text(encoding="utf-8").splitlines(), 1):
+            for line_number, line in enumerate(
+                workflow.read_text(encoding="utf-8").splitlines(), 1
+            ):
                 if "uses:" not in line or "actions/" not in line:
                     continue
                 if MUTABLE_ACTION_TAG.search(line) or not PINNED_ACTION_SHA.search(line):

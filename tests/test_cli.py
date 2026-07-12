@@ -1,375 +1,755 @@
+import argparse
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
-from momentum_factor_lab import cli
+from momentum_factor_lab.cli import (
+    ScheduledGridPreset,
+    _compact_summary,
+    _config,
+    _execute_run,
+    _execute_scheduled_grid,
+    build_parser,
+    main,
+)
+from momentum_factor_lab.research_inputs import ResearchInputs
+from momentum_factor_lab.workflow import AnalysisResult, result_payload, write_result_json
 
 
-def test_cli_wires_tradability_gate_inputs(monkeypatch, tmp_path):
-    captured = {}
+def _command_parser(name: str) -> argparse.ArgumentParser:
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    return subparsers.choices[name]
 
-    def fake_run_analysis(config):
-        captured["config"] = config
-        return SimpleNamespace(
-            config=config,
-            selected_factor=config.selected_factor,
-            metadata={
-                "recommendation_output_key": "recommendations",
-                "selected_factor": config.selected_factor,
-                "recommendation_status": "current_live_with_limitations_test",
-                "current_recommendations_available": True,
-                "fresh_live_data_available": True,
-                "recommendation_output_label": "Practical recommendations",
-                "data_as_of": "2026-06-05",
-                "provider": "test",
-                "candidate_universe_size": 6,
-                "eligible_price_universe_size": 6,
-                "factor_count": 22,
-                "factor_validation_status": "pass",
-                "universe_profile": config.universe_profile,
-                "factor_selection_mode": config.effective_factor_selection_mode,
-                "selected_factor_selection_source": "predeclared",
-                "same_sample_selection_blocked_for_tradable": False,
-                "decision_support_tier": "practical_recommendations",
-                "fail_closed": False,
-                "fail_closed_reasons": [],
-                "tradability_blockers": [],
-                "execution_limitations": ["test"],
-                "data_quality_gate": {"manifest_available": True, "recommendation_rows_pass": False},
-                "data_quality_status_counts": {"pass": 5},
-                "recommendation_data_quality_status_counts": {"pass": 1},
-                "recommendation_capacity_warning": "test warning",
-                "recommendation_weighting_method": config.recommendation_weighting_method,
-                "recommendation_weight_sum": 1.0,
-                "recommendation_cash_weight": 0.0,
-            },
-            output_paths={"json": str(tmp_path / "run.json")},
-            recommendations=pd.DataFrame([{"rank": 1, "symbol": "SPY", "weight": 1.0}]),
-        )
 
-    monkeypatch.setattr(cli, "run_analysis", fake_run_analysis)
-    monkeypatch.setattr(cli, "write_reports", lambda result: result)
+def test_run_requires_exactly_one_live_local_or_demo_source() -> None:
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--live", "--demo"])
 
-    args = cli.build_parser().parse_args(
+    live = parser.parse_args(["run", "--live"])
+    assert live.live is True
+    assert _config(live).data_mode == "live_market"
+
+    sparse_demo = parser.parse_args(["run", "--demo", "--demo-missing-ratio", "0.001"])
+    assert sparse_demo.demo is True
+    assert _config(sparse_demo).demo_missing_ratio == pytest.approx(0.001)
+
+    local = parser.parse_args(
+        [
+            "run",
+            "--prices",
+            "prices.csv",
+            "--volumes",
+            "volumes.csv",
+            "--volume-basis",
+            "split_adjusted",
+        ]
+    )
+    assert local.prices == Path("prices.csv")
+    assert local.volumes == Path("volumes.csv")
+    assert local.volume_basis == "split_adjusted"
+
+
+def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
+    run = _command_parser("run")
+    options = {option for action in run._actions for option in action.option_strings}
+    expected = {
+        "--live",
+        "--prices",
+        "--demo",
+        "--chart-benchmark",
+        "--min-avg-volume",
+        "--stale-after-days",
+        "--data-quality-lookback-days",
+        "--max-volume-missing-ratio",
+        "--max-extreme-daily-return",
+        "--min-valuation-coverage",
+        "--min-daily-risk-observations",
+        "--volatility-lookback-days",
+        "--min-volatility-observations",
+        "--score-liquidity-score-weight",
+        "--score-liquidity-liquidity-weight",
+        "--score-liquidity-rank-floor",
+        "--selection-min-sharpe",
+        "--selection-max-drawdown",
+        "--selection-max-annualized-cost-drag",
+        "--selection-min-effective-names",
+        "--selection-max-target-hhi",
+        "--selection-max-target-weight",
+        "--selection-max-abs-security-day-contribution",
+        "--selection-max-security-absolute-contribution-share",
+        "--selection-max-leave-one-security-cagr-delta",
+        "--selection-extreme-event-action",
+        "--selection-extreme-event-penalty-points",
+        "--universe",
+        "--universe-source-mode",
+        "--universe-profile",
+        "--max-price-symbols",
+        "--price-chunk-size",
+        "--yahoo-chart-fallback-limit",
+        "--nasdaq-fallback-limit",
+        "--stooq-fallback-limit",
+        "--finance-datareader-fallback-limit",
+        "--retry-count",
+        "--retry-backoff-seconds",
+        "--market-cache-max-age-hours",
+        "--refresh-market-data",
+        "--sec-user-agent",
+        "--output-dir",
+        "--site-dir",
+        "--cache-dir",
+        "--export-input-snapshot",
+    }
+    assert expected <= options
+    for removed in (
+        "--report-dir",
+        "--frozen-policy-path",
+        "--selected-factor",
+        "--factor-selection-mode",
+        "--production",
+        "--point-in-time-universe-provenance",
+        "--score-size-score-weight",
+        "--score-size-market-cap-weight",
+        "--score-size-liquidity-weight",
+        "--score-size-rank-floor",
+        "--policy-sharpe-tolerance",
+        "--policy-mdd-tolerance",
+        "--policy-max-cost-drag",
+        "--policy-min-effective-n",
+    ):
+        assert removed not in options
+
+    local_api = _command_parser("serve-local-api")
+    local_api_options = {
+        option for action in local_api._actions for option in action.option_strings
+    }
+    assert "--allowed-origin" in local_api_options
+    parsed = build_parser().parse_args(
+        [
+            "serve-local-api",
+            "--live",
+            "--allowed-origin",
+            "https://research.example",
+            "--allowed-origin",
+            "https://preview.example",
+        ]
+    )
+    assert parsed.allowed_origin == [
+        "https://research.example",
+        "https://preview.example",
+    ]
+
+
+def test_cli_values_map_to_run_config_without_hidden_overrides() -> None:
+    args = build_parser().parse_args(
         [
             "run",
             "--live",
             "--universe",
-            "SPY,QQQ,AAPL,MSFT,NVDA,AMZN",
-            "--universe-profile",
-            "aggressive_stock_only",
-            "--universe-source-mode",
-            "refresh",
-            "--selected-factor",
-            "mom_1m",
-            "--factor-selection-mode",
-            "predeclared",
-            "--selection-window",
-            "policy-v1",
-            "--frozen-policy-path",
-            str(tmp_path / "policy.json"),
-            "--cost-stress-high-bps",
-            "75",
-            "--sec-user-agent",
-            "momentum-factor-lab-test contact@example.com",
-            "--target-aum",
+            "AAPL,MSFT,AAPL",
+            "--chart-benchmark",
+            "^GSPC",
+            "--min-avg-volume",
             "100000",
-            "--max-adv-participation",
-            "0.05",
-            "--recommendation-weighting-method",
-            "score_size_liquidity",
-            "--recommendation-score-weight",
-            "0.5",
-            "--recommendation-market-cap-weight",
-            "0.3",
-            "--recommendation-liquidity-weight",
-            "0.2",
-            "--recommendation-rank-floor",
-            "0.04",
-            "--disable-recommendation-market-cap-lookup",
-            "--yahoo-chart-fallback-limit",
-            "10",
-            "--nasdaq-fallback-limit",
-            "13",
-            "--stooq-fallback-limit",
-            "11",
-            "--finance-datareader-fallback-limit",
-            "12",
-            "--point-in-time-universe-provenance",
-            "source=test-cli as_of=2026-06-05 symbol_count=6 hash=fixture",
-            "--approved-tradable-universe",
-            "--min-tradable-universe-size",
-            "6",
-            "--min-liquidity-observations",
-            "42",
-            "--data-quality-lookback-days",
-            "126",
-            "--max-price-missing-ratio",
-            "0.02",
-            "--max-volume-missing-ratio",
-            "0.03",
-            "--max-extreme-daily-return",
+            "--stale-after-days",
+            "3",
+            "--min-valuation-coverage",
+            "0.95",
+            "--min-daily-risk-observations",
+            "400",
+            "--volatility-lookback-days",
+            "84",
+            "--min-volatility-observations",
+            "63",
+            "--score-liquidity-score-weight",
+            "0.70",
+            "--score-liquidity-liquidity-weight",
+            "0.30",
+            "--score-liquidity-rank-floor",
+            "0.07",
+            "--selection-min-sharpe",
+            "0.10",
+            "--selection-max-drawdown",
             "0.45",
+            "--selection-max-annualized-cost-drag",
+            "0.008",
+            "--selection-min-effective-names",
+            "12",
+            "--selection-max-target-hhi",
+            "0.12",
+            "--selection-max-target-weight",
+            "0.11",
+            "--selection-max-abs-security-day-contribution",
+            "0.40",
+            "--selection-max-security-absolute-contribution-share",
+            "0.30",
+            "--selection-max-leave-one-security-cagr-delta",
+            "0.25",
+            "--selection-extreme-event-action",
+            "penalize",
+            "--selection-extreme-event-penalty-points",
+            "15",
+            "--max-price-symbols",
+            "none",
+            "--yahoo-chart-fallback-limit",
+            "unlimited",
+            "--stooq-fallback-limit",
+            "0",
+            "--market-cache-max-age-hours",
+            "12",
+            "--refresh-market-data",
             "--output-dir",
-            str(tmp_path / "outputs"),
-            "--report-dir",
-            str(tmp_path / "reports"),
-            "--json",
+            "outputs/live",
+            "--site-dir",
+            "site/live",
+            "--cache-dir",
+            "cache/live",
+            "--export-input-snapshot",
         ]
     )
-
-    summary = cli.run_command(args)
-    config = captured["config"]
-
-    assert summary["fresh_live_data_available"]
-    assert summary["universe_profile"] == "aggressive_stock_only"
-    assert summary["factor_selection_mode"] == "predeclared"
-    assert not summary["same_sample_selection_blocked_for_tradable"]
-    assert summary["decision_support_tier"] == "practical_recommendations"
-    assert not summary["fail_closed"]
-    assert summary["execution_limitations"] == ["test"]
-    assert summary["data_quality_gate"]["manifest_available"]
-    assert config.universe_profile == "aggressive_stock_only"
-    assert config.universe_source_mode == "refresh"
-    assert config.factor_selection_mode == "predeclared"
-    assert config.selection_window == "policy-v1"
-    assert config.frozen_policy_path == tmp_path / "policy.json"
-    assert config.cost_stress_high_bps == 75
-    assert config.sec_user_agent == "momentum-factor-lab-test contact@example.com"
-    assert config.target_aum == 100_000
-    assert config.max_adv_participation == 0.05
-    assert config.recommendation_weighting_method == "score_size_liquidity"
-    assert config.recommendation_score_weight == 0.5
-    assert config.recommendation_market_cap_weight == 0.3
-    assert config.recommendation_liquidity_weight == 0.2
-    assert config.recommendation_rank_floor == 0.04
-    assert not config.recommendation_market_cap_lookup
-    assert config.yahoo_chart_fallback_limit == 10
-    assert config.nasdaq_fallback_limit == 13
-    assert config.stooq_fallback_limit == 11
-    assert config.finance_datareader_fallback_limit == 12
-    assert config.point_in_time_universe_provenance == "source=test-cli as_of=2026-06-05 symbol_count=6 hash=fixture"
-    assert config.approved_tradable_universe
-    assert config.min_tradable_universe_size == 6
-    assert config.min_liquidity_observations == 42
-    assert config.data_quality_lookback_days == 126
-    assert config.max_price_missing_ratio == 0.02
-    assert config.max_volume_missing_ratio == 0.03
-    assert config.max_extreme_daily_return == 0.45
+    config = _config(args)
+    assert config.live is True
+    assert config.universe == ["AAPL", "MSFT"]
+    assert config.chart_benchmark == "^GSPC"
+    assert config.min_avg_volume == pytest.approx(100_000.0)
+    assert config.stale_after_days == 3
+    assert config.min_valuation_coverage == pytest.approx(0.95)
+    assert config.min_daily_risk_observations == 400
+    assert config.volatility_lookback_days == 84
+    assert config.min_volatility_observations == 63
+    assert config.score_liquidity_score_weight == pytest.approx(0.70)
+    assert config.score_liquidity_liquidity_weight == pytest.approx(0.30)
+    assert config.score_liquidity_rank_floor == pytest.approx(0.07)
+    assert config.selection_min_sharpe == pytest.approx(0.10)
+    assert config.selection_max_drawdown == pytest.approx(0.45)
+    assert config.selection_max_annualized_cost_drag == pytest.approx(0.008)
+    assert config.selection_min_effective_names == pytest.approx(12.0)
+    assert config.selection_max_target_hhi == pytest.approx(0.12)
+    assert config.selection_max_target_weight == pytest.approx(0.11)
+    assert config.selection_max_abs_security_day_contribution == pytest.approx(0.40)
+    assert config.selection_max_security_absolute_contribution_share == pytest.approx(0.30)
+    assert config.selection_max_leave_one_security_cagr_delta == pytest.approx(0.25)
+    assert config.selection_extreme_event_action == "penalize"
+    assert config.selection_extreme_event_penalty_points == pytest.approx(15.0)
+    assert config.max_price_symbols is None
+    assert config.yahoo_chart_fallback_limit is None
+    assert config.stooq_fallback_limit == 0
+    assert config.market_cache_max_age_hours == pytest.approx(12.0)
+    assert config.refresh_market_data is True
+    assert config.output_dir == Path("outputs/live")
+    assert config.site_dir == Path("site/live")
+    assert config.cache_dir == Path("cache/live")
+    assert config.export_input_snapshot is True
+    config.validate()
 
 
-def _install_fake_reports(monkeypatch, tmp_path, captured):
-    def fake_run_analysis(config):
-        captured["config"] = config
-        return SimpleNamespace(
-            config=config,
-            selected_factor=config.selected_factor or "mom_12_1",
-            metadata={
-                "recommendation_output_key": "recommendations",
-                "selected_factor": config.selected_factor or "mom_12_1",
-                "recommendation_status": "sample_offline_not_current",
-                "current_recommendations_available": False,
-                "fresh_live_data_available": False,
-                "recommendation_output_label": "Reference recommendations (not current)",
-                "data_as_of": config.effective_end_date,
-                "provider": "test-provider",
-                "candidate_universe_size": len(config.universe),
-                "eligible_price_universe_size": 3,
-                "factor_count": 56,
-                "factor_validation_status": "pass",
-                "universe_profile": config.universe_profile,
-                "factor_selection_mode": config.effective_factor_selection_mode,
-                "selected_factor_selection_source": "research_validation",
-                "same_sample_selection_blocked_for_tradable": False,
-                "decision_support_tier": "non_current_reference",
-                "fail_closed": True,
-                "fail_closed_reasons": ["fresh_live_data"],
-                "tradability_blockers": ["fresh_live_data"],
-                "execution_limitations": ["fresh_live_data"],
-                "data_quality_gate": {"manifest_available": True, "recommendation_rows_pass": True},
-                "data_quality_status_counts": {"pass": 3},
-                "recommendation_data_quality_status_counts": {"pass": 3},
-                "recommendation_capacity_warning": "test warning",
-                "recommendation_weighting_method": config.recommendation_weighting_method,
-                "recommendation_weight_sum": 0.0,
-                "recommendation_cash_weight": 1.0,
-            },
-            output_paths={"json": str(tmp_path / "run.json")},
-            recommendations=pd.DataFrame(
-                [
-                    {"rank": 1, "symbol": "AAPL", "weight": 0.0},
-                    {"rank": 2, "symbol": "MSFT", "weight": 0.0},
-                    {"rank": 3, "symbol": "NVDA", "weight": 0.0},
+def test_compact_summary_exposes_selection_funnel_performance_and_allocation(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    paths = {"result": "result.json", "index": "docs/index.html"}
+    summary = _compact_summary(payload, paths)
+    selected = payload["selectedFactor"]
+    row = next(item for item in payload["factorPolicyRanking"] if item["selected"])
+
+    assert summary["asOf"] == payload["data"]["asOf"]
+    assert summary["provider"] == payload["data"]["provider"]
+    assert summary["requestedCandidateCount"] == payload["data"]["requestedCandidateCount"]
+    assert (
+        summary["providerReturnedCandidateCount"]
+        == payload["data"]["providerReturnedCandidateCount"]
+    )
+    assert summary["analyzedSecurityCount"] == payload["data"]["analyzedSecurityCount"]
+    assert summary["eligibleSecurityCount"] == payload["data"]["latestEligibleSecurityCount"]
+    assert summary["factorCount"] == payload["meta"]["factorCount"]
+    assert summary["independentFactorCount"] == payload["meta"]["independentFactorCount"]
+    assert summary["selectedFactor"] == selected
+    assert summary["selectedFactorReason"] == payload["selectedReason"]
+    assert summary["selectedWeightingPolicy"] == payload["selectedWeightingPolicy"]
+    assert summary["selectedWeightingPolicyReason"] == payload["selectedReason"]
+    assert summary["performance"]["compositeScore"] == row["composite_score"]
+    assert summary["performance"]["valuationCoverageRatio"] == row["valuation_coverage_ratio"]
+    assert summary["currentAllocation"]["weights"] == payload["currentResearchTarget"]["weights"]
+    assert (
+        summary["currentAllocation"]["cashWeight"] == payload["currentResearchTarget"]["cashWeight"]
+    )
+    assert summary["runtimeSeconds"] == payload["meta"]["runtimeSeconds"]
+    assert summary["maxRssBytes"] == payload["meta"]["maxRssBytes"]
+    assert summary["paths"] == paths
+
+
+def test_demo_run_writes_only_isolated_preview_and_preserves_public_aliases(
+    demo_result: AnalysisResult,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = result_payload(demo_result)
+    output_dir = tmp_path / "outputs" / "demo"
+    public_site = tmp_path / "public-site"
+    public_data = public_site / "data"
+    public_data.mkdir(parents=True)
+    sentinel = {
+        "dashboard.json": b"canonical-full-market-detail\n",
+        "summary.json": b"canonical-full-market-summary\n",
+        "grid/v1/manifest.json": b"canonical-full-market-manifest\n",
+    }
+    for relative, encoded in sentinel.items():
+        path = public_data / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(encoded)
+
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--demo",
+            "--demo-symbol-count",
+            "200",
+            "--output-dir",
+            str(output_dir),
+            "--site-dir",
+            str(public_site),
+        ]
+    )
+    monkeypatch.setattr("momentum_factor_lab.cli.load_market_data", lambda config: object())
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.build_result_identity",
+        lambda config, market: payload["resultIdentity"],
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.load_analysis_cache",
+        lambda config, identity: payload,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.write_payload_json",
+        lambda result_payload, path: path / "cached-result.json",
+    )
+
+    summary = _execute_run(args)
+
+    for relative, encoded in sentinel.items():
+        assert (public_data / relative).read_bytes() == encoded
+    assert summary["paths"]["publicationMode"] == "isolated_preview"
+    assert Path(summary["paths"]["index"]) == output_dir / "site" / "index.html"
+    assert (output_dir / "site" / "data" / "dashboard.json").exists()
+
+
+def test_full_actual_run_refuses_to_collapse_public_multi_preset_docs_grid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    public_manifest = tmp_path / "docs" / "data" / "grid" / "v1" / "manifest.json"
+    public_manifest.parent.mkdir(parents=True)
+    public_manifest.write_bytes(b"three-preset-grid\n")
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--live",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--site-dir",
+            "docs",
+        ]
+    )
+    payload = {
+        "resultKey": "a" * 64,
+        "data": {
+            "mode": "live_market",
+            "synthetic": False,
+            "analyzedSecurityCount": 2_700,
+        },
+    }
+    monkeypatch.setattr("momentum_factor_lab.cli.load_market_data", lambda config: object())
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli._compute_payload",
+        lambda config, market: (payload, config.output_dir / "result.json"),
+    )
+
+    with pytest.raises(ValueError, match="cannot replace the public multi-preset docs grid"):
+        _execute_run(args)
+
+    assert public_manifest.read_bytes() == b"three-preset-grid\n"
+
+
+def test_scheduled_dashboard_reads_run_site_and_title_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "dashboard.json"
+    path.write_text(
+        json.dumps(
+            {
+                "title": "Saved dashboard",
+                "site_dir": "saved-site",
+                "default_static_grid_preset": "default",
+                "static_grid_presets": [
+                    {"id": "default", "inputOverrides": {}, "marketSessionOffset": 0},
+                    {
+                        "id": "top30",
+                        "inputOverrides": {"topN": 30},
+                        "marketSessionOffset": 0,
+                    },
+                ],
+                "run_args": [
+                    "--live",
+                    "--start-date",
+                    "2016-01-01",
+                    "--output-dir",
+                    "outputs/scheduled",
+                    "--export-input-snapshot",
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_execute(
+        args: argparse.Namespace,
+        *,
+        site_dir: Path,
+        title: str,
+        presets: list[ScheduledGridPreset],
+        default_preset_id: str,
+    ) -> dict[str, object]:
+        captured.update(
+            args=args,
+            site_dir=site_dir,
+            title=title,
+            presets=presets,
+            default_preset_id=default_preset_id,
+        )
+        return {"sentinel": True}
+
+    monkeypatch.setattr("momentum_factor_lab.cli._execute_scheduled_grid", fake_execute)
+    assert main(["scheduled-dashboard", "--config", str(path), "--json"]) == 0
+
+    run_args = captured["args"]
+    assert isinstance(run_args, argparse.Namespace)
+    assert run_args.live is True
+    assert run_args.start_date == "2016-01-01"
+    assert run_args.export_input_snapshot is True
+    assert captured["site_dir"] == Path("saved-site")
+    assert captured["title"] == "Saved dashboard"
+    assert captured["default_preset_id"] == "default"
+    presets = captured["presets"]
+    assert isinstance(presets, list)
+    assert [preset.preset_id for preset in presets] == ["default", "top30"]
+    assert [preset.research_inputs.top_n for preset in presets] == [20, 30]
+    output = json.loads(capsys.readouterr().out)
+    assert output["scheduledDashboard"] == {
+        "config": str(path),
+        "siteDir": "saved-site",
+        "title": "Saved dashboard",
+    }
+
+
+def test_scheduled_dashboard_rejects_removed_unused_history_limit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "dashboard.json"
+    path.write_text(
+        json.dumps({"history_limit": 17, "run_args": ["--live"]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        main(["scheduled-dashboard", "--config", str(path)])
+    assert exc_info.value.code == 2
+    assert "history_limit' was removed" in capsys.readouterr().err
+
+
+def test_scheduled_dashboard_requires_multiple_versioned_static_presets(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "dashboard.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_args": ["--live"],
+                "default_static_grid_preset": "only",
+                "static_grid_presets": [
+                    {"id": "only", "inputOverrides": {}, "marketSessionOffset": 0}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["scheduled-dashboard", "--config", str(path)])
+
+    assert exc_info.value.code == 2
+    assert "at least two presets" in capsys.readouterr().err
+
+
+def test_scheduled_dashboard_rejects_removed_legacy_arguments(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "dashboard.json"
+    path.write_text(
+        json.dumps({"run_args": ["--live", "--report-dir", "reports/old"]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        main(["scheduled-dashboard", "--config", str(path)])
+    assert exc_info.value.code == 2
+    assert "removed legacy arguments: --report-dir" in capsys.readouterr().err
+
+
+def test_scheduled_dashboard_rejects_removed_relative_policy_arguments(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "dashboard.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_args": [
+                    "--live",
+                    "--policy-sharpe-tolerance",
+                    "0.05",
+                    "--score-size-market-cap-weight",
+                    "0.25",
                 ]
-            ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["scheduled-dashboard", "--config", str(path)])
+
+    assert exc_info.value.code == 2
+    error = capsys.readouterr().err
+    assert "removed legacy arguments" in error
+    assert "--policy-sharpe-tolerance" in error
+    assert "--score-size-market-cap-weight" in error
+
+
+def test_scheduled_grid_recomputes_every_declared_input_and_market_offset_preset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--live",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--site-dir",
+            str(tmp_path / "site"),
+        ]
+    )
+    dates = pd.bdate_range("2024-01-02", periods=12)
+    base_market = SimpleNamespace(
+        candidate_symbols=[f"S{index:04d}" for index in range(2_700)],
+        prices=pd.DataFrame({"SPY": 100.0}, index=dates),
+        requested_through=dates[-1].date().isoformat(),
+    )
+    read_configs = []
+    computed_configs = []
+    published = {}
+
+    monkeypatch.setattr("momentum_factor_lab.cli.load_market_data", lambda config: base_market)
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.write_market_data_snapshot",
+        lambda market, path: {"manifest": str(path / "market_data_manifest.json")},
+    )
+
+    def fake_read_snapshot(config, path):
+        read_configs.append(config)
+        return SimpleNamespace(
+            candidate_symbols=base_market.candidate_symbols,
+            prices=base_market.prices.loc[: config.end_date]
+            if config.end_date
+            else base_market.prices,
+            requested_through=config.effective_end_date,
         )
 
-    monkeypatch.setattr(cli, "run_analysis", fake_run_analysis)
-    monkeypatch.setattr(cli, "write_reports", lambda result: result)
+    monkeypatch.setattr("momentum_factor_lab.cli.read_market_data_snapshot", fake_read_snapshot)
+
+    def fake_compute(config, market):
+        computed_configs.append(config)
+        as_of = config.end_date or dates[-1].date().isoformat()
+        result_key = f"{config.top_n:04d}{as_of.replace('-', '')}".ljust(64, "a")
+        payload = {
+            "resultKey": result_key,
+            "data": {
+                "mode": "live_market",
+                "synthetic": False,
+                "asOf": as_of,
+                "analyzedSecurityCount": len(market.candidate_symbols),
+            },
+            "researchInputs": ResearchInputs.from_config(config).to_dict(),
+        }
+        return payload, config.output_dir / f"{result_key}.json"
+
+    monkeypatch.setattr("momentum_factor_lab.cli._compute_payload", fake_compute)
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli._require_full_actual_publication",
+        lambda payload, config: None,
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.dashboard_summary",
+        lambda payload: {"resultKey": payload["resultKey"]},
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.write_dashboard_site",
+        lambda payload, site_dir, title: {"index": str(site_dir / "index.html")},
+    )
+
+    def fake_write_grid(data_dir, artifacts, *, default_result_key, write_default_aliases):
+        published.update(
+            artifacts=list(artifacts),
+            default_result_key=default_result_key,
+            write_default_aliases=write_default_aliases,
+        )
+        return {"manifest": data_dir / "grid" / "v1" / "manifest.json"}
+
+    monkeypatch.setattr("momentum_factor_lab.cli.write_static_grid", fake_write_grid)
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli._compact_summary",
+        lambda payload, paths: {"resultKey": payload["resultKey"], "paths": paths},
+    )
+    presets = [
+        ScheduledGridPreset("latest-top20", ResearchInputs(top_n=20), 0),
+        ScheduledGridPreset("latest-top30", ResearchInputs(top_n=30), 0),
+        ScheduledGridPreset("prior-seven", ResearchInputs(top_n=20), 7),
+    ]
+
+    summary = _execute_scheduled_grid(
+        args,
+        site_dir=tmp_path / "site",
+        title="Scheduled grid",
+        presets=presets,
+        default_preset_id="latest-top20",
+    )
+
+    assert len(computed_configs) == 3
+    assert [config.top_n for config in computed_configs] == [20, 30, 20]
+    assert computed_configs[0].end_date is None
+    assert computed_configs[1].end_date is None
+    assert computed_configs[2].end_date == dates[-8].date().isoformat()
+    assert len(read_configs) == 2
+    assert len(published["artifacts"]) == 3
+    assert [artifact.preset_id for artifact in published["artifacts"]] == [
+        "latest-top20",
+        "latest-top30",
+        "prior-seven",
+    ]
+    assert published["default_result_key"] == summary["resultKey"]
+    assert published["write_default_aliases"] is True
+    assert [receipt["marketSessionOffset"] for receipt in summary["staticGridPresets"]] == [
+        0,
+        0,
+        7,
+    ]
 
 
-def _feed_inputs(monkeypatch, values):
-    iterator = iter(values)
-    monkeypatch.setattr("builtins.input", lambda _prompt="": next(iterator, ""))
+def test_committed_dashboard_config_runs_full_packaged_live_universe() -> None:
+    payload = json.loads(Path(".github/momentum-dashboard-config.json").read_text(encoding="utf-8"))
+    run_args = payload["run_args"]
+    args = build_parser().parse_args(["run", *run_args])
+    config = _config(args)
 
-
-def test_wizard_parser_aliases_are_additive():
-    parser = cli.build_parser()
-    assert parser.parse_args(["wizard"]).command == "wizard"
-    assert parser.parse_args(["run-wizard"]).command == "run-wizard"
-    assert parser.parse_args(["interactive"]).command == "interactive"
-    run_args = parser.parse_args(["run", "--top-n", "7"])
-    assert run_args.command == "run"
-    assert run_args.top_n == 7
-
-
-def test_wizard_defaults_show_descriptions_and_use_existing_pipeline(monkeypatch, tmp_path, capsys):
-    captured = {}
-    _install_fake_reports(monkeypatch, tmp_path, captured)
-    _feed_inputs(monkeypatch, [""] * 32)
-
-    assert cli.main(["wizard", "--no-confirm"]) == 0
-
-    config = captured["config"]
+    assert config.live is True
     assert config.start_date == "2016-01-01"
     assert config.end_date is None
-    assert config.top_n == 20
-    assert config.max_weight == 0.10
-    assert str(config.output_dir) == "outputs/sample"
-    assert str(config.report_dir) == "reports/sample"
-    assert config.offline_sample
-    output = capsys.readouterr().out
-    assert "Top-N holdings" in output
-    assert "Default [20]" in output
-    assert "Choices:" in output
-    assert "Run configuration review" in output
-
-
-def test_wizard_custom_inputs_and_invalid_reprompts(monkeypatch, tmp_path):
-    captured = {}
-    _install_fake_reports(monkeypatch, tmp_path, captured)
-    _feed_inputs(
-        monkeypatch,
-        [
-            "live",
-            "2018-01-02",
-            "2026-06-08",
-            "0",
-            "5",
-            "2",
-            "0.2",
-            str(tmp_path / "out"),
-            str(tmp_path / "reports"),
-            str(tmp_path / "cache"),
-            "aapl, msft, nvda",
-            "bad_profile",
-            "extended_current",
-            "refresh",
-            "abc",
-            "25",
-            "1000000",
-            "0.05",
-            "3.5",
-            "2500000",
-            "126",
-            "n",
-        ],
+    assert config.universe_source_mode == "packaged"
+    assert config.universe_profile == "large_liquid"
+    assert len(config.universe) >= 2_700
+    assert config.max_price_symbols is None
+    assert config.refresh_market_data is True
+    assert config.min_avg_dollar_volume == pytest.approx(5_000_000.0)
+    assert config.stooq_fallback_limit == 0
+    assert config.finance_datareader_fallback_limit == 0
+    assert config.export_input_snapshot is True
+    assert payload["default_static_grid_preset"] == "latest-top20"
+    assert [preset["marketSessionOffset"] for preset in payload["static_grid_presets"]] == [
+        0,
+        0,
+        7,
+    ]
+    assert [
+        preset.get("inputOverrides", {}).get("topN", 20)
+        for preset in payload["static_grid_presets"]
+    ] == [
+        20,
+        30,
+        20,
+    ]
+    assert "--end-date" not in run_args
+    assert "--max-price-symbols" not in run_args
+    assert not (
+        {item for item in run_args if item.startswith("--")}
+        & {
+            "--report-dir",
+            "--selected-factor",
+            "--factor-selection-mode",
+            "--frozen-policy-path",
+            "--target-aum",
+            "--max-adv-participation",
+        }
     )
-
-    assert cli.main(["wizard", "--no-confirm"]) == 0
-
-    config = captured["config"]
-    assert not config.offline_sample
-    assert config.start_date == "2018-01-02"
-    assert config.end_date == "2026-06-08"
-    assert config.top_n == 5
-    assert config.max_weight == 0.2
-    assert config.output_dir == tmp_path / "out"
-    assert config.report_dir == tmp_path / "reports"
-    assert config.cache_dir == tmp_path / "cache"
-    assert config.universe == ["AAPL", "MSFT", "NVDA"]
-    assert config.universe_profile == "extended_current"
-    assert config.universe_source_mode == "refresh"
-    assert config.max_price_symbols == 25
-    assert config.target_aum == 1_000_000
-    assert config.max_adv_participation == 0.05
-    assert config.min_price == 3.5
-    assert config.min_avg_dollar_volume == 2_500_000
-    assert config.min_history_days == 126
+    config.validate()
 
 
-def test_wizard_cross_field_validation_exits_before_analysis(monkeypatch):
-    called = False
-
-    def fail_run_analysis(_config):
-        nonlocal called
-        called = True
-        raise AssertionError("run_analysis should not be called")
-
-    monkeypatch.setattr(cli, "run_analysis", fail_run_analysis)
-    _feed_inputs(monkeypatch, ["", "2026-06-08", "2026-01-01"] + [""] * 32)
-
-    try:
-        cli.main(["wizard", "--no-confirm"])
-    except SystemExit as exc:
-        assert exc.code == 2
-    else:  # pragma: no cover - defensive
-        raise AssertionError("expected parser-style exit")
-    assert not called
+def test_build_site_command_reuses_schema_v3_result(
+    demo_result: AnalysisResult,
+    tmp_path: Path,
+) -> None:
+    result_path = write_result_json(demo_result)
+    site = tmp_path / "site"
+    assert main(["build-site", "--input", str(result_path), "--site-dir", str(site)]) == 0
+    assert (site / "index.html").exists()
+    assert (site / "data" / "dashboard.json").exists()
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    site_payload = json.loads((site / "data" / "dashboard.json").read_text(encoding="utf-8"))
+    summary = json.loads((site / "data" / "summary.json").read_text(encoding="utf-8"))
+    assert result["generatedAtUtc"] == site_payload["generatedAtUtc"]
+    assert summary["generatedAt"] == result["generatedAtUtc"]
 
 
-def test_wizard_eof_exits_before_analysis(monkeypatch):
-    called = False
+def test_build_site_defaults_to_isolated_preview_and_rejects_public_alias_bypass(
+    demo_result: AnalysisResult,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+    parsed = parser.parse_args(["build-site", "--input", "result.json"])
+    assert parsed.site_dir == Path("outputs/site-preview")
 
-    def fail_run_analysis(_config):
-        nonlocal called
-        called = True
-        raise AssertionError("run_analysis should not be called")
+    result_path = write_result_json(demo_result).resolve()
+    public_data = tmp_path / "docs" / "data"
+    public_data.mkdir(parents=True)
+    sentinel = public_data / "dashboard.json"
+    sentinel.write_bytes(b"canonical actual-market alias\n")
+    monkeypatch.chdir(tmp_path)
 
-    monkeypatch.setattr(cli, "run_analysis", fail_run_analysis)
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "build-site",
+                "--input",
+                str(result_path),
+                "--site-dir",
+                "docs",
+            ]
+        )
 
-    def raise_eof(_prompt=""):
-        raise EOFError
-
-    monkeypatch.setattr("builtins.input", raise_eof)
-    try:
-        cli.main(["wizard"])
-    except SystemExit as exc:
-        assert exc.code == 1
-    else:  # pragma: no cover - defensive
-        raise AssertionError("expected abort exit")
-    assert not called
-
-
-def test_wizard_offline_smoke_creates_selected_artifacts(monkeypatch, tmp_path):
-    output_dir = tmp_path / "wizard-outputs"
-    report_dir = tmp_path / "wizard-reports"
-    _feed_inputs(
-        monkeypatch,
-        [
-            "offline_sample",
-            "2024-01-01",
-            "2024-12-31",
-            "5",
-            "0.2",
-            str(output_dir),
-            str(report_dir),
-            str(tmp_path / "cache"),
-            "",
-            "large_liquid",
-            "packaged",
-            "",
-            "",
-            "",
-            "5",
-            "1000000",
-            "63",
-            "n",
-        ],
-    )
-
-    assert cli.main(["wizard", "--no-confirm"]) == 0
-
-    assert list(output_dir.glob("run_results_*.json"))
-    assert list(report_dir.glob("momentum_factor_report_*.pdf"))
-    assert list(report_dir.glob("momentum_factor_analysis_*.xlsx"))
+    assert exc_info.value.code == 2
+    assert "build-site cannot write the public docs aliases" in capsys.readouterr().err
+    assert sentinel.read_bytes() == b"canonical actual-market alias\n"

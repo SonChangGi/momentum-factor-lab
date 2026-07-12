@@ -1,919 +1,768 @@
-import sys
+import hashlib
 import inspect
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from momentum_factor_lab import data
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import (
-    _apply_finance_datareader_fallback,
-    _apply_nasdaq_latest_repair,
-    _apply_stooq_fallback,
-    _apply_yahoo_chart_fallback,
-    _download_nasdaq_symbol,
-    _download_finance_datareader_symbol,
-    _download_stooq_symbol,
-    _download_yahoo_chart_symbol,
-    _eligible_filter,
-    _finance_datareader_cache_path,
-    _nasdaq_cache_path,
-    _stooq_cache_path,
-    _stooq_symbol,
-    _yahoo_chart_cache_path,
-    build_data_quality_frame,
-    download_live_data,
+    build_eligibility_mask,
+    load_market_data,
+    read_market_data_snapshot,
+    write_market_data_snapshot,
 )
+from momentum_factor_lab.identity import build_result_identity
 
 
-def _candidate_frame(symbols):
-    return pd.DataFrame(
+def test_demo_uses_200_candidates_and_keeps_benchmark_out_of_eligibility() -> None:
+    market = load_market_data(RunConfig(demo=True))
+    assert len(market.candidate_symbols) == 200
+    assert market.prices.shape[1] == 201
+    assert int(market.eligibility_mask.iloc[-1].sum()) == 200
+    assert not bool(market.eligibility_mask["SPY"].any())
+    assert market.source_mode == "demo"
+    assert market.price_basis == "synthetic_total_return_like"
+    assert {
+        "prices",
+        "volumes",
+        "rawCloses",
+        "dollarVolumes",
+        "demoSpecification",
+        "generatorSource",
+        "defaultUniverseFile",
+        "resolvedOrderedUniverse",
+    } == set(market.input_sha256)
+    assert market.input_sha256["rawCloses"] is None
+    assert all(value is None or len(value) == 64 for value in market.input_sha256.values())
+
+
+def test_demo_provenance_is_deterministic_and_binds_config_and_order(monkeypatch) -> None:
+    config = RunConfig(
+        demo=True,
+        demo_symbol_count=50,
+        start_date="2020-01-01",
+        end_date="2021-12-31",
+    )
+    first = load_market_data(config)
+    repeated = load_market_data(config)
+    pd.testing.assert_frame_equal(first.prices, repeated.prices)
+    pd.testing.assert_frame_equal(first.volumes, repeated.volumes)
+    assert first.input_sha256 == repeated.input_sha256
+
+    changed_seed = load_market_data(
+        RunConfig(
+            demo=True,
+            demo_symbol_count=50,
+            demo_seed=43,
+            start_date="2020-01-01",
+            end_date="2021-12-31",
+        )
+    )
+    assert changed_seed.input_sha256["demoSpecification"] != first.input_sha256["demoSpecification"]
+    assert changed_seed.input_sha256["prices"] != first.input_sha256["prices"]
+
+    changed_benchmark = load_market_data(
+        RunConfig(
+            demo=True,
+            demo_symbol_count=50,
+            benchmark="AAPL",
+            start_date="2020-01-01",
+            end_date="2021-12-31",
+        )
+    )
+    assert (
+        changed_benchmark.input_sha256["demoSpecification"]
+        != first.input_sha256["demoSpecification"]
+    )
+    assert changed_benchmark.input_sha256["prices"] != first.input_sha256["prices"]
+
+    monkeypatch.setattr(data, "DEFAULT_UNIVERSE", list(reversed(data.DEFAULT_UNIVERSE)))
+    changed_order = load_market_data(config)
+    assert (
+        changed_order.input_sha256["defaultUniverseFile"]
+        == first.input_sha256["defaultUniverseFile"]
+    )
+    assert (
+        changed_order.input_sha256["resolvedOrderedUniverse"]
+        != first.input_sha256["resolvedOrderedUniverse"]
+    )
+    assert (
+        changed_order.input_sha256["demoSpecification"] != first.input_sha256["demoSpecification"]
+    )
+    assert changed_order.input_sha256["prices"] != first.input_sha256["prices"]
+
+
+def test_demo_missing_ratio_adds_deterministic_sparse_gaps_but_preserves_final_date() -> None:
+    config = RunConfig(
+        demo=True,
+        demo_symbol_count=50,
+        demo_missing_ratio=0.001,
+        start_date="2020-01-01",
+        end_date="2021-12-31",
+    )
+    first = load_market_data(config)
+    repeated = load_market_data(config)
+    complete = load_market_data(
+        RunConfig(
+            demo=True,
+            demo_symbol_count=50,
+            start_date="2020-01-01",
+            end_date="2021-12-31",
+        )
+    )
+    candidates = first.candidate_symbols
+    price_missing = first.prices[candidates].isna()
+    volume_missing = first.volumes[candidates].isna()
+    eligible_cells = (len(first.prices.index) - 1) * len(candidates)
+
+    assert int(price_missing.to_numpy().sum()) == int(np.ceil(eligible_cells * 0.001))
+    pd.testing.assert_frame_equal(price_missing, volume_missing)
+    assert not bool(price_missing.iloc[-1].any())
+    assert not bool(first.prices[first.benchmark].isna().any())
+    pd.testing.assert_frame_equal(first.prices, repeated.prices)
+    assert first.input_sha256 == repeated.input_sha256
+    assert first.input_sha256["demoSpecification"] != complete.input_sha256["demoSpecification"]
+    assert first.input_sha256["prices"] != complete.input_sha256["prices"]
+    assert "missing_ratio=0.001" in " ".join(first.notes)
+
+
+def test_wide_local_csv_defines_the_analyzed_universe(tmp_path) -> None:
+    dates = pd.bdate_range("2022-01-03", periods=320)
+    frame = pd.DataFrame(
         {
-            "symbol": symbols,
-            "name": symbols,
-            "asset_type": ["stock"] * len(symbols),
-            "exchange": ["fixture"] * len(symbols),
-            "source": ["test-fixture"] * len(symbols),
-            "is_etf": [False] * len(symbols),
+            "date": dates,
+            "AAA": np.linspace(20.0, 40.0, len(dates)),
+            "BBB": np.linspace(30.0, 45.0, len(dates)),
+            "SPY": np.linspace(400.0, 470.0, len(dates)),
         }
     )
+    path = tmp_path / "prices.csv"
+    frame.to_csv(path, index=False)
+    market = load_market_data(
+        RunConfig(
+            prices_path=path,
+            start_date="2022-01-03",
+            top_n=2,
+            min_history_days=252,
+            evaluation_window_days=252,
+            min_evaluation_observations=252,
+            min_daily_risk_observations=252,
+            selection_min_effective_names=2,
+        )
+    )
+    assert market.candidate_symbols == ["AAA", "BBB"]
+    assert int(market.eligibility_mask.iloc[-1].sum()) == 2
+    assert market.source_label == "prices.csv"
+    assert market.price_basis == "user_supplied_adjusted"
+    assert market.input_sha256["prices"] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_eligible_filter_excludes_uninvestable_symbols():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame(
+def test_long_local_csv_is_supported(tmp_path) -> None:
+    dates = pd.bdate_range("2023-01-02", periods=260)
+    rows = [
+        {"date": date, "symbol": symbol, "price": 20 + offset + i / 100}
+        for i, date in enumerate(dates)
+        for offset, symbol in enumerate(("AAA", "BBB"))
+    ]
+    path = tmp_path / "long.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    market = load_market_data(
+        RunConfig(
+            prices_path=path,
+            start_date="2023-01-02",
+            top_n=2,
+            min_history_days=252,
+            evaluation_window_days=252,
+            min_evaluation_observations=252,
+            min_daily_risk_observations=252,
+            selection_min_effective_names=2,
+        )
+    )
+    assert market.prices.columns.tolist() == ["AAA", "BBB"]
+
+
+def test_raw_close_long_column_is_rejected_as_ambiguous_price_basis(tmp_path) -> None:
+    path = tmp_path / "raw-close.csv"
+    pd.DataFrame(
         {
-            "GOOD": np.linspace(20, 30, len(dates)),
-            "LOWP": np.linspace(1, 2, len(dates)),
-            "SHORT": [np.nan] * 200 + list(np.linspace(10, 12, 60)),
-            "ILLIQ": np.linspace(10, 11, len(dates)),
-        },
-        index=dates,
-    )
-    volumes = pd.DataFrame(
-        {
-            "GOOD": 1_000_000,
-            "LOWP": 1_000_000,
-            "SHORT": 1_000_000,
-            "ILLIQ": 10,
-        },
-        index=dates,
-    )
-    candidate = _candidate_frame(["GOOD", "LOWP", "SHORT", "ILLIQ", "MISS"])
-    config = RunConfig(min_history_days=252, min_price=5, min_avg_dollar_volume=1_000_000, chart_benchmark="QQQ")
-    filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
-    assert list(filtered.columns) == ["GOOD", "ILLIQ"]
-    assert list(eligible["symbol"]) == ["GOOD", "ILLIQ"]
-    reasons = exclusions.set_index("symbol")["reason"].to_dict()
-    assert reasons["LOWP"] == "below minimum price"
-    assert reasons["SHORT"] == "insufficient price history"
-    assert reasons["MISS"] == "missing from price providers"
-
-
-def test_eligible_filter_excludes_recent_data_quality_anomalies():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    base = np.linspace(20, 30, len(dates))
-    prices = pd.DataFrame(
-        {
-            "GOOD": base,
-            "MISSING": base.copy(),
-            "NEGATIVE": base.copy(),
-            "EXTREME": base.copy(),
-            "OLD_EXTREME": base.copy(),
-            "VOLMISS": base.copy(),
-            "ALLNAN": np.nan,
-        },
-        index=dates,
-    )
-    prices.loc[dates[-60:-30], "MISSING"] = np.nan
-    prices.loc[dates[-5], "NEGATIVE"] = -1.0
-    prices.loc[dates[-3], "EXTREME"] = prices.loc[dates[-4], "EXTREME"] * 2.5
-    prices.loc[dates[5], "OLD_EXTREME"] = prices.loc[dates[4], "OLD_EXTREME"] * 2.5
-    volumes = pd.DataFrame(
-        {
-            "GOOD": 1_000_000,
-            "MISSING": 1_000_000,
-            "NEGATIVE": 1_000_000,
-            "EXTREME": 1_000_000,
-            "OLD_EXTREME": 1_000_000,
-            "VOLMISS": 1_000_000,
-            "ALLNAN": 1_000_000,
-        },
-        index=dates,
-    )
-    volumes.loc[dates[-40:], "VOLMISS"] = np.nan
-    candidate = _candidate_frame(["GOOD", "MISSING", "NEGATIVE", "EXTREME", "OLD_EXTREME", "VOLMISS", "ALLNAN"])
-    config = RunConfig(
-        min_history_days=200,
-        min_price=5,
-        min_avg_dollar_volume=1_000_000,
-        data_quality_lookback_days=252,
-        max_price_missing_ratio=0.05,
-        max_volume_missing_ratio=0.10,
-        max_extreme_daily_return=0.80,
-    )
-
-    filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
-
-    assert list(filtered.columns) == ["GOOD", "VOLMISS"]
-    assert list(eligible["symbol"]) == ["GOOD", "VOLMISS"]
-    reasons = exclusions.set_index("symbol")["reason"].to_dict()
-    assert reasons["MISSING"] == "excessive missing price data"
-    assert reasons["NEGATIVE"] == "non-positive price observations"
-    assert reasons["EXTREME"] == "extreme adjusted daily return anomaly"
-    assert reasons["OLD_EXTREME"] == "extreme adjusted daily return anomaly"
-    assert reasons["ALLNAN"] == "missing from price providers"
-
-
-def test_build_data_quality_frame_records_practical_symbol_diagnostics():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame(
-        {
-            "GOOD": np.linspace(20, 30, len(dates)),
-            "SPY": np.linspace(400, 430, len(dates)),
-            "MISSVOL": np.linspace(25, 35, len(dates)),
-        },
-        index=dates,
-    )
-    volumes = pd.DataFrame({"GOOD": 1_000_000, "MISSVOL": np.nan}, index=dates)
-    candidate = _candidate_frame(["GOOD", "MISSVOL"])
-    config = RunConfig(min_history_days=200, min_avg_dollar_volume=1_000_000, data_quality_lookback_days=126)
-
-    quality = build_data_quality_frame(
-        prices,
-        volumes,
-        ["GOOD", "MISSVOL", "MISSING", "SPY"],
-        candidate,
-        config,
-        provider="fixture-provider",
-        price_sources=pd.DataFrame(
-            [
-                {"symbol": "GOOD", "price_source": "adjusted-close-fixture"},
-                {"symbol": "SPY", "price_source": "benchmark-fixture"},
-            ]
-        ),
-        exclusions=pd.DataFrame([{"symbol": "MISSVOL", "reason": "missing volume data"}]),
-        as_of=dates[-1],
-    )
-
-    rows = quality.set_index("symbol")
-    assert rows.loc["GOOD", "data_quality_status"] == "pass"
-    assert rows.loc["GOOD", "price_source"] == "adjusted-close-fixture"
-    assert rows.loc["MISSVOL", "data_quality_status"] == "missing_volume"
-    assert rows.loc["MISSING", "data_quality_status"] == "missing_price"
-    assert rows.loc["SPY", "data_quality_status"] == "benchmark_comparator_only"
-    assert rows.loc["GOOD", "missing_ratio"] == 0.0
-    assert not bool(rows.loc["MISSVOL", "data_quality_pass"])
+            "date": ["2024-01-02", "2024-01-03"],
+            "symbol": ["AAA", "AAA"],
+            "close": [10.0, 11.0],
+        }
+    ).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="requires one of"):
+        load_market_data(RunConfig(prices_path=path, top_n=1, selection_min_effective_names=1))
 
 
 @pytest.mark.parametrize(
-    ("provider", "price_source"),
+    ("kind", "contents", "value"),
     [
-        ("yfinance-free-public-data+stooq-fallback", "stooq-daily-close-fallback"),
-        ("yfinance-free-public-data+finance-datareader-fallback", "finance-datareader-close-fallback"),
+        ("prices", "date,AAA\n2024-01-02,10\n2024-01-03,oops\n", "oops"),
+        (
+            "prices",
+            "date,symbol,price\n2024-01-02,AAA,10\n2024-01-03,AAA,oops\n",
+            "oops",
+        ),
+        ("volumes", "date,AAA\n2024-01-02,10\n2024-01-03,inf\n", "inf"),
+        (
+            "volumes",
+            "date,symbol,volume\n2024-01-02,AAA,10\n2024-01-03,AAA,-inf\n",
+            "-inf",
+        ),
     ],
 )
-def test_close_fallback_is_not_tradable_data_quality(provider, price_source):
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame({"STQ": np.linspace(20, 30, len(dates))}, index=dates)
-    volumes = pd.DataFrame({"STQ": 1_000_000}, index=dates)
-    candidate = _candidate_frame(["STQ"])
+def test_nonblank_malformed_and_infinite_values_fail_with_cell_context(
+    tmp_path,
+    kind: str,
+    contents: str,
+    value: str,
+) -> None:
+    path = tmp_path / f"bad-{kind}.csv"
+    path.write_text(contents, encoding="utf-8")
 
-    quality = build_data_quality_frame(
+    with pytest.raises(ValueError) as captured:
+        data._read_local_matrix(path, kind=kind)
+
+    message = str(captured.value)
+    assert str(path) in message
+    assert "row=3" in message
+    assert "date='2024-01-03'" in message
+    assert "symbol='AAA'" in message
+    assert f"value='{value}'" in message
+
+
+@pytest.mark.parametrize(
+    ("kind", "contents"),
+    [
+        ("prices", "date,AAA\n2024-01-02,10\n2024-01-03,\n"),
+        ("prices", "date,symbol,price\n2024-01-02,AAA,10\n2024-01-03,AAA,\n"),
+        ("volumes", "date,AAA\n2024-01-02,10\n2024-01-03,\n"),
+        ("volumes", "date,symbol,volume\n2024-01-02,AAA,10\n2024-01-03,AAA,\n"),
+    ],
+)
+def test_trailing_all_blank_rows_cannot_extend_actual_as_of(
+    tmp_path,
+    kind: str,
+    contents: str,
+) -> None:
+    path = tmp_path / f"blank-{kind}.csv"
+    path.write_text(contents, encoding="utf-8")
+    matrix = data._read_local_matrix(path, kind=kind)
+    assert pd.Timestamp("2024-01-03") not in matrix.index
+    assert matrix.index.max() == pd.Timestamp("2024-01-02")
+
+
+def test_duplicate_raw_and_normalized_csv_headers_are_rejected(tmp_path) -> None:
+    raw_duplicate = tmp_path / "raw-duplicate.csv"
+    raw_duplicate.write_text("date,AAA,AAA\n2024-01-02,10,11\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate raw CSV headers"):
+        data._read_local_matrix(raw_duplicate, kind="prices")
+
+    normalized_duplicate = tmp_path / "normalized-duplicate.csv"
+    normalized_duplicate.write_text(
+        "date,BRK.B,BRK-B\n2024-01-02,10,11\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate normalized symbols"):
+        data._read_local_matrix(normalized_duplicate, kind="prices")
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "date,BAD SYMBOL\n2024-01-02,10\n",
+        "date,symbol,price\n2024-01-02,$BROKEN,10\n",
+    ],
+)
+def test_invalid_wide_headers_and_long_symbol_values_are_rejected(tmp_path, contents: str) -> None:
+    path = tmp_path / "invalid-symbol.csv"
+    path.write_text(contents, encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported security symbols"):
+        data._read_local_matrix(path, kind="prices")
+
+
+def test_eligibility_is_date_t_causal() -> None:
+    dates = pd.bdate_range("2023-01-02", periods=300)
+    prices = pd.DataFrame({"AAA": np.linspace(10.0, 30.0, len(dates))}, index=dates)
+    config = RunConfig(
+        demo=True,
+        demo_symbol_count=50,
+        min_history_days=100,
+        evaluation_window_days=252,
+        min_evaluation_observations=252,
+        min_daily_risk_observations=252,
+    )
+    original = build_eligibility_mask(prices, pd.DataFrame(index=dates), config)
+    changed = prices.copy()
+    changed.loc[dates[250] :, "AAA"] = np.nan
+    modified = build_eligibility_mask(changed, pd.DataFrame(index=dates), config)
+    pd.testing.assert_series_equal(
+        original.loc[: dates[249], "AAA"], modified.loc[: dates[249], "AAA"]
+    )
+
+
+def test_invalid_prices_and_duplicate_long_rows_are_rejected(tmp_path) -> None:
+    dates = pd.bdate_range("2022-01-03", periods=260)
+    wide = pd.DataFrame({"date": dates, "AAA": 10.0})
+    wide.loc[10, "AAA"] = -1.0
+    path = tmp_path / "bad.csv"
+    wide.to_csv(path, index=False)
+    with pytest.raises(ValueError, match="strictly positive"):
+        load_market_data(
+            RunConfig(
+                prices_path=path,
+                top_n=1,
+                min_history_days=252,
+                evaluation_window_days=252,
+                min_evaluation_observations=252,
+                min_daily_risk_observations=252,
+                selection_min_effective_names=1,
+            )
+        )
+
+
+def test_sparse_local_matrix_still_rejects_observed_non_positive_price(tmp_path) -> None:
+    dates = pd.bdate_range("2022-01-03", periods=260)
+    wide = pd.DataFrame(
+        {
+            "date": dates,
+            "AAA": np.linspace(10.0, 20.0, len(dates)),
+            "BBB": np.nan,
+        }
+    )
+    wide.loc[10, "AAA"] = 0.0
+    wide.loc[20:, "BBB"] = np.linspace(8.0, 18.0, len(dates) - 20)
+    path = tmp_path / "sparse-zero.csv"
+    wide.to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        load_market_data(
+            RunConfig(
+                prices_path=path,
+                top_n=1,
+                min_history_days=252,
+                evaluation_window_days=252,
+                min_evaluation_observations=252,
+                min_daily_risk_observations=252,
+                selection_min_effective_names=1,
+            )
+        )
+
+
+def test_live_provider_non_positive_prices_are_missing_and_disclosed(monkeypatch) -> None:
+    dates = pd.bdate_range("2024-01-02", periods=260)
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(100.0, 120.0, len(dates)),
+            "AAA": np.linspace(10.0, 20.0, len(dates)),
+        },
+        index=dates,
+    )
+    prices.loc[dates[10], "AAA"] = 0.0
+    raw_closes = prices.copy()
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+    acquired = SimpleNamespace(
+        live_error=None,
+        raw_prices=prices,
+        prices=prices,
+        raw_volumes=volumes,
+        volumes=volumes,
+        raw_closes=raw_closes,
+        candidate_universe=pd.DataFrame({"symbol": ["AAA"]}),
+        price_sources=pd.DataFrame(),
+        data_sources=pd.DataFrame(),
+        provider="public-test-provider",
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.live_data.download_live_data",
+        lambda _config: acquired,
+    )
+
+    live_prices, _, dollar_volumes, *rest = data._live_inputs(RunConfig(live=True, top_n=1))
+
+    assert pd.isna(live_prices.loc[dates[10], "AAA"])
+    assert pd.isna(dollar_volumes.loc[dates[10], "AAA"])
+    notes = rest[-2]
+    assert any("adjusted_price_non_positive=1" in note for note in notes)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "event_position", "event_multiplier"),
+    [("EVENT_A", 32, 3.0), ("EVENT_B", 47, 0.10)],
+)
+def test_causal_extreme_return_gate_is_symbol_and_date_agnostic(
+    symbol: str,
+    event_position: int,
+    event_multiplier: float,
+) -> None:
+    dates = pd.bdate_range("2024-01-02", periods=80)
+    baseline_prices = pd.DataFrame(
+        {symbol: np.linspace(100.0, 200.0, len(dates))},
+        index=dates,
+    )
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=[symbol])
+    config = RunConfig(
+        demo=True,
+        min_history_days=20,
+        data_quality_lookback_days=10,
+        max_extreme_daily_return=0.80,
+        top_n=1,
+        max_weight=1.0,
+        selection_min_effective_names=1.0,
+    )
+    baseline = build_eligibility_mask(baseline_prices, volumes, config)
+    event_date = dates[event_position]
+    changed_prices = baseline_prices.copy()
+    changed_prices.loc[event_date:, symbol] *= event_multiplier
+
+    changed = build_eligibility_mask(changed_prices, volumes, config)
+
+    pd.testing.assert_series_equal(
+        baseline.loc[: dates[event_position - 1], symbol],
+        changed.loc[: dates[event_position - 1], symbol],
+    )
+    assert baseline.loc[event_date, symbol]
+    assert not changed.loc[event_date, symbol]
+    assert not changed.loc[dates[event_position + 9], symbol]
+    assert changed.loc[dates[event_position + 10], symbol]
+
+
+def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    dates = pd.bdate_range("2026-01-02", periods=30)
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(100.0, 110.0, len(dates)),
+            "AAA": np.linspace(20.0, 30.0, len(dates)),
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+    raw_closes = prices.copy()
+    dollar_volumes = raw_closes * volumes
+    config = RunConfig(
+        live=True,
+        start_date=dates.min().date().isoformat(),
+        end_date=dates.max().date().isoformat(),
+        top_n=1,
+        min_history_days=21,
+        selection_min_effective_names=1.0,
+    )
+    eligibility = build_eligibility_mask(
         prices,
         volumes,
-        ["STQ"],
-        candidate,
-        RunConfig(min_history_days=200, min_avg_dollar_volume=1_000_000),
-        provider=provider,
-        price_sources=pd.DataFrame([{"symbol": "STQ", "price_source": price_source}]),
-        as_of=dates[-1],
+        config,
+        dollar_volumes=dollar_volumes,
     )
-
-    row = quality.iloc[0]
-    assert row["data_quality_status"] == "provider_adjustment_incompatible"
-    assert not bool(row["data_quality_pass"])
-
-
-def test_eligible_filter_retains_benchmark_price_without_candidate_liquidity():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame(
-        {
-            "SPY": np.linspace(400, 430, len(dates)),
-            "QQQ": np.linspace(300, 345, len(dates)),
-            "GOOD": np.linspace(20, 30, len(dates)),
-        },
-        index=dates,
-    )
-    volumes = pd.DataFrame({"GOOD": 1_000_000}, index=dates)
-    candidate = _candidate_frame(["GOOD"])
-    config = RunConfig(
-        min_history_days=252,
-        min_price=5,
-        min_avg_dollar_volume=1_000_000,
-        chart_benchmark="QQQ",
-    )
-
-    filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
-
-    assert list(filtered.columns) == ["SPY", "QQQ", "GOOD"]
-    assert list(eligible["symbol"]) == ["GOOD"]
-    assert "SPY" not in set(exclusions["symbol"])
-
-
-def test_eligible_filter_excludes_stock_chart_benchmark_from_holdings():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame(
-        {
-            "SPY": np.linspace(400, 430, len(dates)),
-            "AAPL": np.linspace(175, 220, len(dates)),
-            "GOOD": np.linspace(20, 30, len(dates)),
-        },
-        index=dates,
-    )
-    volumes = pd.DataFrame(
-        {
-            "AAPL": 50_000_000,
-            "GOOD": 1_000_000,
-        },
-        index=dates,
-    )
-    candidate = _candidate_frame(["AAPL", "GOOD"])
-    config = RunConfig(
-        min_history_days=252,
-        min_price=5,
-        min_avg_dollar_volume=1_000_000,
-        chart_benchmark="AAPL",
-    )
-
-    filtered, _, eligible, exclusions = _eligible_filter(prices, volumes, candidate, config)
-
-    assert list(filtered.columns) == ["SPY", "AAPL", "GOOD"]
-    assert list(eligible["symbol"]) == ["GOOD"]
-    assert "AAPL" not in set(exclusions["symbol"])
-
-
-def test_data_quality_frame_records_symbol_level_statuses():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame(
-        {
-            "SPY": np.linspace(400, 430, len(dates)),
-            "QQQ": np.linspace(300, 345, len(dates)),
-            "GOOD": np.linspace(20, 30, len(dates)),
-            "STALE": list(np.linspace(20, 25, 254)) + [np.nan] * 6,
-            "SHORT": [np.nan] * 220 + list(np.linspace(10, 12, 40)),
-            "ILLIQ": np.linspace(20, 21, len(dates)),
-            "NOVOL": np.linspace(20, 22, len(dates)),
-        },
-        index=dates,
-    )
-    volumes = pd.DataFrame(
-        {
-            "SPY": 1_000_000,
-            "GOOD": 1_000_000,
-            "STALE": 1_000_000,
-            "SHORT": 1_000_000,
-            "ILLIQ": 10,
-        },
-        index=dates,
-    )
-    candidate = _candidate_frame(["GOOD", "STALE", "SHORT", "ILLIQ", "NOVOL", "MISS"])
-    config = RunConfig(
-        min_history_days=252,
-        min_price=5,
-        min_avg_dollar_volume=1_000_000,
-        stale_after_days=5,
-        chart_benchmark="QQQ",
-    )
-    _, _, _, exclusions = _eligible_filter(prices, volumes, candidate, config)
+    universe = pd.DataFrame({"symbol": ["AAA"], "name": ["Refresh-only Alpha Incorporated"]})
     price_sources = pd.DataFrame(
-        {"symbol": list(prices.columns), "price_source": ["fixture-adjusted"] * len(prices.columns)}
-    )
-
-    quality = build_data_quality_frame(
-        prices,
-        volumes,
-        ["SPY", "QQQ", "GOOD", "STALE", "SHORT", "ILLIQ", "NOVOL", "MISS"],
-        candidate,
-        config,
-        provider="fixture-provider",
-        price_sources=price_sources,
-        exclusions=exclusions,
-        as_of=prices.index.max(),
-    )
-    statuses = quality.set_index("symbol")["data_quality_status"].to_dict()
-    roles = quality.set_index("symbol")["role"].to_dict()
-
-    assert roles["SPY"] == "benchmark"
-    assert roles["QQQ"] == "chart_benchmark"
-    assert statuses["SPY"] == "benchmark_comparator_only"
-    assert statuses["QQQ"] == "benchmark_comparator_only"
-    assert statuses["GOOD"] == "pass"
-    assert statuses["STALE"] == "stale_price"
-    assert statuses["SHORT"] == "insufficient_history"
-    assert statuses["ILLIQ"] == "below_liquidity_floor"
-    assert statuses["NOVOL"] == "missing_volume"
-    assert statuses["MISS"] == "missing_price"
-
-
-def test_stooq_fallback_records_symbol_provider_and_cache(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=5)
-    config = RunConfig(cache_dir=tmp_path, stooq_fallback_limit=1)
-
-    def fake_download(symbol, cfg):
-        price = pd.Series(np.linspace(10, 12, len(dates)), index=dates, name=symbol)
-        volume = pd.Series(1000, index=dates, name=symbol)
-        return price, volume, None, "cache_hit", str(tmp_path / "cached.csv"), 0
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_download)
-    prices, volumes, sources = _apply_stooq_fallback(pd.DataFrame(index=dates), pd.DataFrame(index=dates), ["MISS"], config)
-    assert "MISS" in prices.columns
-    assert "MISS" in volumes.columns
-    row = sources.iloc[0]
-    assert row["symbol"] == "MISS"
-    assert row["source"] == "stooq-daily-close-fallback"
-    assert row["status"] == "cache_hit"
-    assert row["cache_path"].endswith("cached.csv")
-
-
-def test_stooq_symbol_normalizes_share_class_delimiters():
-    assert _stooq_symbol("BRK/B") == "brk.b.us"
-    assert _stooq_symbol("BF-B") == "bf.b.us"
-
-
-def test_stooq_fallback_defaults_to_all_missing_symbols(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=5)
-    config = RunConfig(cache_dir=tmp_path, stooq_fallback_limit=None)
-
-    def fake_download(symbol, cfg):
-        price = pd.Series(np.linspace(10, 12, len(dates)), index=dates, name=symbol)
-        volume = pd.Series(1000, index=dates, name=symbol)
-        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_download)
-    prices, volumes, sources = _apply_stooq_fallback(
-        pd.DataFrame(index=dates),
-        pd.DataFrame(index=dates),
-        ["MISS1", "MISS2"],
-        config,
-    )
-
-    assert set(prices.columns) == {"MISS1", "MISS2"}
-    assert set(volumes.columns) == {"MISS1", "MISS2"}
-    assert set(sources["symbol"]) == {"MISS1", "MISS2"}
-
-
-def test_stooq_fallback_replaces_unusable_existing_column(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=10)
-    prices = pd.DataFrame({"BAD": [np.nan] * 8 + [10.0, 11.0]}, index=dates)
-    volumes = pd.DataFrame({"BAD": [np.nan] * len(dates)}, index=dates)
-    config = RunConfig(cache_dir=tmp_path, min_history_days=5, min_liquidity_observations=3, stooq_fallback_limit=None)
-
-    def fake_download(symbol, cfg):
-        price = pd.Series(np.linspace(20, 29, len(dates)), index=dates, name=symbol)
-        volume = pd.Series(5_000, index=dates, name=symbol)
-        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_download)
-
-    fixed_prices, fixed_volumes, sources = _apply_stooq_fallback(prices, volumes, ["BAD"], config)
-
-    assert fixed_prices["BAD"].iloc[0] == 20.0
-    assert fixed_prices["BAD"].notna().sum() == len(dates)
-    assert fixed_volumes["BAD"].notna().sum() == len(dates)
-    assert sources.iloc[0]["symbol"] == "BAD"
-
-
-def test_yahoo_chart_fallback_repairs_stale_yfinance_column(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=10)
-    prices = pd.DataFrame({"STALE": list(np.linspace(20, 26, 7)) + [np.nan, np.nan, np.nan]}, index=dates)
-    volumes = pd.DataFrame({"STALE": [1_000_000] * 7 + [np.nan, np.nan, np.nan]}, index=dates)
-    config = RunConfig(
-        cache_dir=tmp_path,
-        min_history_days=5,
-        min_liquidity_observations=3,
-        yahoo_chart_fallback_limit=None,
-    )
-
-    def fake_download(symbol, cfg):
-        price = pd.Series(np.linspace(30, 39, len(dates)), index=dates, name=symbol)
-        volume = pd.Series(2_000_000, index=dates, name=symbol)
-        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_yahoo_chart_symbol", fake_download)
-
-    fixed_prices, fixed_volumes, sources = _apply_yahoo_chart_fallback(prices, volumes, ["STALE"], config)
-
-    assert fixed_prices["STALE"].iloc[-1] == 39.0
-    assert fixed_prices["STALE"].notna().sum() == len(dates)
-    assert fixed_volumes["STALE"].notna().sum() == len(dates)
-    row = sources.iloc[0]
-    assert row["symbol"] == "STALE"
-    assert row["source"] == "yahoo-chart-adjusted-daily-fallback"
-    assert row["status"] == "fetched"
-    assert "adjusted close" in row["note"]
-
-
-def test_yahoo_chart_cache_rejects_invalid_adjusted_close_payload(tmp_path):
-    config = RunConfig(cache_dir=tmp_path)
-    cache = _yahoo_chart_cache_path(config, "BAD")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text("Date,Close,Volume\nnot-a-date,abc,1000\n", encoding="utf-8")
-
-    price, _, error, status, _, _ = _download_yahoo_chart_symbol("BAD", config)
-
-    assert price is None
-    assert status == "cache_hit_invalid"
-    assert "no numeric close prices" in str(error)
-
-
-def test_nasdaq_latest_repair_fills_only_missing_tail_dates(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=10)
-    prices = pd.DataFrame(
-        {
-            "FRESH": np.linspace(100, 109, len(dates)),
-            "TAIL": [20.0, 21.0, np.nan, 23.0, 24.0, 25.0, 26.0, np.nan, np.nan, np.nan],
-        },
-        index=dates,
-    )
-    volumes = pd.DataFrame(
-        {
-            "FRESH": 2_000_000,
-            "TAIL": [1_000_000, 1_000_000, np.nan, 1_000_000, 1_000_000, 1_000_000, 1_000_000, np.nan, np.nan, np.nan],
-        },
-        index=dates,
-    )
-    config = RunConfig(
-        cache_dir=tmp_path,
-        min_history_days=5,
-        min_liquidity_observations=3,
-        stale_after_days=0,
-        nasdaq_fallback_limit=None,
-    )
-
-    def fake_download(symbol, cfg):
-        assert symbol == "TAIL"
-        price = pd.Series(np.linspace(30, 39, len(dates)), index=dates, name=symbol)
-        volume = pd.Series(3_000_000, index=dates, name=symbol)
-        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_nasdaq_symbol", fake_download)
-
-    fixed_prices, fixed_volumes, sources = _apply_nasdaq_latest_repair(prices, volumes, ["TAIL"], config)
-
-    assert fixed_prices["TAIL"].iloc[0] == 20.0
-    assert np.isnan(fixed_prices["TAIL"].iloc[2])
-    assert fixed_prices["TAIL"].iloc[-1] == 39.0
-    assert fixed_prices["TAIL"].notna().sum() == len(dates) - 1
-    assert fixed_volumes["TAIL"].iloc[0] == 1_000_000
-    assert np.isnan(fixed_volumes["TAIL"].iloc[2])
-    assert fixed_volumes["TAIL"].iloc[-1] == 3_000_000
-    row = sources.iloc[0]
-    assert row["symbol"] == "TAIL"
-    assert row["source"] == "nasdaq-latest-close-repair"
-    assert row["status"] == "fetched"
-    assert row["records"] == 3
-    assert "historical adjusted prices were preserved" in row["provider_adjustment_note"]
-
-
-def test_nasdaq_latest_repair_requires_existing_adjusted_history(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=10)
-    prices = pd.DataFrame({"FRESH": np.linspace(100, 109, len(dates))}, index=dates)
-    volumes = pd.DataFrame({"FRESH": 2_000_000}, index=dates)
-    config = RunConfig(cache_dir=tmp_path, min_history_days=5, stale_after_days=0, nasdaq_fallback_limit=None)
-
-    def unexpected_download(symbol, cfg):  # pragma: no cover - assertion path
-        raise AssertionError(f"Nasdaq full-history replacement should not run for {symbol}")
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_nasdaq_symbol", unexpected_download)
-
-    fixed_prices, fixed_volumes, sources = _apply_nasdaq_latest_repair(prices, volumes, ["MISSING"], config)
-
-    pd.testing.assert_frame_equal(fixed_prices, prices)
-    pd.testing.assert_frame_equal(fixed_volumes, volumes.reindex(index=prices.index))
-    assert sources.empty
-
-
-def test_nasdaq_cache_rejects_invalid_close_payload(tmp_path):
-    config = RunConfig(cache_dir=tmp_path)
-    cache = _nasdaq_cache_path(config, "BAD")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text("Date,Close,Volume\n2024-01-02,not-a-number,1000\n", encoding="utf-8")
-
-    price, _, error, status, _, _ = _download_nasdaq_symbol("BAD", config)
-
-    assert price is None
-    assert status == "cache_hit_invalid"
-    assert "no numeric close prices" in str(error)
-
-
-def test_finance_datareader_fallback_records_symbol_provider(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=5)
-    config = RunConfig(cache_dir=tmp_path, finance_datareader_fallback_limit=None)
-
-    def fake_download(symbol, cfg):
-        price = pd.Series(np.linspace(20, 22, len(dates)), index=dates, name=symbol)
-        volume = pd.Series(2000, index=dates, name=symbol)
-        return price, volume, None, "fetched", str(tmp_path / f"{symbol}.csv"), 0
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_finance_datareader_symbol", fake_download)
-    prices, volumes, sources = _apply_finance_datareader_fallback(
-        pd.DataFrame(index=dates),
-        pd.DataFrame(index=dates),
-        ["FDR1", "FDR2"],
-        config,
-    )
-
-    assert set(prices.columns) == {"FDR1", "FDR2"}
-    assert set(volumes.columns) == {"FDR1", "FDR2"}
-    assert set(sources["source"]) == {"finance-datareader-close-fallback"}
-    assert set(sources["symbol"]) == {"FDR1", "FDR2"}
-
-
-def test_corrupt_provider_caches_return_invalid_status_without_crashing(tmp_path):
-    config = RunConfig(cache_dir=tmp_path)
-    stooq_cache = _stooq_cache_path(config, "BAD")
-    fdr_cache = _finance_datareader_cache_path(config, "BAD")
-    stooq_cache.parent.mkdir(parents=True, exist_ok=True)
-    fdr_cache.parent.mkdir(parents=True, exist_ok=True)
-    stooq_cache.write_text("Date,Close\nnot-a-date,abc\n", encoding="utf-8")
-    fdr_cache.write_text("Date,Close\nnot-a-date,abc\n", encoding="utf-8")
-
-    stooq_price, _, stooq_error, stooq_status, _, _ = _download_stooq_symbol("BAD", config)
-    fdr_price, _, fdr_error, fdr_status, _, _ = _download_finance_datareader_symbol("BAD", config)
-
-    assert stooq_price is None
-    assert stooq_status == "cache_hit_invalid"
-    assert "invalid stooq cache" in str(stooq_error)
-    assert fdr_price is None
-    assert fdr_status == "cache_hit_invalid"
-    assert "invalid FinanceDataReader cache" in str(fdr_error)
-
-
-def test_provider_caches_reject_nonnumeric_close_values(tmp_path):
-    config = RunConfig(cache_dir=tmp_path)
-    stooq_cache = _stooq_cache_path(config, "BADNUM")
-    fdr_cache = _finance_datareader_cache_path(config, "BADNUM")
-    stooq_cache.parent.mkdir(parents=True, exist_ok=True)
-    fdr_cache.parent.mkdir(parents=True, exist_ok=True)
-    payload = "Date,Close,Volume\n2024-01-02,abc,1000\n2024-01-03,,2000\n"
-    stooq_cache.write_text(payload, encoding="utf-8")
-    fdr_cache.write_text(payload, encoding="utf-8")
-
-    stooq_price, _, stooq_error, stooq_status, _, _ = _download_stooq_symbol("BADNUM", config)
-    fdr_price, _, fdr_error, fdr_status, _, _ = _download_finance_datareader_symbol("BADNUM", config)
-
-    assert stooq_price is None
-    assert stooq_status == "cache_hit_invalid"
-    assert "no numeric close prices" in str(stooq_error)
-    assert fdr_price is None
-    assert fdr_status == "cache_hit_invalid"
-    assert "no numeric close prices" in str(fdr_error)
-
-
-def test_live_download_preserves_yfinance_yahoo_chart_stooq_finance_datareader_order(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=8)
-    config = RunConfig(
-        cache_dir=tmp_path,
-        start_date="2024-01-01",
-        end_date="2024-01-12",
-        min_history_days=2,
-        min_price=1,
-        min_avg_dollar_volume=0,
-        min_liquidity_observations=2,
-        stale_after_days=10_000,
-        universe=["YF", "YCH", "STQ", "FDRX"],
-    )
-    candidate = _candidate_frame(["YF", "YCH", "STQ", "FDRX"])
-    monkeypatch.setattr(
-        "momentum_factor_lab.data._candidate_universe",
-        lambda _: (
-            candidate,
-            pd.DataFrame([{"source": "fixture-universe", "status": "loaded", "records": 4}]),
-        ),
-    )
-    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace())
-
-    def fake_yfinance(symbols, cfg):
-        prices = pd.DataFrame(
-            {
-                "SPY": np.linspace(400, 408, len(dates)),
-                "YF": np.linspace(10, 18, len(dates)),
-            },
-            index=dates,
-        )
-        volumes = pd.DataFrame({"SPY": 1_000_000, "YF": 1_000_000}, index=dates)
-        return prices, volumes, pd.DataFrame(
-            [
-                {
-                    "source": "yfinance-adjusted-daily",
-                    "status": "fetched",
-                    "records": 2,
-                    "requested_symbols": ",".join(symbols),
-                    "returned_symbols": "SPY,YF",
-                    "missing_symbols": "YCH,STQ,FDRX",
-                }
-            ]
-        )
-
-    def fake_yahoo_chart(symbol, cfg):
-        if symbol != "YCH":
-            return None, None, "not found", "failed", "cache", 0
-        return (
-            pd.Series(np.linspace(15, 23, len(dates)), index=dates, name=symbol),
-            pd.Series(1_500_000, index=dates, name=symbol),
-            None,
-            "fetched",
-            "cache",
-            0,
-        )
-
-    def fake_stooq(symbol, cfg):
-        if symbol != "STQ":
-            return None, None, "not found", "failed", "cache", 0
-        return (
-            pd.Series(np.linspace(20, 28, len(dates)), index=dates, name=symbol),
-            pd.Series(2_000_000, index=dates, name=symbol),
-            None,
-            "fetched",
-            "cache",
-            0,
-        )
-
-    def fake_fdr(symbol, cfg):
-        if symbol != "FDRX":
-            return None, None, "not found", "failed", "cache", 0
-        return (
-            pd.Series(np.linspace(30, 38, len(dates)), index=dates, name=symbol),
-            pd.Series(3_000_000, index=dates, name=symbol),
-            None,
-            "fetched",
-            "cache",
-            0,
-        )
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_yfinance", fake_yfinance)
-    monkeypatch.setattr("momentum_factor_lab.data._download_yahoo_chart_symbol", fake_yahoo_chart)
-    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_stooq)
-    monkeypatch.setattr("momentum_factor_lab.data._download_finance_datareader_symbol", fake_fdr)
-
-    result = download_live_data(config)
-
-    sources = result.data_sources["source"].tolist()
-    assert sources.index("yfinance-adjusted-daily") < sources.index("yahoo-chart-adjusted-daily-fallback")
-    assert sources.index("yahoo-chart-adjusted-daily-fallback") < sources.index("stooq-daily-close-fallback")
-    assert sources.index("yfinance-adjusted-daily") < sources.index("stooq-daily-close-fallback")
-    assert sources.index("stooq-daily-close-fallback") < sources.index("finance-datareader-close-fallback")
-    assert {"YF", "YCH", "STQ", "FDRX"}.issubset(set(result.prices.columns))
-    summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
-    assert int(summary["requested_price_symbols"]) == 4
-    assert int(summary["returned_price_symbols"]) == 4
-    assert int(summary["eligible_price_symbols"]) == 4
-    assert int(summary["liquidity_eligible_symbols"]) == 4
-
-
-def test_live_download_attempts_free_fallback_when_yfinance_unavailable(monkeypatch, tmp_path):
-    dates = pd.bdate_range("2024-01-01", periods=8)
-    config = RunConfig(
-        cache_dir=tmp_path,
-        start_date="2024-01-01",
-        end_date="2024-01-12",
-        min_history_days=2,
-        min_price=1,
-        min_avg_dollar_volume=0,
-        min_liquidity_observations=2,
-        stale_after_days=10_000,
-        universe=["AAA"],
-        yahoo_chart_fallback_limit=0,
-        finance_datareader_fallback_limit=0,
-    )
-    candidate = _candidate_frame(["AAA"])
-    monkeypatch.setattr(
-        "momentum_factor_lab.data._candidate_universe",
-        lambda _: (
-            candidate,
-            pd.DataFrame([{"source": "fixture-universe", "status": "loaded", "records": 1}]),
-        ),
-    )
-    monkeypatch.setitem(sys.modules, "yfinance", None)
-
-    def fake_stooq(symbol, cfg):
-        return (
-            pd.Series(np.linspace(20, 28, len(dates)), index=dates, name=symbol),
-            pd.Series(2_000_000, index=dates, name=symbol),
-            None,
-            "fetched",
-            str(tmp_path / f"{symbol}.csv"),
-            0,
-        )
-
-    monkeypatch.setattr("momentum_factor_lab.data._download_stooq_symbol", fake_stooq)
-
-    result = download_live_data(config)
-
-    assert not result.offline_sample
-    assert result.live_error is None
-    assert result.provider == "stooq-fallback"
-    assert {"SPY", "AAA"}.issubset(set(result.prices.columns))
-    yf_row = result.data_sources[result.data_sources["source"].eq("yfinance-adjusted-daily")].iloc[0]
-    assert yf_row["status"] == "unavailable"
-    assert "stooq-daily-close-fallback" in set(result.data_sources["source"])
-    summary = result.data_sources[result.data_sources["source"].eq("live-run-summary")].iloc[-1]
-    assert int(summary["returned_price_symbols"]) == 1
-    assert int(summary["eligible_price_symbols"]) == 1
-
-
-def test_yfinance_chunk_uses_csv_json_price_cache_without_network(tmp_path):
-    from momentum_factor_lab.data import _download_yfinance_chunk, _price_cache_path, _write_price_cache
-
-    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
-    symbols = ["AAA", "BBB"]
-    dates = pd.bdate_range("2024-01-01", periods=3)
-    cached_prices = pd.DataFrame({"AAA": [1, 2, 3], "BBB": [4, 5, 6]}, index=dates)
-    cached_volumes = pd.DataFrame({"AAA": [10, 10, 10], "BBB": [20, 20, 20]}, index=dates)
-    cache_path = _price_cache_path(config, "yfinance", symbols)
-    _write_price_cache(cache_path, cached_prices, cached_volumes, provider="yfinance", symbols=symbols)
-    prices, volumes, status = _download_yfinance_chunk(symbols, config)
-    pd.testing.assert_frame_equal(prices, cached_prices, check_freq=False)
-    pd.testing.assert_frame_equal(volumes, cached_volumes, check_freq=False)
-    assert status["status"] == "cache_hit"
-    assert status["cache_path"] == str(cache_path)
-    assert status["cache_format"] == "csv+json"
-    assert cache_path.suffix == ".json"
-    assert not list(tmp_path.rglob("*.pkl"))
-
-
-def test_yfinance_chunk_does_not_use_pickle_cache(monkeypatch, tmp_path):
-    import momentum_factor_lab.data as data
-    from momentum_factor_lab.data import _download_yfinance_chunk
-
-    monkeypatch.setattr(pd, "read_pickle", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("read_pickle used")))
-    monkeypatch.setattr(pd, "to_pickle", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("to_pickle used")))
-
-    dates = pd.bdate_range("2024-01-01", periods=2)
-    raw = pd.DataFrame({"Close": [10.0, 11.0], "Volume": [100.0, 120.0]}, index=dates)
-
-    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda **kwargs: raw))
-
-    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
-    prices, volumes, status = _download_yfinance_chunk(["AAA"], config)
-
-    assert status["status"] == "fetched"
-    assert list(prices.columns) == ["AAA"]
-    assert list(volumes.columns) == ["AAA"]
-    assert not list(tmp_path.rglob("*.pkl"))
-    assert not str(status.get("cache_path", "")).endswith(".pkl")
-    source = inspect.getsource(data)
-    assert "read_pickle" not in source
-    assert "to_pickle" not in source
-    assert ".pkl" not in source
-
-
-def test_yfinance_chunk_passes_inclusive_config_end_date(monkeypatch, tmp_path):
-    from momentum_factor_lab.data import _download_yfinance_chunk
-
-    captured = {}
-    dates = pd.bdate_range("2024-01-01", periods=3)
-    columns = pd.MultiIndex.from_tuples(
         [
-            ("Close", "AAA"),
-            ("Close", "BBB"),
-            ("Volume", "AAA"),
-            ("Volume", "BBB"),
+            {
+                "symbol": "AAA",
+                "price_source": "yfinance-adjusted-daily",
+                "adjustment_note": "fixture adjusted close",
+            }
         ]
     )
-    raw = pd.DataFrame(
+    data_sources = pd.DataFrame(
         [
-            [1.0, 4.0, 100.0, 400.0],
-            [2.0, 5.0, 100.0, 400.0],
-            [3.0, 6.0, 100.0, 400.0],
-        ],
-        index=dates,
-        columns=columns,
+            {
+                "source": "yfinance-adjusted-daily",
+                "status": "ok",
+                "records": len(dates),
+                "cache_hit": False,
+            }
+        ]
     )
-
-    def fake_download(**kwargs):
-        captured.update(kwargs)
-        return raw
-
-    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
-
-    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
-    prices, volumes, status = _download_yfinance_chunk(["AAA", "BBB"], config)
-
-    assert captured["end"] == "2024-01-11"
-    assert captured["start"] == "2024-01-01"
-    assert status["status"] == "fetched"
-    assert list(prices.columns) == ["AAA", "BBB"]
-    assert list(volumes.columns) == ["AAA", "BBB"]
-
-
-def test_yfinance_chunk_leaves_open_ended_download_without_end(monkeypatch, tmp_path):
-    from momentum_factor_lab.data import _download_yfinance_chunk
-
-    captured = {}
-    dates = pd.bdate_range("2024-01-01", periods=2)
-    raw = pd.DataFrame({"Close": [10.0, 11.0], "Volume": [100.0, 120.0]}, index=dates)
-
-    def fake_download(**kwargs):
-        captured.update(kwargs)
-        return raw
-
-    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
-
-    config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date=None)
-    prices, _, status = _download_yfinance_chunk(["AAA"], config)
-
-    assert captured["end"] is None
-    assert status["status"] == "fetched"
-    assert list(prices.columns) == ["AAA"]
-
-
-def test_provider_summary_marks_cached_stooq_as_mixed():
-    from momentum_factor_lab.data import _provider_label_from_sources
-
-    stooq_sources = pd.DataFrame(
-        [{"source": "stooq-daily-close-fallback", "symbol": "MISS", "status": "cache_hit", "records": 1}]
+    hashes = {
+        "prices": data._canonical_matrix_sha256(prices),
+        "volumes": data._canonical_matrix_sha256(volumes),
+        "rawCloses": data._canonical_matrix_sha256(raw_closes),
+        "dollarVolumes": data._canonical_matrix_sha256(dollar_volumes),
+        "requestedSymbols": data._ordered_symbols_sha256(["AAA"]),
+        "returnedSymbols": data._ordered_symbols_sha256(["AAA"]),
+        "universeRecords": data.canonical_records_sha256(universe),
+        "priceSources": data.canonical_records_sha256(price_sources),
+        "dataSources": data.canonical_records_sha256(data_sources),
+    }
+    market = data.MarketData(
+        prices=prices,
+        volumes=volumes,
+        dollar_volumes=dollar_volumes,
+        raw_closes=raw_closes,
+        eligibility_mask=eligibility,
+        quality=pd.DataFrame(),
+        universe=universe,
+        as_of=dates.max(),
+        source_mode="live_market",
+        source_label="actual-provider-fixture",
+        price_basis="provider_adjusted_close",
+        volume_basis="raw_close_x_raw_volume_with_disclosed_fallback_proxy",
+        input_sha256=hashes,
+        benchmark="SPY",
+        requested_through=dates.max().date().isoformat(),
+        requested_candidate_count=1,
+        provider_returned_candidate_count=1,
+        provider="actual-provider-fixture",
+        price_sources=price_sources,
+        data_sources=data_sources,
     )
-    assert _provider_label_from_sources(stooq_sources) == "yfinance-free-public-data+stooq-fallback"
-    fdr_sources = pd.DataFrame(
-        [{"source": "finance-datareader-close-fallback", "symbol": "MISS2", "status": "fetched", "records": 1}]
-    )
-    assert (
-        _provider_label_from_sources(stooq_sources, fdr_sources)
-        == "yfinance-free-public-data+stooq-fallback+finance-datareader-fallback"
-    )
-    yahoo_chart_sources = pd.DataFrame(
-        [{"source": "yahoo-chart-adjusted-daily-fallback", "symbol": "YCH", "status": "fetched", "records": 1}]
-    )
-    nasdaq_sources = pd.DataFrame(
-        [{"source": "nasdaq-latest-close-repair", "symbol": "TAIL", "status": "fetched", "records": 2}]
+    snapshot_dir = tmp_path / "snapshot"
+    write_market_data_snapshot(market, snapshot_dir)
+
+    replayed = read_market_data_snapshot(config, snapshot_dir)
+    assert replayed.source_mode == "live_market"
+    assert replayed.as_of == dates.max()
+    assert replayed.input_sha256 == hashes
+    assert build_result_identity(config, replayed) == build_result_identity(config, market)
+    stricter_replay = read_market_data_snapshot(
+        RunConfig(
+            live=True,
+            start_date=dates.min().date().isoformat(),
+            end_date=dates.max().date().isoformat(),
+            top_n=1,
+            min_history_days=21,
+            min_price=31.0,
+            selection_min_effective_names=1.0,
+        ),
+        snapshot_dir,
     )
     assert (
-        _provider_label_from_sources(
-            pd.DataFrame(),
-            pd.DataFrame(),
-            pd.DataFrame([{"source": "yfinance-adjusted-daily", "records": 1}]),
-            yahoo_chart_sources,
-            nasdaq_sources,
+        int(stricter_replay.eligibility_mask.drop(columns=["SPY"], errors="ignore").iloc[-1].sum())
+        == 0
+    )
+    pd.testing.assert_frame_equal(replayed.prices, prices, check_freq=False)
+    assert data._canonical_records_json_bytes(
+        replayed.price_sources
+    ) == data._canonical_records_json_bytes(market.price_sources)
+    assert data._canonical_records_json_bytes(
+        replayed.data_sources
+    ) == data._canonical_records_json_bytes(market.data_sources)
+    assert data._canonical_records_json_bytes(
+        replayed.universe
+    ) == data._canonical_records_json_bytes(market.universe)
+    assert any("Verified replay" in note for note in replayed.notes)
+
+    original_price_hash = market.input_sha256["prices"]
+    market.input_sha256["prices"] = "f" * 64
+    with pytest.raises(ValueError, match="differs from observed prices"):
+        write_market_data_snapshot(market, tmp_path / "rejected-snapshot")
+    assert not (tmp_path / "rejected-snapshot").exists()
+    market.input_sha256["prices"] = original_price_hash
+
+    market.source_mode = "demo"
+    with pytest.raises(ValueError, match="actual live-market"):
+        write_market_data_snapshot(market, tmp_path / "rejected-demo-snapshot")
+    market.source_mode = "live_market"
+    original_price_source_frame = market.price_sources
+    market.price_sources = pd.DataFrame()
+    with pytest.raises(ValueError, match="provider provenance"):
+        write_market_data_snapshot(market, tmp_path / "rejected-empty-provenance")
+    market.price_sources = original_price_source_frame
+
+    manifest_path = snapshot_dir / "market_data_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schemaVersion"] == 2
+    assert manifest["files"]["priceSources"] == "price_sources.json"
+    assert manifest["files"]["dataSources"] == "data_sources.json"
+    assert manifest["files"]["universe"] == "universe.json"
+
+    original_manifest_bytes = manifest_path.read_bytes()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            data,
+            "_sha256_file",
+            lambda _path: (_ for _ in ()).throw(OSError("injected staging failure")),
         )
-        == "yfinance-free-public-data+yahoo-chart-fallback+nasdaq-latest-repair"
+        with pytest.raises(OSError, match="injected staging failure"):
+            write_market_data_snapshot(market, snapshot_dir)
+    assert manifest_path.read_bytes() == original_manifest_bytes
+    assert read_market_data_snapshot(config, snapshot_dir).input_sha256 == hashes
+    assert not list(snapshot_dir.parent.glob(f".{snapshot_dir.name}.staging-*"))
+
+    original_replace = Path.replace
+
+    def fail_staging_commit(path: Path, target: Path) -> Path:
+        if path.name.startswith(f".{snapshot_dir.name}.staging-") and Path(target) == snapshot_dir:
+            raise OSError("injected directory-swap failure")
+        return original_replace(path, target)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "replace", fail_staging_commit)
+        with pytest.raises(OSError, match="injected directory-swap failure"):
+            write_market_data_snapshot(market, snapshot_dir)
+    assert manifest_path.read_bytes() == original_manifest_bytes
+    assert read_market_data_snapshot(config, snapshot_dir).input_sha256 == hashes
+    assert not list(snapshot_dir.parent.glob(f".{snapshot_dir.name}.staging-*"))
+    assert not list(snapshot_dir.parent.glob(f".{snapshot_dir.name}.backup-*"))
+
+    for field in (
+        "sourceLabel",
+        "provider",
+        "priceBasis",
+        "volumeBasis",
+        "requestedThrough",
+    ):
+        invalid_manifest = json.loads(json.dumps(manifest))
+        invalid_manifest.pop(field)
+        manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+        with pytest.raises(ValueError, match="metadata contract"):
+            read_market_data_snapshot(config, snapshot_dir)
+    manifest_path.write_bytes(original_manifest_bytes)
+
+    invalid_manifest = json.loads(json.dumps(manifest))
+    invalid_manifest["requestedCandidateCount"] += 1
+    manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="universe counts"):
+        read_market_data_snapshot(config, snapshot_dir)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    invalid_manifest = json.loads(json.dumps(manifest))
+    invalid_manifest["matrixSha256"].pop("universeRecords")
+    manifest_path.write_text(json.dumps(invalid_manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="input hash contract"):
+        read_market_data_snapshot(config, snapshot_dir)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    changed_semantics_manifest = json.loads(json.dumps(manifest))
+    changed_semantics_manifest["priceBasis"] = "mutated-adjustment-contract"
+    manifest_path.write_text(json.dumps(changed_semantics_manifest), encoding="utf-8")
+    changed_semantics = read_market_data_snapshot(config, snapshot_dir)
+    assert build_result_identity(config, changed_semantics) != build_result_identity(config, market)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    universe_path = snapshot_dir / "universe.json"
+    original_universe = universe_path.read_bytes()
+    universe_path.write_bytes(original_universe + b" ")
+    with pytest.raises(ValueError, match="universe file hash mismatch"):
+        read_market_data_snapshot(config, snapshot_dir)
+    universe_path.write_bytes(original_universe)
+
+    price_sources_path = snapshot_dir / "price_sources.json"
+    original_price_sources = price_sources_path.read_bytes()
+    price_sources_path.write_bytes(original_price_sources + b" ")
+    with pytest.raises(ValueError, match="priceSources file hash mismatch"):
+        read_market_data_snapshot(config, snapshot_dir)
+    price_sources_path.write_bytes(original_price_sources)
+
+    prices_path = snapshot_dir / "adjusted_prices.csv.gz"
+    prices_path.write_bytes(prices_path.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="prices file hash mismatch"):
+        read_market_data_snapshot(config, snapshot_dir)
+
+
+def test_record_provenance_hash_has_a_versioned_nullable_round_trip() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "source": "provider-a",
+                "status": "ok",
+                "records": 42,
+                "cache_hit": True,
+                "ratio": 0.125,
+                "error": None,
+            },
+            {
+                "source": "provider-b",
+                "status": "partial",
+                "records": None,
+                "cache_hit": False,
+                "ratio": np.nan,
+                "error": "fixture warning",
+            },
+        ]
     )
-    assert _provider_label_from_sources(pd.DataFrame()) == "yfinance-free-public-data"
+    records = json.loads(data._canonical_records_json_bytes(frame))
+
+    assert data.SNAPSHOT_READ_CONTRACT["recordCanonicalization"] == (
+        data.RECORD_CANONICALIZATION_VERSION
+    )
+    assert data.canonical_records_sha256(frame) == data.canonical_records_sha256(records)
 
 
-def test_build_eligibility_mask_uses_rebalance_date_liquidity_and_history():
-    from momentum_factor_lab.data import build_eligibility_mask
-
-    dates = pd.bdate_range("2024-01-01", periods=80)
+def test_live_raw_close_proxy_snapshot_is_auditable_and_hash_reproducible(
+    monkeypatch, tmp_path
+) -> None:
+    dates = pd.bdate_range("2024-01-02", periods=260)
     prices = pd.DataFrame(
         {
-            "GOOD": np.linspace(20, 30, len(dates)),
-            "LATE": [np.nan] * 30 + list(np.linspace(20, 25, 50)),
-            "LOWP": np.linspace(1, 2, len(dates)),
-            "ILLIQ": np.linspace(20, 21, len(dates)),
+            "SPY": np.linspace(100.0, 120.0, len(dates)),
+            "AAA": np.linspace(10.0, 20.0, len(dates)),
+            "BBB": np.linspace(15.0, 30.0, len(dates)),
         },
         index=dates,
     )
-    volumes = pd.DataFrame(
-        {
-            "GOOD": 1_000_000,
-            "LATE": 1_000_000,
-            "LOWP": 1_000_000,
-            "ILLIQ": 10,
-        },
-        index=dates,
+    raw_closes = prices.copy()
+    raw_closes["BBB"] = np.nan
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+    acquired = SimpleNamespace(
+        live_error=None,
+        raw_prices=prices,
+        prices=prices,
+        raw_volumes=volumes,
+        volumes=volumes,
+        raw_closes=raw_closes,
+        candidate_universe=pd.DataFrame({"symbol": ["AAA", "BBB"]}),
+        price_sources=pd.DataFrame(
+            {
+                "symbol": ["SPY", "AAA", "BBB"],
+                "price_source": ["fixture-adjusted"] * 3,
+            }
+        ),
+        data_sources=pd.DataFrame([{"source": "public-test-provider", "status": "ok"}]),
+        provider="public-test-provider",
     )
-    config = RunConfig(
-        min_history_days=40,
-        min_price=5,
-        min_avg_dollar_volume=1_000_000,
-        min_liquidity_observations=20,
+    monkeypatch.setattr(
+        "momentum_factor_lab.live_data.download_live_data",
+        lambda _config: acquired,
+    )
+    market = load_market_data(
+        RunConfig(
+            live=True,
+            top_n=1,
+            selection_min_effective_names=1.0,
+            export_input_snapshot=True,
+        )
     )
 
-    mask = build_eligibility_mask(prices, volumes, config)
+    assert market.raw_close_proxy_symbol_count == 1
+    assert market.raw_closes["BBB"].isna().all()
+    assert market.dollar_volumes["BBB"].equals(prices["BBB"].mul(volumes["BBB"]))
+    paths = data.write_market_data_snapshot(market, tmp_path / "input")
+    manifest = json.loads((tmp_path / "input" / "market_data_manifest.json").read_text())
+    assert manifest["readContract"]["pandasFloatPrecision"] == "round_trip"
+    assert manifest["files"]["rawCloses"] == "raw_closes.csv.gz"
+    assert paths["rawCloses"].endswith("raw_closes.csv.gz")
+    for key, expected in (
+        ("prices", market.input_sha256["prices"]),
+        ("volumes", market.input_sha256["volumes"]),
+        ("rawCloses", market.input_sha256["rawCloses"]),
+        ("dollarVolumes", market.input_sha256["dollarVolumes"]),
+    ):
+        restored = pd.read_csv(
+            tmp_path / "input" / manifest["files"][key],
+            index_col=0,
+            parse_dates=True,
+            float_precision="round_trip",
+        )
+        assert data._canonical_matrix_sha256(restored) == expected
 
-    assert mask.loc[dates[45], "GOOD"]
-    assert not mask.loc[dates[45], "LATE"]
-    assert mask.loc[dates[-1], "LATE"]
-    assert not mask["LOWP"].any()
-    assert not mask.loc[dates[-1], "ILLIQ"]
+
+def test_dead_offline_sample_path_is_absent() -> None:
+    assert "offline_sample" not in inspect.getsource(RunConfig)
+    assert "generate_offline_sample_data" not in inspect.getsource(
+        __import__("momentum_factor_lab.live_data", fromlist=["*"])
+    )
 
 
-def test_aggressive_profile_lowers_endpoint_discovery_not_configured_gate():
-    dates = pd.bdate_range("2024-01-01", periods=260)
-    prices = pd.DataFrame({"MID": np.linspace(10, 12, len(dates))}, index=dates)
-    volumes = pd.DataFrame({"MID": 150_000}, index=dates)  # about $1.8m ADV, below default $5m.
-    candidate = _candidate_frame(["MID"])
-    aggressive = RunConfig(universe_profile="aggressive_stock_only", min_avg_dollar_volume=5_000_000)
-    large = RunConfig(universe_profile="large_liquid", min_avg_dollar_volume=5_000_000)
-
-    aggressive_prices, _, aggressive_eligible, _ = _eligible_filter(prices, volumes, candidate, aggressive)
-    large_prices, _, large_eligible, _ = _eligible_filter(prices, volumes, candidate, large)
-
-    assert list(aggressive_prices.columns) == ["MID"]
-    assert list(aggressive_eligible["symbol"]) == ["MID"]
-    assert list(large_prices.columns) == ["MID"]
-    assert list(large_eligible["symbol"]) == ["MID"]
-    assert aggressive.min_avg_dollar_volume == 5_000_000
+def test_data_module_has_no_api_or_network_fallback() -> None:
+    source = inspect.getsource(data).lower()
+    for forbidden in ("urlopen", "requests", "yfinance", "yahoo", "api_key", "credential"):
+        assert forbidden not in source

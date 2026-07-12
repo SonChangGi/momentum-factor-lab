@@ -1,1902 +1,1727 @@
 from __future__ import annotations
 
-import hashlib
-from html import unescape
 import json
-import math
-import re
-import signal
-import threading
-from dataclasses import dataclass, field, replace
-from datetime import UTC, date as date_cls, datetime
+import resource
+import sys
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
 
-from . import disclaimers
+from .advanced_factors import advanced_factor_definitions_frame, compute_advanced_factor_scores
 from .backtest import BacktestResult, run_factor_backtest
-from .config import RunConfig
-from .data import MarketData, build_data_quality_frame, build_eligibility_mask, load_market_data
-from .factors import FACTOR_DESCRIPTIONS, compute_factor_scores, factor_definitions_frame, simple_momentum, total_return_momentum, validate_factor_library
-from .metrics import TRADING_DAYS, annualized_volatility, metric_summary
-from .portfolio import (
-    WEIGHTING_DIAGNOSTIC_COLUMNS,
-    balanced_weights,
-    evidence_weighted_recommendation_table,
-    recommendation_table,
+from .config import (
+    ABSOLUTE_GUARDRAIL_VERSION,
+    JOINT_SELECTION_VERSION,
+    POLICY_REGISTRY,
+    POLICY_REGISTRY_VERSION,
+    RunConfig,
+    WEIGHTING_POLICIES,
 )
-from .universe import is_known_etf_symbol, normalize_symbol
+from .data import SNAPSHOT_READ_CONTRACT, MarketData, load_market_data, write_market_data_snapshot
+from .factors import factor_definition_sha256, factor_definitions_frame, iter_factor_scores
+from .identity import build_result_identity, policy_definition_sha256, selection_spec_sha256
+from .metrics import (
+    composite_factor_scorecard,
+    evaluation_metrics,
+    mark_to_last_observed_returns,
+    metric_summary,
+)
+from .portfolio import ModelPortfolio, construct_model_portfolio
+from .research_inputs import ResearchInputs
 
 
-FROZEN_POLICY_REQUIRED_FIELDS = ("policy_id", "factor_selection_mode", "selected_factor")
-MARKET_CAP_LOOKUP_TIMEOUT_SECONDS = 8.0
-FINVIZ_MARKET_CAP_SOURCE = "finviz-snapshot-market-cap"
+RESEARCH_LIMITATIONS = (
+    "동일한 후행 평가기간에서 여러 팩터와 정책을 비교한 설명적 순위이므로 선택 편향이 있습니다.",
+    "현재 상장 종목 중심 입력은 역사적 구성종목·상장폐지·ticker reuse를 완전히 복원하지 못합니다.",
+    "중간 quote gap은 종목별 sleeve NAV를 유지하지만 그 날짜의 일별 위험 수익률을 추정하지 않습니다.",
+    "PIT 시가총액 패널이 없어 규모 팩터는 사용하지 않으며 네 번째 정책은 후행 유동성만 사용합니다.",
+    "현재 연구 target은 마지막 입력일 신호로 만든 다음 세션 종가용 목표이며 이미 체결된 보유가 아닙니다.",
+)
 
+CANONICAL_TOTAL_FACTOR_COUNT = 64
+CANONICAL_INDEPENDENT_FACTOR_COUNT = 61
+CANONICAL_ALIAS_FACTOR_COUNT = 3
 
-class _MarketCapLookupTimeout(RuntimeError):
-    """Raised when optional yfinance market-cap enrichment exceeds its budget."""
+_DATA_SHORTAGE_POLICY_REASONS = frozenset(
+    {
+        "no_complete_signal_inputs",
+        "no_finite_trailing_volatility",
+        "no_finite_trailing_dollar_volume",
+        "top_n_boundary_tie_has_no_finite_liquidity_tie_break",
+    }
+)
+
+JOINT_TIE_BREAK_POLICY = (
+    "selection_score_desc",
+    "base_composite_score_desc",
+    "max_abs_leave_one_security_cagr_delta_asc",
+    "max_abs_security_observation_contribution_asc",
+    "sortino_desc",
+    "calmar_desc",
+    "max_drawdown_desc",
+    "cagr_desc",
+    "sharpe_desc",
+    "stability_desc",
+    "annualized_cost_drag_asc",
+    "annualized_turnover_asc",
+    "factor_name_asc",
+    "policy_id_asc",
+)
 
 
 @dataclass(slots=True)
-class RunResult:
+class AnalysisResult:
+    generated_at_utc: datetime
+    runtime_seconds: float
+    max_rss_bytes: int
     config: RunConfig
     market_data: MarketData
-    factor_scores: dict[str, pd.DataFrame]
+    factor_scores: dict[str, pd.Series]
     backtests: dict[str, BacktestResult]
-    metrics: pd.DataFrame
-    score_components: pd.DataFrame
+    policy_factor_metrics: pd.DataFrame
+    policy_comparison: pd.DataFrame
+    selected_policy: str
+    selected_policy_reason: str
+    policy_selection_decision: dict[str, Any]
+    factor_ranking: pd.DataFrame
     selected_factor: str
     selected_reason: str
-    recommendations: pd.DataFrame
-    robustness: pd.DataFrame
-    sensitivity: pd.DataFrame
-    benchmark_relative: pd.DataFrame
-    factor_validation: pd.DataFrame
+    factor_selection_decision: dict[str, Any]
+    model_portfolio: ModelPortfolio
+    factor_portfolios: dict[str, ModelPortfolio]
     factor_definitions: pd.DataFrame
-    data_sources: pd.DataFrame
-    metadata: dict[str, Any]
-    output_paths: dict[str, str]
-    data_quality: pd.DataFrame = field(default_factory=pd.DataFrame)
-    cost_stress: pd.DataFrame = field(default_factory=pd.DataFrame)
-    selection_history: pd.DataFrame = field(default_factory=pd.DataFrame)
-    factor_rank_ic: pd.DataFrame = field(default_factory=pd.DataFrame)
-    factor_redundancy: pd.DataFrame = field(default_factory=pd.DataFrame)
-    factor_category_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    benchmark_metrics: dict[str, object]
+    grid_accounting: dict[str, Any] = field(default_factory=dict)
+    result_identity: dict[str, Any] = field(default_factory=dict)
+    advanced_factor_status: pd.DataFrame = field(default_factory=pd.DataFrame)
+    input_snapshot_paths: dict[str, str] = field(default_factory=dict)
+    output_paths: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class TradabilityAssessment:
-    status: str
-    fresh_live_data_available: bool
-    recommendation_output_available: bool
-    requirements: dict[str, bool]
-    limitations: list[str]
-    output_key: str
-    output_label: str
-    output_sheet: str
-
-    @property
-    def research_only(self) -> bool:
-        return not self.recommendation_output_available
-
-    @property
-    def fail_closed_reasons(self) -> list[str]:
-        if self.recommendation_output_available:
-            return []
-        reasons: list[str] = []
-        if not self.fresh_live_data_available:
-            reasons.append("fresh_live_data")
-        for name, satisfied in self.requirements.items():
-            if not satisfied and name not in reasons:
-                reasons.append(name)
-        for limitation in self.limitations:
-            if limitation not in reasons:
-                reasons.append(limitation)
-        return reasons
-
-    def to_metadata(self) -> dict[str, Any]:
-        fail_closed_reasons = self.fail_closed_reasons
-        return {
-            "fresh_live_data_available": self.fresh_live_data_available,
-            "current_recommendations_available": self.recommendation_output_available,
-            "tradability_requirements": self.requirements,
-            "tradability_blockers": fail_closed_reasons,
-            "execution_limitations": self.limitations,
-            "research_only": self.research_only,
-            "recommendation_output_key": self.output_key,
-            "recommendation_output_label": self.output_label,
-            "recommendation_output_sheet": self.output_sheet,
-            "tradable_recommendations_available": self.recommendation_output_available,
-            "tradable_output_available": self.recommendation_output_available,
-            "recommendation_output_available": self.recommendation_output_available,
-            "decision_support_tier": (
-                "practical_recommendations"
-                if self.recommendation_output_available
-                else "research_signals"
-            ),
-            "fail_closed": not self.recommendation_output_available,
-            "fail_closed_reasons": fail_closed_reasons,
-        }
+def _max_rss_bytes() -> int:
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
 
 
-
-def _analysis_prices(market_data: MarketData, config: RunConfig) -> pd.DataFrame:
-    """Return stock-only candidate prices for factor research and portfolios.
-
-    `market_data.prices` may intentionally include a benchmark ETF such as SPY so
-    benchmark-relative metrics can be computed. That fetched benchmark series must
-    never become a candidate holding or factor-ranking column.
-    """
-    prices = market_data.prices.dropna(axis=1, how="all")
-    if prices.empty:
-        return prices
-    comparator_symbols = {normalize_symbol(config.benchmark), normalize_symbol(config.chart_benchmark)}
-    if market_data.eligible_universe.empty or "symbol" not in market_data.eligible_universe:
-        return pd.DataFrame(index=prices.index)
-    eligible_symbols = set(market_data.eligible_universe["symbol"].map(normalize_symbol))
-    candidate_symbols = set(market_data.candidate_universe.get("symbol", pd.Series(dtype=str)).map(normalize_symbol))
-    allowed = [
-        column
-        for column in prices.columns
-        if normalize_symbol(column) in eligible_symbols
-        and normalize_symbol(column) in candidate_symbols
-        and normalize_symbol(column) not in comparator_symbols
-        and not is_known_etf_symbol(column)
-    ]
-    return prices.reindex(columns=allowed).dropna(axis=1, how="all")
+def _analysis_prices(market_data: MarketData) -> pd.DataFrame:
+    columns = [column for column in market_data.prices.columns if column != market_data.benchmark]
+    return market_data.prices.reindex(columns=columns).dropna(axis=1, how="all")
 
 
-def _split_symbol_list(value: object) -> list[str]:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return []
-    if isinstance(value, (list, tuple, set)):
-        return [normalize_symbol(str(symbol)) for symbol in value if str(symbol).strip()]
-    return [normalize_symbol(part) for part in str(value).split(",") if part.strip()]
-
-
-def _ensure_data_quality_frame(config: RunConfig, market_data: MarketData) -> pd.DataFrame:
-    if not market_data.data_quality.empty:
-        return market_data.data_quality
-    requested: list[str] = []
-    if "source" in market_data.data_sources:
-        summary = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
-        if not summary.empty:
-            latest = summary.iloc[-1]
-            summary_requested = _split_symbol_list(latest.get("requested_symbols"))
-            summary_requested.extend(_split_symbol_list(latest.get("missing_symbols")))
-            if summary_requested:
-                requested.append(normalize_symbol(config.benchmark))
-                requested.extend(summary_requested)
-    if not requested and "symbol" in market_data.eligible_universe:
-        requested = [normalize_symbol(config.benchmark)]
-        requested.extend(market_data.eligible_universe["symbol"].dropna().map(normalize_symbol))
-    if not market_data.exclusions.empty and "symbol" in market_data.exclusions:
-        requested.extend(market_data.exclusions["symbol"].dropna().map(normalize_symbol))
-    if not requested:
-        requested = list(map(normalize_symbol, market_data.prices.columns.astype(str)))
-    requested = list(dict.fromkeys(requested))
-    data_quality = build_data_quality_frame(
-        market_data.prices,
-        market_data.volumes,
-        requested,
-        market_data.candidate_universe,
-        config,
-        provider=market_data.provider,
-        price_sources=market_data.price_sources,
-        exclusions=market_data.exclusions,
-        as_of=market_data.as_of,
+def _canonical_factor_definitions() -> pd.DataFrame:
+    definitions = pd.concat(
+        [factor_definitions_frame(), advanced_factor_definitions_frame()],
+        ignore_index=True,
+        sort=False,
     )
-    market_data.data_quality = data_quality
-    return data_quality
-
-def _slice_returns(returns: pd.Series, split_at: int) -> dict[str, pd.Series]:
-    if returns.empty:
-        return {"full": returns, "train": returns, "validation": returns, "recent": returns}
-    split_at = min(max(split_at, 1), len(returns) - 1)
-    recent_start = max(0, len(returns) - 504)
-    return {
-        "full": returns,
-        "train": returns.iloc[:split_at],
-        "validation": returns.iloc[split_at:],
-        "recent": returns.iloc[recent_start:],
+    if definitions["factor"].duplicated().any():
+        duplicates = sorted(
+            definitions.loc[definitions["factor"].duplicated(), "factor"].astype(str)
+        )
+        raise RuntimeError(f"canonical factor registry has duplicates: {duplicates}")
+    aliases = definitions["compatibility_alias_of"].notna()
+    independent = definitions["selection_eligible"].fillna(True).astype(bool) & ~aliases
+    observed = {
+        "total": len(definitions),
+        "independent": int(independent.sum()),
+        "aliases": int(aliases.sum()),
     }
-
-
-def _slice_series_to_returns(series: pd.Series, returns: pd.Series) -> pd.Series:
-    if series.empty or returns.empty:
-        return series.iloc[0:0]
-    return series.loc[series.index.intersection(returns.index)]
-
-
-def _metrics_for_backtests(backtests: dict[str, BacktestResult]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    rows = []
-    robustness_rows = []
-    for name, result in backtests.items():
-        split_at = int(len(result.returns) * 0.70)
-        slices = _slice_returns(result.returns, split_at)
-        full = metric_summary(
-            slices["full"],
-            _slice_series_to_returns(result.turnover, slices["full"]),
-            _slice_series_to_returns(result.costs, slices["full"]),
+    expected = {
+        "total": CANONICAL_TOTAL_FACTOR_COUNT,
+        "independent": CANONICAL_INDEPENDENT_FACTOR_COUNT,
+        "aliases": CANONICAL_ALIAS_FACTOR_COUNT,
+    }
+    if observed != expected:
+        raise RuntimeError(
+            "canonical factor registry count mismatch: "
+            + json.dumps({"observed": observed, "expected": expected}, sort_keys=True)
         )
-        train = metric_summary(
-            slices["train"],
-            _slice_series_to_returns(result.turnover, slices["train"]),
-            _slice_series_to_returns(result.costs, slices["train"]),
-        )
-        validation = metric_summary(
-            slices["validation"],
-            _slice_series_to_returns(result.turnover, slices["validation"]),
-            _slice_series_to_returns(result.costs, slices["validation"]),
-        )
-        row = {"factor": name, **{f"full_{k}": v for k, v in full.items()}}
-        row.update({f"train_{k}": v for k, v in train.items()})
-        row.update({f"validation_{k}": v for k, v in validation.items()})
-        rows.append(row)
-        for slice_name, series in slices.items():
-            m = metric_summary(
-                series,
-                _slice_series_to_returns(result.turnover, series),
-                _slice_series_to_returns(result.costs, series),
-            )
-            robustness_rows.append({"factor": name, "slice": slice_name, **m})
-    return pd.DataFrame(rows).set_index("factor"), pd.DataFrame(robustness_rows)
+    return definitions.reset_index(drop=True)
 
 
-def _cost_series_for_turnover(index: pd.Index, turnover: pd.Series, cost_rate: float) -> pd.Series:
-    costs = pd.Series(0.0, index=index)
-    if turnover.empty or cost_rate == 0:
-        return costs
-    for turnover_date, value in turnover.dropna().items():
-        if turnover_date not in costs.index:
-            continue
-        loc = costs.index.get_loc(turnover_date)
-        if isinstance(loc, slice):
-            loc = loc.start
-        cost_loc = int(loc) + 1
-        if cost_loc < len(costs.index):
-            costs.iloc[cost_loc] += float(value) * cost_rate
-    return costs
-
-
-def _cost_stress_grid(backtests: dict[str, BacktestResult], config: RunConfig) -> pd.DataFrame:
-    scenarios = [
-        ("base_configured_cost", config.transaction_cost_bps + config.slippage_bps, "configured flat bps baseline with recomputed returns"),
-        ("high_cost_stress", config.cost_stress_high_bps, "high flat bps stress with recomputed returns"),
-    ]
-    rows: list[dict[str, object]] = []
-    for factor, result in backtests.items():
-        turnover = float(result.turnover.sum()) if not result.turnover.empty else 0.0
-        base_costs = _cost_series_for_turnover(result.returns.index, result.turnover, config.total_cost_rate)
-        gross_returns = result.returns.add(base_costs, fill_value=0.0)
-        for scenario, bps, note in scenarios:
-            scenario_costs = _cost_series_for_turnover(result.returns.index, result.turnover, float(bps) / 10_000.0)
-            stressed_returns = gross_returns.sub(scenario_costs, fill_value=0.0)
-            stressed = metric_summary(stressed_returns, result.turnover, scenario_costs)
-            rows.append(
+def _advanced_factor_input_issues(status: pd.DataFrame) -> dict[str, dict[str, object]]:
+    expected = set(advanced_factor_definitions_frame()["factor"].astype(str))
+    if status.empty or "factor" not in status or status["factor"].duplicated().any():
+        raise ValueError("implementation_error_advanced_factor_status_registry")
+    observed = set(status["factor"].astype(str))
+    if observed != expected:
+        raise ValueError(
+            "implementation_error_advanced_factor_status_registry: "
+            + json.dumps(
                 {
-                    "factor": factor,
-                    "scenario": scenario,
-                    "cost_bps": float(bps),
-                    "total_turnover": turnover,
-                    "stressed_total_cost": stressed["total_cost"],
-                    "stressed_cagr": stressed["cagr"],
-                    "stressed_sharpe": stressed["sharpe"],
-                    "stressed_sortino": stressed["sortino"],
-                    "stressed_calmar": stressed["calmar"],
-                    "stressed_max_drawdown": stressed["max_drawdown"],
-                    "stressed_annualized_cost_drag": stressed["annualized_cost_drag"],
-                    "stress_metric_type": "returns_recomputed_from_turnover",
-                    "base_metrics_preserved": False,
-                    "note": note,
-                }
+                    "missing": sorted(expected.difference(observed)),
+                    "unexpected": sorted(observed.difference(expected)),
+                },
+                sort_keys=True,
             )
-    return pd.DataFrame(rows)
+        )
+    issues: dict[str, dict[str, object]] = {}
+    for row in status.to_dict(orient="records"):
+        factor = str(row["factor"])
+        available = row.get("available")
+        if not isinstance(available, bool):
+            raise ValueError(f"implementation_error_advanced_factor_status:{factor}")
+        if available:
+            continue
+        reason_code = str(row.get("reasonCode") or "").strip()
+        detail = str(row.get("detail") or "").strip()
+        if not reason_code or not detail:
+            raise ValueError(f"implementation_error_advanced_factor_reason:{factor}")
+        issues[factor] = {
+            "factor": factor,
+            "reasonCode": reason_code,
+            "detail": detail,
+        }
+    return issues
 
 
-def _percentile(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
-    finite = series.replace([np.inf, -np.inf], np.nan)
-    values = finite.fillna(finite.median())
-    ranks = values.rank(pct=True, ascending=higher_is_better)
-    return ranks.fillna(0.0)
+def _names_by_symbol(market_data: MarketData) -> pd.Series:
+    if market_data.universe.empty or "symbol" not in market_data.universe:
+        return pd.Series(dtype=object)
+    names = market_data.universe.drop_duplicates("symbol").set_index("symbol")
+    if "name" not in names:
+        return pd.Series(names.index.astype(str), index=names.index, dtype=object)
+    return names["name"].astype(str)
 
 
-def _score_factors(metrics: pd.DataFrame) -> pd.DataFrame:
-    components = pd.DataFrame(index=metrics.index)
-    components["validation_sharpe"] = _percentile(metrics["validation_sharpe"], True)
-    components["validation_sortino"] = _percentile(metrics["validation_sortino"], True)
-    components["validation_calmar"] = _percentile(metrics["validation_calmar"], True)
-    components["validation_mdd"] = _percentile(metrics["validation_max_drawdown"], True)
-    components["validation_cagr"] = _percentile(metrics["validation_cagr"], True)
-    components["turnover_penalty"] = _percentile(metrics["full_avg_turnover"], False)
-    components["train_validation_stability"] = 1.0 - (
-        metrics["train_sharpe"].replace([np.inf, -np.inf], np.nan).fillna(0)
-        - metrics["validation_sharpe"].replace([np.inf, -np.inf], np.nan).fillna(0)
-    ).abs().rank(pct=True)
-    components["composite_score"] = components.mean(axis=1)
-    return components.sort_values("composite_score", ascending=False)
-
-
-def _spearman_rank_corr(left: pd.Series, right: pd.Series) -> float:
-    aligned = pd.concat(
-        [
-            pd.to_numeric(left, errors="coerce").rename("left"),
-            pd.to_numeric(right, errors="coerce").rename("right"),
-        ],
-        axis=1,
-    ).dropna()
-    if len(aligned) < 3:
-        return float("nan")
-    if aligned["left"].nunique() < 2 or aligned["right"].nunique() < 2:
-        return float("nan")
-    return float(aligned["left"].rank().corr(aligned["right"].rank()))
-
-
-def _factor_rank_ic_summary(
-    factor_scores: dict[str, pd.DataFrame],
+def _policy_context(
     prices: pd.DataFrame,
-    *,
-    horizon_days: int = 21,
-    max_dates: int = 756,
-) -> pd.DataFrame:
-    """Summarize no-lookahead rank IC from signal ranks at t to future t+h returns."""
-
-    columns = [
-        "factor",
-        "horizon_days",
-        "observations",
-        "mean_rank_ic",
-        "median_rank_ic",
-        "positive_ic_rate",
-        "diagnostic_start_date",
-        "diagnostic_end_date",
-        "overlapping_observations",
-    ]
-    if prices.empty:
-        return pd.DataFrame(columns=columns)
-    future_returns = prices.shift(-horizon_days).divide(prices) - 1.0
-    rows: list[dict[str, object]] = []
-    for factor, scores in factor_scores.items():
-        ics: list[float] = []
-        score_window = scores.sort_index().tail(max_dates)
-        for date, score_row in score_window.iterrows():
-            if date not in future_returns.index:
-                continue
-            ic = _spearman_rank_corr(score_row, future_returns.loc[date])
-            if math.isfinite(ic):
-                ics.append(ic)
-        start_date = str(pd.Timestamp(score_window.index.min()).date()) if not score_window.empty else None
-        end_date = str(pd.Timestamp(score_window.index.max()).date()) if not score_window.empty else None
-        if ics:
-            values = pd.Series(ics, dtype=float)
-            rows.append(
-                {
-                    "factor": factor,
-                    "horizon_days": horizon_days,
-                    "observations": int(values.count()),
-                    "mean_rank_ic": float(values.mean()),
-                    "median_rank_ic": float(values.median()),
-                    "positive_ic_rate": float(values.gt(0).mean()),
-                    "diagnostic_start_date": start_date,
-                    "diagnostic_end_date": end_date,
-                    "overlapping_observations": True,
-                }
-            )
-        else:
-            rows.append(
-                {
-                    "factor": factor,
-                    "horizon_days": horizon_days,
-                    "observations": 0,
-                    "mean_rank_ic": np.nan,
-                    "median_rank_ic": np.nan,
-                    "positive_ic_rate": np.nan,
-                    "diagnostic_start_date": start_date,
-                    "diagnostic_end_date": end_date,
-                    "overlapping_observations": True,
-                }
-            )
-    return pd.DataFrame(rows, columns=columns).sort_values(["mean_rank_ic", "observations"], ascending=[False, False])
-
-
-def _factor_redundancy_summary(factor_scores: dict[str, pd.DataFrame], *, threshold: float = 0.95) -> pd.DataFrame:
-    """Summarize latest-date cross-sectional rank-correlation redundancy."""
-
-    columns = [
-        "factor",
-        "nearest_factor",
-        "max_abs_rank_corr",
-        "signed_rank_corr",
-        "high_corr_peer_count",
-        "diagnostic_date",
-    ]
-    if not factor_scores:
-        return pd.DataFrame(columns=columns)
-    latest_dates = [scores.dropna(how="all").index.max() for scores in factor_scores.values() if not scores.empty]
-    latest_dates = [pd.Timestamp(value) for value in latest_dates if pd.notna(value)]
-    if not latest_dates:
-        return pd.DataFrame(columns=columns)
-    latest_date = min(latest_dates)
-    latest_scores: dict[str, pd.Series] = {}
-    for factor, scores in factor_scores.items():
-        if scores.empty:
-            continue
-        idx = pd.DatetimeIndex(scores.index)
-        position = idx.searchsorted(latest_date, side="right") - 1
-        if position >= 0:
-            latest_scores[factor] = scores.iloc[int(position)]
-    rows: list[dict[str, object]] = []
-    for factor, series in latest_scores.items():
-        peer_corrs: list[tuple[str, float]] = []
-        for peer, peer_series in latest_scores.items():
-            if peer == factor:
-                continue
-            corr = _spearman_rank_corr(series, peer_series)
-            if math.isfinite(corr):
-                peer_corrs.append((peer, corr))
-        if peer_corrs:
-            nearest, corr = max(peer_corrs, key=lambda item: abs(item[1]))
-            high_corr_count = sum(abs(value) >= threshold for _, value in peer_corrs)
-            rows.append(
-                {
-                    "factor": factor,
-                    "nearest_factor": nearest,
-                    "max_abs_rank_corr": float(abs(corr)),
-                    "signed_rank_corr": float(corr),
-                    "high_corr_peer_count": int(high_corr_count),
-                    "diagnostic_date": str(pd.Timestamp(latest_date).date()),
-                }
-            )
-        else:
-            rows.append(
-                {
-                    "factor": factor,
-                    "nearest_factor": None,
-                    "max_abs_rank_corr": np.nan,
-                    "signed_rank_corr": np.nan,
-                    "high_corr_peer_count": 0,
-                    "diagnostic_date": str(pd.Timestamp(latest_date).date()),
-                }
-            )
-    return pd.DataFrame(rows, columns=columns).sort_values(["max_abs_rank_corr", "factor"], ascending=[False, True])
-
-
-def _factor_category_summary(
-    factor_definitions: pd.DataFrame,
-    factor_rank_ic: pd.DataFrame,
-    factor_redundancy: pd.DataFrame,
-) -> pd.DataFrame:
-    columns = [
-        "category",
-        "factor_count",
-        "avg_mean_rank_ic",
-        "avg_positive_ic_rate",
-        "avg_max_abs_rank_corr",
-        "high_corr_factor_count",
-        "example_factors",
-    ]
-    if factor_definitions.empty or "category" not in factor_definitions:
-        return pd.DataFrame(columns=columns)
-    frame = factor_definitions[["factor", "category"]].copy()
-    if not factor_rank_ic.empty:
-        frame = frame.merge(factor_rank_ic[["factor", "mean_rank_ic", "positive_ic_rate"]], on="factor", how="left")
-    if not factor_redundancy.empty:
-        frame = frame.merge(
-            factor_redundancy[["factor", "max_abs_rank_corr", "high_corr_peer_count"]],
-            on="factor",
-            how="left",
-        )
-    rows: list[dict[str, object]] = []
-    for category, group in frame.groupby("category", dropna=False):
-        high_corr = (
-            pd.to_numeric(group["high_corr_peer_count"], errors="coerce")
-            if "high_corr_peer_count" in group
-            else pd.Series(0, index=group.index, dtype=float)
-        )
-        rows.append(
-            {
-                "category": str(category),
-                "factor_count": int(len(group)),
-                "avg_mean_rank_ic": _safe_mean(group.get("mean_rank_ic", pd.Series(dtype=float))),
-                "avg_positive_ic_rate": _safe_mean(group.get("positive_ic_rate", pd.Series(dtype=float))),
-                "avg_max_abs_rank_corr": _safe_mean(group.get("max_abs_rank_corr", pd.Series(dtype=float))),
-                "high_corr_factor_count": int(high_corr.fillna(0).gt(0).sum()),
-                "example_factors": ", ".join(group["factor"].head(4).astype(str).tolist()),
-            }
-        )
-    return pd.DataFrame(rows, columns=columns).sort_values(["factor_count", "category"], ascending=[False, True])
-
-
-def _safe_mean(series: pd.Series) -> float | None:
-    values = pd.to_numeric(series, errors="coerce").dropna()
-    if values.empty:
-        return None
-    return float(values.mean())
-
-
-def _benchmark_relative_metrics(backtests: dict[str, BacktestResult], prices: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
-    columns = [
-        "factor",
-        "benchmark",
-        "strategy_cagr",
-        "benchmark_cagr",
-        "strategy_sharpe",
-        "benchmark_sharpe",
-        "strategy_max_drawdown",
-        "benchmark_max_drawdown",
-        "annualized_excess_return",
-        "tracking_error",
-        "information_ratio",
-        "beta_to_benchmark",
-    ]
-    benchmark = normalize_symbol(config.benchmark)
-    benchmark_column = next((column for column in prices.columns if normalize_symbol(column) == benchmark), None)
-    if benchmark_column is None:
-        return pd.DataFrame(columns=columns)
-
-    benchmark_returns = prices[benchmark_column].pct_change().fillna(0.0).rename("benchmark")
-    rows: list[dict[str, float | str]] = []
-    for name, result in backtests.items():
-        aligned = pd.concat([result.returns.rename("strategy"), benchmark_returns], axis=1).dropna()
-        if aligned.empty:
-            continue
-        strategy_metrics = metric_summary(
-            aligned["strategy"],
-            _slice_series_to_returns(result.turnover, aligned["strategy"]),
-            _slice_series_to_returns(result.costs, aligned["strategy"]),
-        )
-        benchmark_metrics = metric_summary(aligned["benchmark"])
-        excess = aligned["strategy"] - aligned["benchmark"]
-        tracking_error = annualized_volatility(excess)
-        annualized_excess_return = float(excess.mean() * TRADING_DAYS)
-        benchmark_var = float(aligned["benchmark"].var(ddof=0))
-        beta = float(aligned["strategy"].cov(aligned["benchmark"]) / benchmark_var) if benchmark_var > 0 else 0.0
-        rows.append(
-            {
-                "factor": name,
-                "benchmark": benchmark,
-                "strategy_cagr": strategy_metrics["cagr"],
-                "benchmark_cagr": benchmark_metrics["cagr"],
-                "strategy_sharpe": strategy_metrics["sharpe"],
-                "benchmark_sharpe": benchmark_metrics["sharpe"],
-                "strategy_max_drawdown": strategy_metrics["max_drawdown"],
-                "benchmark_max_drawdown": benchmark_metrics["max_drawdown"],
-                "annualized_excess_return": annualized_excess_return,
-                "tracking_error": tracking_error,
-                "information_ratio": annualized_excess_return / tracking_error if tracking_error > 0 else 0.0,
-                "beta_to_benchmark": beta,
-            }
-        )
-    return pd.DataFrame(rows, columns=columns)
-
-
-def _rolling_risk_adjusted(prices: pd.DataFrame, window: int) -> pd.DataFrame:
-    returns = prices.pct_change()
-    mean = returns.rolling(window).mean() * TRADING_DAYS
-    vol = returns.rolling(window).std() * np.sqrt(TRADING_DAYS)
-    return mean.divide(vol.replace(0, np.nan))
-
-
-def _multi_horizon_variant(prices: pd.DataFrame, weights: tuple[float, float, float, float]) -> pd.DataFrame:
-    w1, w3, w6, w12 = weights
-    return (
-        w1 * simple_momentum(prices, 21)
-        + w3 * total_return_momentum(prices, 63, skip=5)
-        + w6 * total_return_momentum(prices, 126, skip=10)
-        + w12 * total_return_momentum(prices, 252, skip=21)
-    )
-
-
-def _vol_adjusted_variant(prices: pd.DataFrame, lookback: int, skip: int, vol_window: int) -> pd.DataFrame:
-    momentum = total_return_momentum(prices, lookback, skip=skip)
-    vol = prices.pct_change().rolling(vol_window).std() * np.sqrt(TRADING_DAYS)
-    return momentum.divide(vol.replace(0, np.nan))
-
-
-def _ma_trend_variant(prices: pd.DataFrame, short_window: int, long_window: int) -> pd.DataFrame:
-    short_ma = prices.rolling(short_window).mean()
-    long_ma = prices.rolling(long_window).mean()
-    return prices.divide(long_ma) - 1.0 + 0.5 * (short_ma.divide(long_ma) - 1.0)
-
-
-def _dual_momentum_variant(prices: pd.DataFrame, lookback: int, skip: int, trend_window: int) -> pd.DataFrame:
-    relative = total_return_momentum(prices, lookback, skip=skip)
-    absolute = prices.divide(prices.rolling(trend_window).mean()) - 1.0
-    return relative.where(absolute > 0, relative - absolute.abs() - 1.0)
-
-
-def _drawdown_aware_variant(prices: pd.DataFrame, lookback: int, skip: int) -> pd.DataFrame:
-    momentum = total_return_momentum(prices, lookback, skip=skip)
-    drawdown = prices.divide(prices.rolling(lookback).max()) - 1.0
-    return momentum + drawdown
-
-
-def _reversal_adjusted_variant(prices: pd.DataFrame, penalty: float) -> pd.DataFrame:
-    long_mom = total_return_momentum(prices, 252, skip=21)
-    short_reversal = simple_momentum(prices, 21)
-    return long_mom - penalty * short_reversal
-
-
-def _selected_factor_variants(
-    prices: pd.DataFrame,
-    selected_factor: str,
-    base_scores: pd.DataFrame,
-) -> list[tuple[str, pd.DataFrame, str]]:
-    variants: list[tuple[str, pd.DataFrame, str]] = [("base", base_scores, "original selected factor parameters")]
-    if selected_factor == "mom_12_1":
-        for lookback, skip in [(210, 21), (252, 10), (252, 42), (294, 21)]:
-            variants.append((f"lookback_{lookback}_skip_{skip}", total_return_momentum(prices, lookback, skip), f"lookback={lookback}; skip={skip}"))
-    elif selected_factor == "mom_6_1":
-        for lookback, skip in [(105, 21), (126, 10), (126, 42), (147, 21)]:
-            variants.append((f"lookback_{lookback}_skip_{skip}", total_return_momentum(prices, lookback, skip), f"lookback={lookback}; skip={skip}"))
-    elif selected_factor == "mom_3m":
-        for lookback in [42, 84, 105]:
-            variants.append((f"lookback_{lookback}", simple_momentum(prices, lookback), f"lookback={lookback}; skip=0"))
-    elif selected_factor == "multi_horizon":
-        for label, weights in [
-            ("short_tilt", (0.25, 0.30, 0.25, 0.20)),
-            ("long_tilt", (0.10, 0.20, 0.30, 0.40)),
-            ("no_1m", (0.00, 0.30, 0.35, 0.35)),
-        ]:
-            variants.append((label, _multi_horizon_variant(prices, weights), f"weights_1m_3m_6m_12m={weights}"))
-    elif selected_factor == "vol_adjusted":
-        for lookback, skip, vol_window in [(105, 10, 42), (126, 21, 63), (147, 10, 84)]:
-            variants.append((f"lookback_{lookback}_skip_{skip}_vol_{vol_window}", _vol_adjusted_variant(prices, lookback, skip, vol_window), f"lookback={lookback}; skip={skip}; vol_window={vol_window}"))
-    elif selected_factor == "risk_adjusted":
-        for window in [84, 168, 210]:
-            variants.append((f"window_{window}", _rolling_risk_adjusted(prices, window), f"rolling_window={window}"))
-    elif selected_factor == "dual_momentum":
-        for lookback, skip, trend_window in [(105, 10, 160), (126, 21, 200), (147, 21, 252)]:
-            variants.append((f"lookback_{lookback}_skip_{skip}_trend_{trend_window}", _dual_momentum_variant(prices, lookback, skip, trend_window), f"lookback={lookback}; skip={skip}; trend_window={trend_window}"))
-    elif selected_factor == "ma_trend":
-        for short_window, long_window in [(40, 160), (63, 200), (63, 252), (100, 200)]:
-            variants.append((f"ma_{short_window}_{long_window}", _ma_trend_variant(prices, short_window, long_window), f"short_ma={short_window}; long_ma={long_window}"))
-    elif selected_factor == "drawdown_aware":
-        for lookback, skip in [(105, 10), (126, 21), (147, 21)]:
-            variants.append((f"lookback_{lookback}_skip_{skip}", _drawdown_aware_variant(prices, lookback, skip), f"lookback={lookback}; skip={skip}"))
-    elif selected_factor == "reversal_adjusted":
-        for penalty in [0.20, 0.50, 0.65]:
-            variants.append((f"penalty_{penalty}", _reversal_adjusted_variant(prices, penalty), f"short_reversal_penalty={penalty}"))
-    return [(name, scores.replace([np.inf, -np.inf], np.nan), params) for name, scores, params in variants]
-
-
-def _parameter_sensitivity(
-    prices: pd.DataFrame,
-    selected_factor: str,
+    dollar_volumes: pd.DataFrame,
     config: RunConfig,
-    base_scores: pd.DataFrame,
-    eligibility_mask: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for variant, scores, parameter_set in _selected_factor_variants(prices, selected_factor, base_scores):
-        result = run_factor_backtest(
-            prices,
-            scores,
-            config,
-            f"{selected_factor}:{variant}",
-            eligibility_mask=eligibility_mask,
-        )
-        rows.append(
-            {
-                "factor": selected_factor,
-                "variant_type": "factor_parameter",
-                "variant": variant,
-                "parameter_set": parameter_set,
-                **metric_summary(result.returns, result.turnover, result.costs),
-            }
-        )
-
-    top_n_candidates = sorted({max(5, config.top_n - 5), config.top_n, config.top_n + 5})
-    max_weight_candidates = sorted({max(0.02, round(config.max_weight - 0.02, 4)), config.max_weight, min(0.20, round(config.max_weight + 0.02, 4))})
-    for top_n in top_n_candidates:
-        if top_n == config.top_n:
-            continue
-        result = run_factor_backtest(
-            prices,
-            base_scores,
-            replace(config, top_n=top_n),
-            f"{selected_factor}:top_n_{top_n}",
-            eligibility_mask=eligibility_mask,
-        )
-        rows.append(
-            {
-                "factor": selected_factor,
-                "variant_type": "portfolio_parameter",
-                "variant": f"top_n_{top_n}",
-                "parameter_set": f"top_n={top_n}; max_weight={config.max_weight}",
-                **metric_summary(result.returns, result.turnover, result.costs),
-            }
-        )
-    for max_weight in max_weight_candidates:
-        if max_weight == config.max_weight:
-            continue
-        result = run_factor_backtest(
-            prices,
-            base_scores,
-            replace(config, max_weight=max_weight),
-            f"{selected_factor}:max_weight_{max_weight}",
-            eligibility_mask=eligibility_mask,
-        )
-        rows.append(
-            {
-                "factor": selected_factor,
-                "variant_type": "portfolio_parameter",
-                "variant": f"max_weight_{max_weight}",
-                "parameter_set": f"top_n={config.top_n}; max_weight={max_weight}",
-                **metric_summary(result.returns, result.turnover, result.costs),
-            }
-        )
-    return pd.DataFrame(rows).sort_values(["variant_type", "variant"]).reset_index(drop=True)
-
-
-def _walk_forward_selection_history(backtests: dict[str, BacktestResult], config: RunConfig) -> pd.DataFrame:
-    if not backtests:
-        return pd.DataFrame(columns=["selection_date", "selected_factor", "selection_window", "selection_source"])
-    index = next(iter(backtests.values())).returns.index
-    frequency = "ME" if config.rebalance_frequency == "M" else config.rebalance_frequency
-    selection_dates = pd.Series(index=index, data=index).resample(frequency).last().dropna().values
-    rows: list[dict[str, object]] = []
-    min_window = min(252, max(21, len(index) // 3))
-    for raw_date in selection_dates:
-        selection_date = pd.Timestamp(raw_date)
-        past_metrics: dict[str, float] = {}
-        for name, result in backtests.items():
-            past = result.returns.loc[result.returns.index < selection_date].tail(252)
-            if len(past) < min_window:
-                continue
-            past_metrics[name] = metric_summary(past)["sharpe"]
-        if not past_metrics:
-            continue
-        selected = max(past_metrics, key=lambda name: (past_metrics[name], name))
-        rows.append(
-            {
-                "selection_date": selection_date,
-                "selected_factor": selected,
-                "selection_source": "walk_forward",
-                "selection_window": "prior_252_trading_days",
-                "candidate_factor_count": len(past_metrics),
-                "best_prior_sharpe": past_metrics[selected],
-                "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def _load_frozen_factor_policy(config: RunConfig) -> dict[str, Any]:
-    """Validate the pre-run factor policy artifact used for practical gating.
-
-    A selected factor passed on the CLI/config is useful for research, but a
-    practical recommendation needs evidence that the choice was frozen before
-    the run.  The artifact is intentionally simple JSON and is hashed so the
-    dashboard can show exactly which policy controlled the run.
-    """
-
-    path = config.frozen_policy_path
-    if path is None:
-        return {
-            "available": False,
-            "status": "missing_path",
-            "checks": {
-                "path_provided": False,
-                "file_exists": False,
-                "json_parseable": False,
-                "required_fields_present": False,
-                "mode_matches_config": False,
-                "selected_factor_matches_config": False,
-            },
-            "warning": "사전 고정 팩터 정책 파일이 없어 실전 매매 권고 승격을 막습니다.",
-        }
-
-    policy_path = Path(path)
-    checks: dict[str, bool] = {
-        "path_provided": True,
-        "file_exists": policy_path.exists(),
-        "json_parseable": False,
-        "required_fields_present": False,
-        "mode_matches_config": False,
-        "selected_factor_matches_config": False,
-    }
-    policy: dict[str, Any] = {}
-    sha256: str | None = None
-    if not policy_path.exists():
-        return {
-            "available": False,
-            "status": "missing_file",
-            "path": str(policy_path),
-            "checks": checks,
-            "warning": f"사전 고정 팩터 정책 파일을 찾을 수 없습니다: {policy_path}",
-        }
-    try:
-        raw_bytes = policy_path.read_bytes()
-        sha256 = hashlib.sha256(raw_bytes).hexdigest()
-        loaded = json.loads(raw_bytes.decode("utf-8"))
-        if isinstance(loaded, dict):
-            policy = loaded
-            checks["json_parseable"] = True
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        policy = {}
-    checks["required_fields_present"] = all(str(policy.get(field) or "").strip() for field in FROZEN_POLICY_REQUIRED_FIELDS)
-    checks["mode_matches_config"] = (
-        str(policy.get("factor_selection_mode") or "").strip() == config.effective_factor_selection_mode
-        and config.effective_factor_selection_mode == "predeclared"
-    )
-    checks["selected_factor_matches_config"] = (
-        str(policy.get("selected_factor") or "").strip() == str(config.selected_factor or "").strip()
-    )
-    available = all(checks.values())
-    status = "verified" if available else "invalid"
-    return {
-        "available": available,
-        "status": status,
-        "path": str(policy_path),
-        "sha256": sha256,
-        "policy_id": policy.get("policy_id"),
-        "created_at_utc": policy.get("created_at_utc"),
-        "effective_from": policy.get("effective_from"),
-        "checks": checks,
-        "warning": None
-        if available
-        else "사전 고정 팩터 정책 파일이 설정과 일치하지 않아 실전 매매 권고 승격을 막습니다.",
-    }
-
-
-def _resolve_selected_factor(
-    config: RunConfig,
-    factor_scores: dict[str, pd.DataFrame],
-    validation_selected_factor: str,
-    selection_history: pd.DataFrame | None = None,
-) -> tuple[str, str, str, bool]:
-    mode = config.effective_factor_selection_mode
-    if mode == "predeclared":
-        if config.selected_factor is None:
-            raise ValueError("factor_selection_mode='predeclared' requires --selected-factor")
-        selected_factor = config.selected_factor.strip()
-        if selected_factor not in factor_scores:
-            available = ", ".join(sorted(factor_scores))
-            raise ValueError(f"selected_factor must be one of: {available}")
-        return (
-            selected_factor,
-            "predeclared",
-            (
-                f"{selected_factor} selected from the predeclared/frozen run configuration; "
-                "validation rankings are reported for audit and are not used to choose current recommendations."
-            ),
-            False,
-        )
-    if mode == "walk_forward":
-        if selection_history is None or selection_history.empty:
-            return (
-                validation_selected_factor,
-                "walk_forward_insufficient_history",
-                (
-                    "Walk-forward mode was requested but insufficient prior-window history was available; "
-                    "the validation-selected factor is reported with an execution limitation."
-                ),
-                True,
-            )
-        selected_factor = str(selection_history.iloc[-1]["selected_factor"])
-        return (
-            selected_factor,
-            "walk_forward",
-            (
-                f"{selected_factor} selected by in-run walk-forward diagnostics using only prior windows; "
-                "validation rankings are reported separately for audit. Without an independently frozen policy "
-                "artifact this remains research-only and is not treated as a live trading policy."
-            ),
-            True,
-        )
-    return (
-        validation_selected_factor,
-        "research_validation",
-        (
-            f"{validation_selected_factor} selected by validation-first composite score for "
-            "research ranking after comparing validation Sharpe, Sortino, Calmar, max drawdown, "
-            "CAGR, turnover, and train/validation stability across the full momentum factor library. "
-            "Same-run validation selection is blocked from tradable recommendation output; use a "
-            "predeclared selected factor frozen before the run for practical labels."
-        ),
-        True,
-    )
-
-
-def _recommendation_status(config: RunConfig, market_data: MarketData) -> tuple[str, bool]:
-    if market_data.offline_sample:
-        return ("sample_offline_not_current", False)
-    if market_data.as_of is None:
-        return ("live_unavailable", False)
-    age_days = (pd.Timestamp(datetime.now(UTC).date()) - pd.Timestamp(market_data.as_of).normalize()).days
-    if age_days > config.stale_after_days:
-        return (f"stale_live_data_{age_days}_days_old", False)
-    return ("current_live", True)
-
-
-def _live_subset_summary(market_data: MarketData) -> tuple[bool, int | None, int | None]:
-    if "source" not in market_data.data_sources:
-        return (market_data.offline_sample, None, None)
-    subset_rows = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
-    if subset_rows.empty:
-        return (market_data.offline_sample, None, None)
-    latest = subset_rows.iloc[-1]
-    subset_run = bool(latest.get("subset_run", market_data.offline_sample))
-    requested = latest.get("requested_price_symbols")
-    candidates = latest.get("candidate_symbols")
-    return (
-        subset_run,
-        int(requested) if pd.notna(requested) else None,
-        int(candidates) if pd.notna(candidates) else None,
-    )
-
-
-def _user_universe_provenance_rows(market_data: MarketData) -> pd.DataFrame:
-    required = {"source", "point_in_time_universe", "universe_provenance"}
-    if not required.issubset(market_data.data_sources.columns):
-        return pd.DataFrame()
-    provenance_rows = market_data.data_sources[
-        market_data.data_sources["source"].eq("user-point-in-time-universe-provenance")
-    ]
-    if provenance_rows.empty:
-        return provenance_rows
-    provenance = provenance_rows["universe_provenance"].fillna("").astype(str).str.strip()
-    return provenance_rows[provenance.ne("")]
-
-
-_ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
-
-
-def _has_structured_point_in_time_provenance(value: str) -> bool:
-    text = value.strip().lower()
-    if not text or not _ISO_DATE_RE.search(text):
-        return False
-    return (
-        any(token in text for token in ("source=", "source:", "dataset=", "dataset:", "file=", "file:", "path=", "path:"))
-        and any(token in text for token in ("as_of=", "as_of:", "as-of=", "as-of:"))
-        and any(token in text for token in ("symbol_count=", "symbol_count:", "symbols=", "symbols:", "count=", "count:"))
-        and any(token in text for token in ("hash=", "hash:", "sha256=", "sha256:", "snapshot=", "snapshot:"))
-    )
-
-
-def _has_point_in_time_universe(market_data: MarketData) -> bool:
-    provenance_rows = _user_universe_provenance_rows(market_data)
-    if provenance_rows.empty:
-        return False
-    attested = provenance_rows["point_in_time_universe"].fillna(False).astype(bool)
-    provenance = provenance_rows["universe_provenance"].fillna("").astype(str)
-    structured = provenance.map(_has_structured_point_in_time_provenance)
-    return bool((attested & structured).any())
-
-
-def _data_quality_manifest_available(market_data: MarketData) -> bool:
-    required = {"symbol", "role", "data_quality_status"}
-    return bool(not market_data.data_quality.empty and required.issubset(market_data.data_quality.columns))
-
-
-def _data_quality_for_recommendations(market_data: MarketData) -> pd.DataFrame:
-    if not _data_quality_manifest_available(market_data):
-        return pd.DataFrame()
-    columns = [
-        "symbol",
-        "role",
-        "price_source",
-        "provider",
-        "first_price_date",
-        "last_price_date",
-        "observation_count",
-        "missing_ratio",
-        "volume_missing_ratio",
-        "latest_price",
-        "volume_obs_count",
-        "non_positive_price_observations",
-        "max_abs_daily_return",
-        "extreme_return_observations",
-        "full_history_max_abs_daily_return",
-        "full_history_extreme_return_observations",
-        "stale_days",
-        "exclusion_reason",
-        "data_quality_status",
-        "data_quality_pass",
-        "data_quality_warning",
-    ]
-    available = [column for column in columns if column in market_data.data_quality.columns]
-    quality = market_data.data_quality[available].copy()
-    quality["symbol"] = quality["symbol"].map(normalize_symbol)
-    quality = quality.drop_duplicates(subset=["symbol"], keep="last")
-    return quality.rename(
-        columns={
-            "role": "data_quality_role",
-            "price_source": "data_quality_price_source",
-            "provider": "data_quality_provider",
-            "observation_count": "data_quality_observation_count",
-            "missing_ratio": "data_quality_missing_ratio",
-            "volume_missing_ratio": "data_quality_volume_missing_ratio",
-            "latest_price": "data_quality_latest_price",
-            "volume_obs_count": "data_quality_volume_observation_count",
-            "stale_days": "data_quality_stale_days",
-            "exclusion_reason": "data_quality_exclusion_reason",
-        }
-    )
-
-
-def _attach_recommendation_data_quality(recommendations: pd.DataFrame, market_data: MarketData) -> pd.DataFrame:
-    frame = recommendations.copy()
-    quality = _data_quality_for_recommendations(market_data)
-    if quality.empty:
-        frame["data_quality_status"] = "missing_manifest"
-        frame["data_quality_pass"] = False
-        frame["data_quality_warning"] = "missing data-quality manifest; row cannot be treated as tradable"
-        return frame
-    frame["symbol"] = frame["symbol"].map(normalize_symbol)
-    frame = frame.merge(quality, on="symbol", how="left")
-    frame["data_quality_status"] = frame["data_quality_status"].fillna("missing_manifest_row")
-    frame["data_quality_pass"] = frame["data_quality_pass"].fillna(False).astype(bool)
-    frame["data_quality_warning"] = frame["data_quality_warning"].fillna(
-        "missing symbol-level data-quality row; row cannot be treated as tradable"
-    )
-    return frame
-
-
-HARD_DATA_QUALITY_FAILURES = {
-    "missing_manifest",
-    "missing_manifest_row",
-    "missing_price",
-    "excessive_missing_price",
-    "non_positive_price",
-    "extreme_return_anomaly",
-    "stale_price",
-    "below_minimum_price",
-    "insufficient_history",
-    "provider_adjustment_incompatible",
-}
-
-
-def _row_level_data_quality_pass(recommendations: pd.DataFrame) -> bool:
-    if recommendations.empty or "data_quality_status" not in recommendations:
-        return False
-    statuses = recommendations["data_quality_status"].fillna("missing_manifest_row").astype(str)
-    return bool(not statuses.isin(HARD_DATA_QUALITY_FAILURES).any())
-
-
-def _has_liquidity_evidence(config: RunConfig, market_data: MarketData) -> bool:
-    if market_data.volumes.empty:
-        return False
-    analysis_symbols = list(_analysis_prices(market_data, config).columns)
-    if not analysis_symbols:
-        return False
-    return set(analysis_symbols).issubset(set(market_data.volumes.columns))
-
-
-def _has_broad_or_approved_tradable_universe(config: RunConfig, market_data: MarketData) -> bool:
-    if len(market_data.candidate_universe) >= config.min_tradable_universe_size:
-        return True
-    if not config.approved_tradable_universe:
-        return False
-    provenance_rows = _user_universe_provenance_rows(market_data)
-    if provenance_rows.empty or "tradable_universe_approved" not in provenance_rows:
-        return False
-    approved = provenance_rows["tradable_universe_approved"].fillna(False).astype(bool)
-    return bool(approved.any())
-
-
-def _has_no_explicit_price_symbol_cap(config: RunConfig, subset_run: bool) -> bool:
-    return not subset_run and config.max_price_symbols is None
-
-
-def _has_complete_requested_price_coverage(market_data: MarketData) -> bool:
-    if "source" not in market_data.data_sources:
-        return False
-    summary = market_data.data_sources[market_data.data_sources["source"].eq("live-run-summary")]
-    if summary.empty:
-        return False
-    latest = summary.iloc[-1]
-    requested = latest.get("requested_price_symbols")
-    returned = latest.get("returned_price_symbols")
-    if pd.isna(returned):
-        returned_symbols = latest.get("returned_symbols")
-        if isinstance(returned_symbols, str) and returned_symbols.strip():
-            returned = len([symbol for symbol in returned_symbols.split(",") if symbol.strip()])
-        else:
-            returned = latest.get("eligible_price_symbols")
-    if pd.isna(requested) or pd.isna(returned):
-        return False
-    return int(returned) >= int(requested)
-
-
-def _recommendation_liquidity_status(row: pd.Series, config: RunConfig) -> str:
-    required = config.min_liquidity_observations
-    observed_counts = [
-        row["price_observations_63d"],
-        row["volume_observations_63d"],
-        row["dollar_volume_observations_63d"],
-    ]
-    if any(pd.isna(count) or int(count) == 0 for count in observed_counts):
-        return "missing_liquidity_evidence"
-    if any(int(count) < required for count in observed_counts):
-        return "insufficient_liquidity_observations"
-    avg_share_volume = row["avg_share_volume_63d"]
-    avg_dollar_volume = row["avg_dollar_volume_63d"]
-    if pd.isna(avg_share_volume) or pd.isna(avg_dollar_volume):
-        return "missing_liquidity_evidence"
-    if config.min_avg_volume > 0 and avg_share_volume < config.min_avg_volume:
-        return "below_min_avg_volume"
-    if config.min_avg_dollar_volume > 0 and avg_dollar_volume < config.min_avg_dollar_volume:
-        return "below_min_avg_dollar_volume"
-    return "pass"
-
-
-def _recommendation_capacity_status(row: pd.Series, config: RunConfig) -> str:
-    if config.target_aum is None or config.max_adv_participation is None:
-        return "not_estimated_missing_aum_and_participation_limit"
-    if row["liquidity_evidence_status"] != "pass":
-        return "missing_or_failed_liquidity_evidence"
-    target_notional = row["target_notional"]
-    max_trade_notional = row["max_trade_notional_by_adv"]
-    if pd.isna(target_notional) or pd.isna(max_trade_notional) or max_trade_notional <= 0:
-        return "missing_capacity_evidence"
-    if target_notional <= max_trade_notional:
-        return "pass"
-    return "exceeds_adv_participation_limit"
-
-
-def _recommendation_capacity_warning(row: pd.Series) -> str:
-    status = row["capacity_status"]
-    if status == "pass":
-        return "Capacity check passed against configured target AUM and max ADV participation."
-    if status == "not_estimated_missing_aum_and_participation_limit":
-        return (
-            "Capacity is not estimated because no target AUM and max participation limit are configured; "
-            "weights are not tradable recommendations."
-        )
-    if status == "exceeds_adv_participation_limit":
-        return "Target notional exceeds the configured ADV participation limit; row is not tradable."
-    if status == "missing_or_failed_liquidity_evidence":
-        return "Capacity cannot be assessed because row-level liquidity evidence is missing or failed."
-    return "Capacity evidence is incomplete; row is not tradable."
-
-
-def _market_cap_cache_path(config: RunConfig, symbol: str, source: str = "yfinance_fast_info") -> Path:
-    safe = normalize_symbol(symbol).replace("/", "_").replace("-", "_")
-    as_of = config.effective_end_date
-    safe_source = re.sub(r"[^a-zA-Z0-9_]+", "_", source).strip("_") or "market_cap"
-    return config.cache_dir / "fundamentals" / f"{safe_source}_market_cap" / f"{safe}_{as_of}.json"
-
-
-def _cached_market_cap(config: RunConfig, symbol: str, source: str = "yfinance_fast_info") -> tuple[float | None, str | None]:
-    path = _market_cap_cache_path(config, symbol, source)
-    if not path.exists():
-        return None, None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None, None
-    value = payload.get("market_cap")
-    try:
-        market_cap = float(value)
-    except (TypeError, ValueError):
-        return None, None
-    if math.isfinite(market_cap) and market_cap > 0:
-        return market_cap, str(path)
-    return None, None
-
-
-def _write_market_cap_cache(config: RunConfig, symbol: str, market_cap: float, source: str = "yfinance_fast_info") -> str:
-    path = _market_cap_cache_path(config, symbol, source)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "symbol": normalize_symbol(symbol),
-                "market_cap": float(market_cap),
-                "source": source,
-                "as_of": config.effective_end_date,
-                "fetched_at_utc": datetime.now(UTC).isoformat(),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return str(path)
-
-
-def _lookup_yfinance_market_cap(symbol: str) -> float | None:
-    def handle_timeout(_signum: int, _frame: object) -> None:
-        raise _MarketCapLookupTimeout(f"market-cap lookup timed out after {MARKET_CAP_LOOKUP_TIMEOUT_SECONDS:.0f}s")
-
-    timeout_enabled = (
-        hasattr(signal, "SIGALRM")
-        and hasattr(signal, "setitimer")
-        and threading.current_thread() is threading.main_thread()
-    )
-    old_handler: Any = None
-    old_timer: tuple[float, float] | None = None
-    try:
-        if timeout_enabled:
-            old_handler = signal.getsignal(signal.SIGALRM)
-            signal.signal(signal.SIGALRM, handle_timeout)
-            old_timer = signal.setitimer(signal.ITIMER_REAL, MARKET_CAP_LOOKUP_TIMEOUT_SECONDS)
-        import yfinance as yf  # type: ignore
-
-        ticker = yf.Ticker(symbol)
-        fast_info = getattr(ticker, "fast_info", None)
-        value = None
-        if fast_info is not None:
-            if hasattr(fast_info, "get"):
-                value = fast_info.get("marketCap") or fast_info.get("market_cap")
-            if value is None and hasattr(fast_info, "market_cap"):
-                value = fast_info.market_cap
-        if value is None:
-            info = getattr(ticker, "info", {}) or {}
-            value = info.get("marketCap")
-        market_cap = float(value)
-    except Exception:
-        return None
-    finally:
-        if timeout_enabled:
-            signal.setitimer(signal.ITIMER_REAL, *(old_timer or (0.0, 0.0)))
-            signal.signal(signal.SIGALRM, old_handler)
-    return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
-
-
-def _parse_compact_market_cap(value: str | None) -> float | None:
-    if value is None:
-        return None
-    text = unescape(str(value)).strip().upper().replace(",", "").replace("$", "")
-    if not text or text in {"-", "N/A", "NA", "NONE"}:
-        return None
-    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([TMBK]?)", text)
-    if match is None:
-        return None
-    number = float(match.group(1))
-    multiplier = {"T": 1_000_000_000_000.0, "B": 1_000_000_000.0, "M": 1_000_000.0, "K": 1_000.0, "": 1.0}[
-        match.group(2)
-    ]
-    market_cap = number * multiplier
-    return market_cap if math.isfinite(market_cap) and market_cap > 0 else None
-
-
-def _extract_finviz_market_cap(html_text: str) -> float | None:
-    text = re.sub(r"<[^>]+>", "\n", html_text)
-    tokens = [unescape(token).strip() for token in re.split(r"\s*\n+\s*", text) if unescape(token).strip()]
-    for index, token in enumerate(tokens):
-        if token.lower() == "market cap" and index + 1 < len(tokens):
-            market_cap = _parse_compact_market_cap(tokens[index + 1])
-            if market_cap is not None:
-                return market_cap
-    match = re.search(r"Market\s+Cap\s*</[^>]+>\s*<[^>]+>\s*([^<]+)", html_text, flags=re.IGNORECASE)
-    return _parse_compact_market_cap(match.group(1)) if match else None
-
-
-def _lookup_finviz_market_cap(symbol: str) -> float | None:
-    url = f"https://finviz.com/quote.ashx?t={quote(normalize_symbol(symbol))}&p=d"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (compatible; momentum-factor-lab/0.1; "
-            "+https://github.com/sonchanggi/momentum-factor-lab)"
-        )
-    }
-    try:
-        with urlopen(Request(url, headers=headers), timeout=MARKET_CAP_LOOKUP_TIMEOUT_SECONDS) as response:
-            html_text = response.read().decode("utf-8", errors="replace")
-    except Exception:  # pragma: no cover - network/provider dependent
-        return None
-    return _extract_finviz_market_cap(html_text)
-
-
-def _attach_recommendation_market_caps(
-    recommendations: pd.DataFrame,
-    config: RunConfig,
-    market_data: MarketData,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Best-effort market-cap enrichment for final recommendation candidates only."""
+    exact_daily_returns = prices.divide(prices.shift(1)) - 1.0
+    exact_daily_returns = exact_daily_returns.where(prices.notna() & prices.shift(1).notna())
+    volatility = exact_daily_returns.rolling(
+        config.volatility_lookback_days,
+        min_periods=config.min_volatility_observations,
+    ).std(ddof=1) * np.sqrt(252.0)
+    liquidity = (
+        dollar_volumes.reindex(index=prices.index, columns=prices.columns)
+        .rolling(
+            config.liquidity_lookback_days,
+            min_periods=config.min_liquidity_observations,
+        )
+        .mean()
+    )
+    return volatility, liquidity
 
-    frame = recommendations.copy()
-    frame["market_cap"] = np.nan
-    frame["market_cap_source"] = "unavailable"
+
+def _normalized_reason_codes(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    return tuple(dict.fromkeys(str(reason).strip() for reason in value if str(reason).strip()))
+
+
+def _validated_policy_input_failures(
+    backtest: BacktestResult,
+    evaluation_index: pd.DatetimeIndex,
+    *,
+    factor: str,
+    policy_id: str,
+) -> list[dict[str, object]]:
+    statuses = backtest.policy_input_statuses.astype(str)
+    reasons = backtest.policy_input_reasons.reindex(statuses.index)
+    failures: list[dict[str, object]] = []
+    evaluation_dates = set(pd.DatetimeIndex(evaluation_index))
+    for date, status in statuses.items():
+        if status not in {"not_scheduled", "available", "unavailable"}:
+            raise ValueError(
+                "implementation_error_unknown_policy_input_status: "
+                f"{factor}@{policy_id} {pd.Timestamp(date).date().isoformat()} status={status!r}"
+            )
+        if status != "unavailable":
+            continue
+        reason_codes = _normalized_reason_codes(reasons.get(date))
+        unknown = sorted(set(reason_codes).difference(_DATA_SHORTAGE_POLICY_REASONS))
+        if not reason_codes or unknown:
+            raise ValueError(
+                "implementation_error_policy_input_reason: "
+                + json.dumps(
+                    {
+                        "factor": factor,
+                        "policyId": policy_id,
+                        "date": pd.Timestamp(date).date().isoformat(),
+                        "reasons": list(reason_codes),
+                        "unknownReasons": unknown,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        if pd.Timestamp(date) in evaluation_dates:
+            failures.append(
+                {
+                    "policyId": policy_id,
+                    "date": pd.Timestamp(date).date().isoformat(),
+                    "reasons": list(reason_codes),
+                }
+            )
+    return failures
+
+
+def _validated_current_unavailable_reasons(
+    reasons: object,
+    *,
+    factor: str,
+    policy_id: str,
+    date: pd.Timestamp,
+) -> list[str]:
+    reason_codes = _normalized_reason_codes(reasons)
+    unknown = sorted(set(reason_codes).difference(_DATA_SHORTAGE_POLICY_REASONS))
+    if not reason_codes or unknown:
+        raise ValueError(
+            "implementation_error_current_policy_input_reason: "
+            + json.dumps(
+                {
+                    "factor": factor,
+                    "policyId": policy_id,
+                    "date": date.date().isoformat(),
+                    "reasons": list(reason_codes),
+                    "unknownReasons": unknown,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    return list(reason_codes)
+
+
+def _raw_factor_metrics(
+    policy_id: str,
+    backtests: dict[str, BacktestResult],
+    definitions: pd.DataFrame,
+    config: RunConfig,
+    evaluation_index: pd.DatetimeIndex,
+    *,
+    portfolios: dict[str, ModelPortfolio] | None = None,
+    policy_grid_reasons: dict[str, dict[str, object] | None] | None = None,
+    factor_input_issues: Mapping[str, Mapping[str, object]] | None = None,
+) -> pd.DataFrame:
+    category = definitions.set_index("factor")["category"].to_dict()
+    selection_eligible = definitions.set_index("factor")["selection_eligible"].to_dict()
+    alias_of = definitions.set_index("factor")["compatibility_alias_of"].to_dict()
     rows: list[dict[str, object]] = []
-    if frame.empty:
-        return frame, pd.DataFrame(rows)
-    if not config.recommendation_market_cap_lookup:
-        frame["market_cap_source"] = "disabled"
-        return frame, pd.DataFrame(
-            [
-                {
-                    "source": "yfinance-fast-info-market-cap",
-                    "status": "disabled",
-                    "records": 0,
-                    "requested_symbols": ",".join(frame["symbol"].astype(str)),
-                    "note": "Recommendation market-cap lookup disabled by configuration; ADV proxy is used.",
-                }
-            ]
+    for factor, backtest in backtests.items():
+        raw_alias = alias_of.get(factor)
+        alias = str(raw_alias).strip() if pd.notna(raw_alias) and str(raw_alias).strip() else None
+        distinct = bool(selection_eligible.get(factor, True)) and alias is None
+        portfolio = portfolios[factor] if portfolios is not None else None
+        current_available = portfolio is None or portfolio.status == "available"
+        current_holding_count = (
+            portfolio.allocation.selected_security_count if portfolio is not None else float("nan")
         )
-    if market_data.offline_sample:
-        frame["market_cap_source"] = "unavailable_offline_sample"
-        return frame, pd.DataFrame(
-            [
-                {
-                    "source": "yfinance-fast-info-market-cap",
-                    "status": "skipped_offline_sample",
-                    "records": 0,
-                    "requested_symbols": ",".join(frame["symbol"].astype(str)),
-                    "note": "Offline/sample mode does not fetch live market cap; ADV proxy is used.",
-                }
-            ]
+        current_cash_weight = portfolio.cash_weight if portfolio is not None else float("nan")
+        current_concentration = portfolio.allocation.concentration if portfolio is not None else {}
+        current_target_effective_names = current_concentration.get("effectiveNames", float("nan"))
+        current_target_hhi = current_concentration.get("riskySleeveHhi", float("nan"))
+        current_target_max_weight = current_concentration.get("maxWeight", float("nan"))
+        current_input_reasons: list[str] = []
+        if portfolio is not None and not current_available:
+            current_input_reasons = _validated_current_unavailable_reasons(
+                portfolio.reasons,
+                factor=factor,
+                policy_id=policy_id,
+                date=portfolio.as_of,
+            )
+        policy_input_failures = _validated_policy_input_failures(
+            backtest,
+            evaluation_index,
+            factor=factor,
+            policy_id=policy_id,
         )
-    if str(market_data.provider).startswith("test-"):
-        frame["market_cap_source"] = "unavailable_test_provider"
-        return frame, pd.DataFrame(
-            [
-                {
-                    "source": "yfinance-fast-info-market-cap",
-                    "status": "skipped_test_provider",
-                    "records": 0,
-                    "requested_symbols": ",".join(frame["symbol"].astype(str)),
-                    "note": "Test provider fixture skips live market-cap lookup; ADV proxy is used.",
-                }
-            ]
+        grid_reason = policy_grid_reasons.get(factor) if policy_grid_reasons is not None else None
+        factor_input_issue = (
+            dict(factor_input_issues[factor])
+            if factor_input_issues is not None and factor in factor_input_issues
+            else None
         )
-
-    for symbol in frame["symbol"].map(normalize_symbol):
-        market_cap, cache_path = _cached_market_cap(config, symbol)
-        status = "cache_hit" if market_cap is not None else "unavailable"
-        error = None
-        if market_cap is None:
-            market_cap = _lookup_yfinance_market_cap(symbol)
-            if market_cap is not None:
-                cache_path = _write_market_cap_cache(config, symbol, market_cap)
-                status = "fetched"
-            else:
-                error = "market cap unavailable from yfinance fast_info/info"
-        mask = frame["symbol"].map(normalize_symbol).eq(symbol)
-        market_cap_source = "yfinance_fast_info" if market_cap is not None else "unavailable"
-        if market_cap is not None:
-            frame.loc[mask, "market_cap"] = market_cap
-            frame.loc[mask, "market_cap_source"] = market_cap_source
+        comparison_eligible = (
+            distinct and current_available and grid_reason is None and factor_input_issue is None
+        )
+        if alias:
+            ineligible_status = "duplicate_alias"
+            comparison_reason = f"duplicate_alias_of:{alias}"
+        elif factor_input_issue is not None:
+            ineligible_status = "factor_input_unavailable"
+            comparison_reason = factor_input_issue
+        elif grid_reason is not None:
+            ineligible_status = "policy_rebalance_grid_mismatch"
+            comparison_reason = grid_reason
+        elif not current_available:
+            ineligible_status = "current_portfolio_unavailable"
+            comparison_reason = {
+                "policyId": policy_id,
+                "date": portfolio.as_of.date().isoformat() if portfolio is not None else None,
+                "reasons": current_input_reasons,
+            }
+        else:
+            ineligible_status = None
+            comparison_reason = None
+        summary = evaluation_metrics(
+            backtest.returns,
+            backtest.turnover,
+            backtest.costs,
+            window_days=config.evaluation_window_days,
+            stability_periods=config.stability_periods,
+            risk_free_rate=config.annual_cash_return,
+            gross_exposure=backtest.gross_exposure,
+            strategy_active=backtest.strategy_active,
+            valuation_available=backtest.valuation_available,
+            stale_holding_counts=backtest.stale_holding_counts,
+            stale_holding_weights=backtest.stale_holding_weights,
+            execution_statuses=backtest.execution_statuses,
+            unpriceable_target_counts=backtest.unpriceable_target_counts,
+            policy_input_statuses=backtest.policy_input_statuses,
+            policy_input_reasons=backtest.policy_input_reasons,
+            return_interval_sessions=backtest.return_interval_sessions,
+            target_cash_weights=backtest.target_cash_weights,
+            target_hhi=backtest.target_hhi,
+            target_effective_names=backtest.target_effective_names,
+            target_top1_weights=backtest.target_top1_weights,
+            target_top5_weights=backtest.target_top5_weights,
+            target_max_weights=backtest.target_max_weights,
+            evaluation_index=evaluation_index,
+        )
+        diagnostics = backtest.contribution_diagnostics
+        observed_event = diagnostics.max_observed_interval_security_contribution
         rows.append(
             {
-                "source": "yfinance-fast-info-market-cap",
-                "symbol": symbol,
-                "status": status,
-                "records": int(market_cap is not None),
-                "requested_symbols": symbol,
-                "returned_symbols": symbol if market_cap is not None else "",
-                "missing_symbols": "" if market_cap is not None else symbol,
-                "cache_hit": status == "cache_hit",
-                "cache_path": cache_path,
-                "error": error,
-                "note": "Best-effort current market cap for recommendation weighting; non-blocking.",
+                "policy_id": policy_id,
+                "factor": factor,
+                "category": category.get(factor, "other"),
+                "comparison_eligible": comparison_eligible,
+                "comparison_ineligible_status": ineligible_status,
+                "comparison_reason": comparison_reason,
+                "current_portfolio_available": current_available,
+                "current_holding_count": current_holding_count,
+                "current_cash_weight": current_cash_weight,
+                "current_target_effective_names": current_target_effective_names,
+                "current_target_hhi": current_target_hhi,
+                "current_target_max_weight": current_target_max_weight,
+                "current_portfolio_input_reasons": current_input_reasons,
+                "policy_input_failures": policy_input_failures,
+                "contribution_diagnostics_complete": diagnostics.complete,
+                "contribution_diagnostics_reason": diagnostics.reason,
+                "contribution_attribution_method": diagnostics.attribution_method,
+                "contribution_attribution_version": diagnostics.attribution_version,
+                "max_abs_security_day_contribution": (
+                    diagnostics.max_abs_security_day_contribution
+                ),
+                "max_abs_security_observation_contribution": (
+                    observed_event.absolute_contribution if observed_event is not None else 0.0
+                ),
+                "max_security_absolute_contribution_share": (
+                    diagnostics.max_security_absolute_contribution_share
+                ),
+                "absolute_contribution_hhi": diagnostics.absolute_contribution_hhi,
+                "max_abs_leave_one_security_cagr_delta": (
+                    diagnostics.max_leave_one_security_cagr_delta
+                ),
+                "attribution_max_residual": diagnostics.attribution_max_residual,
+                **summary,
             }
         )
-        if market_cap is None:
-            finviz_market_cap, finviz_cache_path = _cached_market_cap(config, symbol, "finviz_snapshot")
-            finviz_status = "cache_hit" if finviz_market_cap is not None else "unavailable"
-            finviz_error = None
-            if finviz_market_cap is None:
-                finviz_market_cap = _lookup_finviz_market_cap(symbol)
-                if finviz_market_cap is not None:
-                    finviz_cache_path = _write_market_cap_cache(
-                        config,
-                        symbol,
-                        finviz_market_cap,
-                        "finviz_snapshot",
-                    )
-                    finviz_status = "fetched"
-                else:
-                    finviz_error = "market cap unavailable from Finviz snapshot"
-            if finviz_market_cap is not None:
-                frame.loc[mask, "market_cap"] = finviz_market_cap
-                frame.loc[mask, "market_cap_source"] = "finviz_snapshot"
-            rows.append(
-                {
-                    "source": FINVIZ_MARKET_CAP_SOURCE,
-                    "symbol": symbol,
-                    "status": finviz_status,
-                    "records": int(finviz_market_cap is not None),
-                    "requested_symbols": symbol,
-                    "returned_symbols": symbol if finviz_market_cap is not None else "",
-                    "missing_symbols": "" if finviz_market_cap is not None else symbol,
-                    "cache_hit": finviz_status == "cache_hit",
-                    "cache_path": finviz_cache_path,
-                    "error": finviz_error,
-                    "note": "Optional Finviz snapshot market cap for recommendation weighting only; non-blocking and not used as price history.",
-                }
-            )
-    return frame, pd.DataFrame(rows)
+    return pd.DataFrame(rows)
 
 
-def _attach_recommendation_liquidity_diagnostics(
-    recommendations: pd.DataFrame,
-    market_data: MarketData,
-    config: RunConfig,
-) -> pd.DataFrame:
-    frame = recommendations.copy()
-    prices = market_data.prices.reindex(columns=frame["symbol"]).tail(63)
-    volumes = market_data.volumes.reindex(index=prices.index, columns=frame["symbol"]).tail(63)
-    dollar_volume = prices.mul(volumes)
-    avg_share_volume = volumes.mean()
-    avg_dollar_volume = dollar_volume.mean()
+def _policy_grid_reasons(
+    all_backtests: dict[str, dict[str, BacktestResult]],
+    evaluation_index: pd.DatetimeIndex,
+    expected_factors: Collection[str],
+) -> dict[str, dict[str, object] | None]:
+    """Require identical successful rebalance dates across all four policies."""
 
-    frame["avg_share_volume_63d"] = frame["symbol"].map(avg_share_volume).astype(float)
-    frame["avg_dollar_volume_63d"] = frame["symbol"].map(avg_dollar_volume).astype(float)
-    frame["price_observations_63d"] = frame["symbol"].map(prices.count()).fillna(0).astype(int)
-    frame["volume_observations_63d"] = frame["symbol"].map(volumes.count()).fillna(0).astype(int)
-    frame["dollar_volume_observations_63d"] = frame["symbol"].map(dollar_volume.count()).fillna(0).astype(int)
-    frame["min_liquidity_observations_required"] = int(config.min_liquidity_observations)
-    frame["min_avg_volume_required"] = float(config.min_avg_volume)
-    frame["min_avg_dollar_volume_required"] = float(config.min_avg_dollar_volume)
-    frame["liquidity_evidence_status"] = frame.apply(_recommendation_liquidity_status, axis=1, config=config)
-    frame["liquidity_filter_pass"] = frame["liquidity_evidence_status"].eq("pass")
-    frame["proposed_weight"] = frame["weight"].astype(float)
-    frame["target_aum"] = float(config.target_aum) if config.target_aum is not None else np.nan
-    frame["max_adv_participation"] = float(config.max_adv_participation) if config.max_adv_participation is not None else np.nan
-    frame["target_notional"] = frame["weight"] * config.target_aum if config.target_aum is not None else np.nan
-    frame["max_trade_notional_by_adv"] = (
-        frame["avg_dollar_volume_63d"] * config.max_adv_participation if config.max_adv_participation is not None else np.nan
+    factors = {str(factor) for factor in expected_factors}
+    missing_pairs = sorted(
+        (factor, policy)
+        for factor in factors
+        for policy in WEIGHTING_POLICIES
+        if factor not in all_backtests.get(policy, {})
     )
-    frame["capacity_notional_limit"] = frame["max_trade_notional_by_adv"]
-    frame["capacity_aum_limit"] = frame["capacity_notional_limit"].divide(frame["proposed_weight"].replace(0, np.nan))
-    frame["adv_participation"] = frame["target_notional"].divide(frame["avg_dollar_volume_63d"].replace(0, np.nan))
-    frame["capacity_utilization"] = frame["target_notional"].divide(frame["max_trade_notional_by_adv"].replace(0, np.nan))
-    frame["capacity_status"] = frame.apply(_recommendation_capacity_status, axis=1, config=config)
-    frame["capacity_pass"] = frame["capacity_status"].eq("pass")
-    frame["capacity_warning"] = frame.apply(_recommendation_capacity_warning, axis=1)
-    return frame
-
-
-def _apply_current_recommendation_weighting(recommendations: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
-    frame = recommendations.copy()
-    if config.recommendation_weighting_method == "score_size_liquidity":
-        return evidence_weighted_recommendation_table(
-            frame,
-            max_weight=config.max_weight,
-            score_weight=config.recommendation_score_weight,
-            market_cap_weight=config.recommendation_market_cap_weight,
-            liquidity_weight=config.recommendation_liquidity_weight,
-            rank_floor=config.recommendation_rank_floor,
-            method=config.recommendation_weighting_method,
-        )
-
-    frame["weighting_method"] = "equal"
-    total = float(frame["weight"].sum()) if "weight" in frame else 0.0
-    frame["raw_weight_score"] = 1.0
-    frame["pre_cap_weight"] = frame["weight"] / total if total > 0 else 0.0
-    frame["weight_cap"] = float(config.max_weight)
-    frame["weight_cap_excess"] = 0.0
-    for column in WEIGHTING_DIAGNOSTIC_COLUMNS:
-        if column not in frame:
-            frame[column] = np.nan if not column.endswith("source") else "not_used_equal_weight"
-    return frame
-
-
-def _row_level_liquidity_pass(recommendations: pd.DataFrame) -> bool:
-    return bool(not recommendations.empty and recommendations["liquidity_filter_pass"].astype(bool).all())
-
-
-def _row_level_capacity_pass(recommendations: pd.DataFrame) -> bool:
-    return bool(not recommendations.empty and recommendations["capacity_status"].eq("pass").all())
-
-
-RESEARCH_ONLY_ZERO_COLUMNS = (
-    "weight",
-    "proposed_weight",
-    "target_notional",
-    "adv_participation",
-    "capacity_utilization",
-    "capacity_aum_limit",
-)
-
-
-def _sanitize_research_signal_rows(recommendations: pd.DataFrame, *, reason: str) -> pd.DataFrame:
-    """Remove tradable sizing cues from fail-closed research-only rows.
-
-    Keep model-diagnostic sizing fields such as ``pre_cap_weight`` and
-    ``raw_weight_score``.  They explain the ranking economics before the
-    tradability gate, while ``weight``/notional fields remain zero so a
-    research-only row cannot be mistaken for a trade instruction.
-    """
-
-    frame = recommendations.copy()
-    for column in RESEARCH_ONLY_ZERO_COLUMNS:
-        if column in frame:
-            frame[column] = 0.0
-    if "capacity_pass" in frame:
-        frame["capacity_pass"] = False
-    if "capacity_status" in frame:
-        pass_mask = frame["capacity_status"].eq("pass")
-        frame.loc[pass_mask, "capacity_status"] = "research_only_gate_failed"
-    if "capacity_warning" in frame:
-        research_only_warning = (
-            "연구용 fail-closed 출력입니다. 종목/점수는 참고용이며 매매 권고 비중으로 사용하지 않습니다. "
-            f"미충족 요건: {reason or 'research_only_gate_failed'}"
-        )
-        if "capacity_status" in frame:
-            warning_mask = frame["capacity_status"].eq("research_only_gate_failed")
-            frame.loc[warning_mask, "capacity_warning"] = research_only_warning
+    if missing_pairs:
+        rendered = ", ".join(f"{factor}@{policy}" for factor, policy in missing_pairs)
+        raise ValueError("implementation_error_missing_factor_policy_pairs: " + rendered)
+    reasons: dict[str, dict[str, object] | None] = {}
+    for factor in factors:
+        available_dates: dict[str, tuple[str, ...]] = {}
+        scheduled_counts: dict[str, int] = {}
+        policy_failures: list[dict[str, object]] = []
+        for policy in WEIGHTING_POLICIES:
+            backtest = all_backtests[policy][factor]
+            policy_failures.extend(
+                _validated_policy_input_failures(
+                    backtest,
+                    evaluation_index,
+                    factor=factor,
+                    policy_id=policy,
+                )
+            )
+            statuses = (
+                backtest.policy_input_statuses.reindex(evaluation_index)
+                .fillna("not_scheduled")
+                .astype(str)
+            )
+            available_dates[policy] = tuple(
+                date.date().isoformat() for date in statuses.index[statuses.eq("available")]
+            )
+            scheduled_counts[policy] = int(statuses.ne("not_scheduled").sum())
+        distinct_grids = set(available_dates.values())
+        if all(not dates for dates in available_dates.values()):
+            reasons[factor] = {
+                "detail": "no_available_policy_rebalance_in_evaluation_window",
+                "policyFailures": policy_failures,
+                "availableDateCounts": {
+                    policy: len(available_dates[policy]) for policy in WEIGHTING_POLICIES
+                },
+                "scheduledDateCounts": scheduled_counts,
+            }
+        elif len(distinct_grids) != 1:
+            reasons[factor] = {
+                "detail": "successful_rebalance_dates_differ",
+                "policyFailures": policy_failures,
+                "availableDateCounts": {
+                    policy: len(available_dates[policy]) for policy in WEIGHTING_POLICIES
+                },
+                "scheduledDateCounts": scheduled_counts,
+            }
         else:
-            frame["capacity_warning"] = research_only_warning
-    frame["tradable_weight_enabled"] = False
-    frame["research_only_reason"] = reason or "research_only_gate_failed"
-    return frame
+            reasons[factor] = None
+    return reasons
 
 
-def _apply_tradability_gate(
+def _score_factor_metrics(raw: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
+    return composite_factor_scorecard(
+        raw,
+        weights=config.score_weights,
+        winsor_lower=config.score_winsor_lower,
+        winsor_upper=config.score_winsor_upper,
+        min_observations=config.min_evaluation_observations,
+        min_valuation_coverage=config.min_valuation_coverage,
+        min_daily_risk_observations=config.min_daily_risk_observations,
+    )
+
+
+def _structured_exclusion_reasons(row: pd.Series, config: RunConfig) -> list[dict[str, object]]:
+    status = str(row.get("comparison_status") or "")
+    if status == "available":
+        return []
+    reason = row.get("comparison_reason")
+    if status == "duplicate_alias":
+        return [{"code": "duplicate_alias", "detail": str(reason)}]
+    if status == "factor_input_unavailable":
+        if not isinstance(reason, Mapping):
+            raise ValueError("implementation_error_invalid_factor_input_exclusion")
+        return [{"code": "factor_input_unavailable", **dict(reason)}]
+    if status == "policy_rebalance_grid_mismatch":
+        if not isinstance(reason, Mapping):
+            raise ValueError("implementation_error_invalid_policy_grid_exclusion")
+        return [{"code": "policy_rebalance_grid_mismatch", **dict(reason)}]
+    if status == "current_portfolio_unavailable":
+        if not isinstance(reason, Mapping):
+            raise ValueError("implementation_error_invalid_current_target_exclusion")
+        return [{"code": "current_portfolio_unavailable", **dict(reason)}]
+    if status == "insufficient_history":
+        if not bool(row.get("ending_nav_available", False)):
+            return [
+                {
+                    "code": "terminal_nav_unavailable",
+                    "metric": "ending_nav_available",
+                    "observed": False,
+                    "detail": "final valuation interval contains an unpriced held sleeve",
+                }
+            ]
+        observations = float(row.get("observations", 0.0))
+        if observations < config.min_evaluation_observations:
+            return [
+                {
+                    "code": "insufficient_observations",
+                    "metric": "observations",
+                    "observed": observations,
+                    "required": config.min_evaluation_observations,
+                }
+            ]
+        if not bool(row.get("risk_metrics_complete", False)):
+            return [{"code": "incomplete_risk_metrics", "metric": "risk_metrics_complete"}]
+    if status == "insufficient_valuation_or_daily_risk_coverage":
+        return [
+            {
+                "code": status,
+                "valuationCoverage": float(row.get("valuation_coverage_ratio", 0.0)),
+                "minimumValuationCoverage": config.min_valuation_coverage,
+                "dailyRiskObservations": float(row.get("daily_risk_observations", 0.0)),
+                "minimumDailyRiskObservations": config.min_daily_risk_observations,
+            }
+        ]
+    if status == "insufficient_policy_input_coverage":
+        return [
+            {
+                "code": status,
+                "coverage": float(row.get("policy_input_coverage_ratio", 0.0)),
+                "reasonCounts": dict(row.get("policy_input_reason_counts") or {}),
+                "policyFailures": list(row.get("policy_input_failures") or []),
+            }
+        ]
+    if status == "incomplete_execution_coverage":
+        return [
+            {
+                "code": status,
+                "coverage": float(row.get("execution_coverage_ratio", 0.0)),
+                "blockedExecutions": float(row.get("blocked_execution_count", 0.0)),
+                "unpriceableTargets": float(row.get("total_unpriceable_target_count", 0.0)),
+            }
+        ]
+    raise ValueError(
+        "implementation_error_unexplained_factor_policy_exclusion: "
+        f"{row.get('factor')}@{row.get('policy_id')} status={status!r} reason={reason!r}"
+    )
+
+
+def _with_exclusion_accounting(scored: pd.DataFrame, config: RunConfig) -> pd.DataFrame:
+    result = scored.copy()
+    reasons = [_structured_exclusion_reasons(row, config) for _, row in result.iterrows()]
+    result["exclusion_reasons"] = reasons
+    result["exclusion_reason_codes"] = [
+        [str(item["code"]) for item in row_reasons] for row_reasons in reasons
+    ]
+    return result
+
+
+def _ratio_severity(observed: float, threshold: float) -> float:
+    if observed <= threshold:
+        return 0.0
+    if threshold <= 0.0:
+        return 1.0
+    return min(1.0, max(0.0, observed / threshold - 1.0))
+
+
+def _absolute_guardrail_profile(config: RunConfig) -> dict[str, Any]:
+    return {
+        "id": ABSOLUTE_GUARDRAIL_VERSION,
+        "version": 1,
+        "policyNeutral": True,
+        "rules": [
+            {
+                "id": "minimum_sharpe",
+                "metric": "sharpe",
+                "operator": ">=",
+                "threshold": config.selection_min_sharpe,
+                "unit": "ratio",
+            },
+            {
+                "id": "maximum_drawdown_magnitude",
+                "metric": "max_drawdown",
+                "operator": ">=",
+                "threshold": -config.selection_max_drawdown,
+                "unit": "fraction",
+            },
+            {
+                "id": "maximum_annualized_cost_drag",
+                "metric": "annualized_cost_drag",
+                "operator": "<=",
+                "threshold": config.selection_max_annualized_cost_drag,
+                "unit": "fraction_per_year",
+            },
+            {
+                "id": "minimum_historical_target_effective_names",
+                "metric": "min_target_effective_names",
+                "operator": ">=",
+                "threshold": config.selection_min_effective_names,
+                "unit": "names",
+            },
+            {
+                "id": "minimum_current_target_effective_names",
+                "metric": "current_target_effective_names",
+                "operator": ">=",
+                "threshold": config.selection_min_effective_names,
+                "unit": "names",
+            },
+            {
+                "id": "maximum_historical_target_hhi",
+                "metric": "max_target_hhi",
+                "operator": "<=",
+                "threshold": config.selection_max_target_hhi,
+                "unit": "fraction",
+            },
+            {
+                "id": "maximum_current_target_hhi",
+                "metric": "current_target_hhi",
+                "operator": "<=",
+                "threshold": config.selection_max_target_hhi,
+                "unit": "fraction",
+            },
+            {
+                "id": "maximum_historical_target_weight",
+                "metric": "max_target_weight",
+                "operator": "<=",
+                "threshold": config.selection_max_target_weight,
+                "unit": "fraction",
+            },
+            {
+                "id": "maximum_current_target_weight",
+                "metric": "current_target_max_weight",
+                "operator": "<=",
+                "threshold": config.selection_max_target_weight,
+                "unit": "fraction",
+            },
+            {
+                "id": "maximum_security_day_contribution",
+                "metric": "max_abs_security_day_contribution",
+                "operator": "<=",
+                "threshold": config.selection_max_abs_security_day_contribution,
+                "unit": "portfolio_return_fraction",
+            },
+            {
+                "id": "maximum_security_absolute_contribution_share",
+                "metric": "max_security_absolute_contribution_share",
+                "operator": "<=",
+                "threshold": config.selection_max_security_absolute_contribution_share,
+                "unit": "fraction",
+            },
+            {
+                "id": "maximum_leave_one_security_cagr_delta",
+                "metric": "max_abs_leave_one_security_cagr_delta",
+                "operator": "<=",
+                "threshold": config.selection_max_leave_one_security_cagr_delta,
+                "unit": "cagr_fraction",
+            },
+        ],
+        "requiredContracts": {
+            "completePolicyInputs": True,
+            "completeExecutionCoverage": True,
+            "currentTargetAvailable": True,
+            "contributionDiagnosticsComplete": True,
+        },
+        "extremeEventAction": config.selection_extreme_event_action,
+        "extremeEventPenaltyPoints": config.selection_extreme_event_penalty_points,
+    }
+
+
+def _apply_joint_guardrails(
+    scored: pd.DataFrame,
     config: RunConfig,
-    market_data: MarketData,
-    recommendations: pd.DataFrame,
-    status: str,
-    current_available: bool,
-    subset_run: bool,
-    selection_source: str,
-    same_sample_blocked: bool,
-    selection_policy_frozen_for_live: bool,
-) -> TradabilityAssessment:
-    requirements = {
-        "fresh_live_data": current_available,
-        "factor_selection_policy_available": (
-            selection_source == "predeclared" and selection_policy_frozen_for_live
-        ),
-        "no_same_sample_factor_selection": not same_sample_blocked,
-        "no_explicit_price_symbol_cap": _has_no_explicit_price_symbol_cap(config, subset_run),
-        "complete_requested_price_coverage": _has_complete_requested_price_coverage(market_data),
-        "broad_or_approved_tradable_universe": _has_broad_or_approved_tradable_universe(config, market_data),
-        "point_in_time_universe": _has_point_in_time_universe(market_data),
-        "data_quality_manifest_available": _data_quality_manifest_available(market_data),
-        "row_level_data_quality_pass": _row_level_data_quality_pass(recommendations),
-        "liquidity_filter_evidence": _has_liquidity_evidence(config, market_data),
-        "row_level_liquidity_pass": _row_level_liquidity_pass(recommendations),
-        "capacity_estimated_and_pass": _row_level_capacity_pass(recommendations),
-    }
-    limitations = [name for name, satisfied in requirements.items() if not satisfied]
-    recommendation_available = bool(not recommendations.empty) and all(requirements.values())
-    if current_available and limitations:
-        status = f"{status}_with_limitations_{'_and_'.join(limitations)}"
-    output_key = "recommendations" if recommendation_available else "research_signals"
-    output_label = (
-        "Practical recommendations"
-        if recommendation_available
-        else (
-            "Research signals (not tradable)"
-            if current_available
-            else "Reference research signals (not current)"
-        )
+) -> tuple[pd.DataFrame, str, str, str, dict[str, Any]]:
+    result = scored.copy()
+    result["base_composite_score"] = pd.to_numeric(result["composite_score"], errors="coerce")
+    result["guardrail_sharpe"] = pd.to_numeric(result["sharpe"], errors="coerce").ge(
+        config.selection_min_sharpe
     )
-    return TradabilityAssessment(
-        status=status,
-        fresh_live_data_available=current_available,
-        recommendation_output_available=recommendation_available,
-        requirements=requirements,
-        limitations=limitations,
-        output_key=output_key,
-        output_label=output_label,
-        output_sheet=output_key,
+    result["guardrail_drawdown"] = pd.to_numeric(result["max_drawdown"], errors="coerce").ge(
+        -config.selection_max_drawdown
+    )
+    result["guardrail_cost"] = pd.to_numeric(result["annualized_cost_drag"], errors="coerce").le(
+        config.selection_max_annualized_cost_drag
+    )
+    result["guardrail_historical_effective_names"] = pd.to_numeric(
+        result["min_target_effective_names"], errors="coerce"
+    ).ge(config.selection_min_effective_names)
+    result["guardrail_current_effective_names"] = pd.to_numeric(
+        result["current_target_effective_names"], errors="coerce"
+    ).ge(config.selection_min_effective_names)
+    result["guardrail_historical_target_hhi"] = pd.to_numeric(
+        result["max_target_hhi"], errors="coerce"
+    ).le(config.selection_max_target_hhi)
+    result["guardrail_current_target_hhi"] = pd.to_numeric(
+        result["current_target_hhi"], errors="coerce"
+    ).le(config.selection_max_target_hhi)
+    result["guardrail_historical_target_weight"] = pd.to_numeric(
+        result["max_target_weight"], errors="coerce"
+    ).le(config.selection_max_target_weight)
+    result["guardrail_current_target_weight"] = pd.to_numeric(
+        result["current_target_max_weight"], errors="coerce"
+    ).le(config.selection_max_target_weight)
+    result["guardrail_policy_input"] = pd.to_numeric(
+        result["policy_input_coverage_ratio"], errors="coerce"
+    ).ge(1.0 - 1e-12)
+    result["guardrail_execution"] = (
+        pd.to_numeric(result["execution_coverage_ratio"], errors="coerce").ge(1.0 - 1e-12)
+        & pd.to_numeric(result["blocked_execution_count"], errors="coerce").le(0.0)
+        & pd.to_numeric(result["total_unpriceable_target_count"], errors="coerce").le(0.0)
+    )
+    result["guardrail_current_target"] = (
+        result["current_portfolio_available"].fillna(False).astype(bool)
+    )
+    result["guardrail_contribution_complete"] = (
+        result["contribution_diagnostics_complete"].fillna(False).astype(bool)
+    )
+    result["guardrail_security_day_contribution"] = pd.to_numeric(
+        result["max_abs_security_day_contribution"], errors="coerce"
+    ).le(config.selection_max_abs_security_day_contribution)
+    result["guardrail_security_absolute_contribution_share"] = pd.to_numeric(
+        result["max_security_absolute_contribution_share"], errors="coerce"
+    ).le(config.selection_max_security_absolute_contribution_share)
+    result["guardrail_leave_one_security"] = pd.to_numeric(
+        result["max_abs_leave_one_security_cagr_delta"], errors="coerce"
+    ).le(config.selection_max_leave_one_security_cagr_delta)
+
+    standard_guardrails = [
+        "guardrail_sharpe",
+        "guardrail_drawdown",
+        "guardrail_cost",
+        "guardrail_historical_effective_names",
+        "guardrail_current_effective_names",
+        "guardrail_historical_target_hhi",
+        "guardrail_current_target_hhi",
+        "guardrail_historical_target_weight",
+        "guardrail_current_target_weight",
+        "guardrail_policy_input",
+        "guardrail_execution",
+        "guardrail_current_target",
+        "guardrail_contribution_complete",
+    ]
+    contribution_guardrails = [
+        "guardrail_security_day_contribution",
+        "guardrail_security_absolute_contribution_share",
+        "guardrail_leave_one_security",
+    ]
+    metric_available = result["comparison_status"].eq("available")
+    result["standard_guardrail_pass"] = result[standard_guardrails].all(axis=1)
+    result["contribution_guardrail_pass"] = result[contribution_guardrails].all(axis=1)
+    result["absolute_guardrail_pass"] = (
+        result["standard_guardrail_pass"] & result["contribution_guardrail_pass"]
     )
 
-
-def run_analysis(config: RunConfig) -> RunResult:
-    config.validate()
-    market_data = load_market_data(config)
-    data_quality = _ensure_data_quality_frame(config, market_data)
-    prices = market_data.prices.dropna(axis=1, how="all")
-    analysis_prices = _analysis_prices(market_data, config)
-    if analysis_prices.empty:
-        raise ValueError("no stock-only analysis price symbols available after universe and eligibility filters")
-    factor_scores = compute_factor_scores(analysis_prices)
-    factor_validation = validate_factor_library(analysis_prices)
-    factor_definitions = factor_definitions_frame()
-    factor_rank_ic = _factor_rank_ic_summary(factor_scores, analysis_prices)
-    factor_redundancy = _factor_redundancy_summary(factor_scores)
-    factor_category_summary = _factor_category_summary(factor_definitions, factor_rank_ic, factor_redundancy)
-    eligibility_mask = build_eligibility_mask(
-        analysis_prices,
-        market_data.volumes.reindex(index=analysis_prices.index, columns=analysis_prices.columns),
-        config,
-    )
-    backtests = {
-        name: run_factor_backtest(analysis_prices, scores, config, name, eligibility_mask=eligibility_mask)
-        for name, scores in factor_scores.items()
-    }
-    metrics, robustness = _metrics_for_backtests(backtests)
-    cost_stress = _cost_stress_grid(backtests, config)
-    benchmark_relative = _benchmark_relative_metrics(backtests, prices, config)
-    score_components = _score_factors(metrics)
-    validation_selected_factor = str(score_components.index[0])
-    selection_history = _walk_forward_selection_history(backtests, config) if config.effective_factor_selection_mode == "walk_forward" else pd.DataFrame()
-    frozen_policy = _load_frozen_factor_policy(config)
-    selection_policy_frozen_for_live = bool(frozen_policy.get("available")) and config.effective_factor_selection_mode == "predeclared"
-    selected_factor, selection_source, selected_reason, same_sample_blocked = _resolve_selected_factor(
-        config,
-        factor_scores,
-        validation_selected_factor,
-        selection_history,
-    )
-    selected_metrics = metrics.loc[selected_factor]
-    latest_signal_date = analysis_prices.index.max()
-    latest_scores = factor_scores[selected_factor].loc[latest_signal_date]
-    if latest_signal_date in eligibility_mask.index:
-        latest_scores = latest_scores.where(eligibility_mask.loc[latest_signal_date])
-    latest_scores = latest_scores.dropna()
-    weights = balanced_weights(latest_scores, config.top_n, config.max_weight)
-    recommendations = recommendation_table(latest_scores, weights, top_n=config.top_n)
-    recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
-    recommendations, market_cap_sources = _attach_recommendation_market_caps(recommendations, config, market_data)
-    if not market_cap_sources.empty:
-        market_data.data_sources = pd.concat([market_data.data_sources, market_cap_sources], ignore_index=True)
-    recommendations = _apply_current_recommendation_weighting(recommendations, config)
-    recommendations = _attach_recommendation_liquidity_diagnostics(recommendations, market_data, config)
-    recommendations = _attach_recommendation_data_quality(recommendations, market_data)
-    status, fresh_live_data_available = _recommendation_status(config, market_data)
-    subset_run, requested_price_symbols, candidate_symbols = _live_subset_summary(market_data)
-    if subset_run and not market_data.offline_sample:
-        requested = requested_price_symbols if requested_price_symbols is not None else len(prices.columns)
-        candidates = candidate_symbols if candidate_symbols is not None else len(market_data.candidate_universe)
-        status = f"{status}_subset_run_{requested}_of_{candidates}"
-    tradability_assessment = _apply_tradability_gate(
-        config,
-        market_data,
-        recommendations,
-        status,
-        fresh_live_data_available,
-        subset_run,
-        selection_source,
-        same_sample_blocked,
-        selection_policy_frozen_for_live,
-    )
-    status = tradability_assessment.status
-    if not tradability_assessment.recommendation_output_available:
-        recommendations = _sanitize_research_signal_rows(
-            recommendations,
-            reason="; ".join(tradability_assessment.limitations),
-        )
-    recommendations["recommendation_status"] = status
-    recommendations["recommendation_output"] = tradability_assessment.output_key
-    recommendations["signal_date"] = str(analysis_prices.index.max().date()) if not analysis_prices.empty else "unavailable"
-    recommendations["selected_factor"] = selected_factor
-    recommendations["selected_factor_selection_source"] = selection_source
-
-    sensitivity = _parameter_sensitivity(
-        analysis_prices,
-        selected_factor,
-        config,
-        factor_scores[selected_factor],
-        eligibility_mask=eligibility_mask,
-    )
-    factor_parameter_variants = 0
-    if not sensitivity.empty and {"variant_type", "variant"}.issubset(sensitivity.columns):
-        factor_parameter_variants = int(
-            sensitivity["variant_type"].eq("factor_parameter").sum()
-            - sensitivity["variant"].eq("base").sum()
-        )
-    sensitivity_coverage = (
-        "factor_parameter_and_portfolio_variants"
-        if factor_parameter_variants > 0
-        else "base_factor_plus_portfolio_variants_only"
-    )
-    metadata = {
-        "run_timestamp_utc": datetime.now(UTC).isoformat(),
-        "provider": market_data.provider,
-        "offline_sample": market_data.offline_sample,
-        "live_error": market_data.live_error,
-        "data_as_of": str(market_data.as_of.date()) if market_data.as_of is not None else None,
-        "recommendation_status": status,
-        **tradability_assessment.to_metadata(),
-        "selected_factor": selected_factor,
-        "validation_selected_factor": validation_selected_factor,
-        "factor_selection_mode": config.effective_factor_selection_mode,
-        "selected_factor_selection_source": selection_source,
-        "selected_factor_selection_window": config.selection_window,
-        "selection_window": config.selection_window,
-        "frozen_policy_path": str(config.frozen_policy_path) if config.frozen_policy_path else None,
-        "frozen_policy_status": frozen_policy.get("status"),
-        "frozen_policy_id": frozen_policy.get("policy_id"),
-        "frozen_policy_sha256": frozen_policy.get("sha256"),
-        "frozen_policy_created_at_utc": frozen_policy.get("created_at_utc"),
-        "frozen_policy_effective_from": frozen_policy.get("effective_from"),
-        "frozen_policy_checks": frozen_policy.get("checks", {}),
-        "selection_policy_frozen_for_live": selection_policy_frozen_for_live,
-        "same_sample_selection_blocked_for_tradable": same_sample_blocked,
-        "factor_selection_warning": (
-            "Validation-selected factor is a same-run research ranking and is blocked from tradable "
-            "recommendation output; explicitly predeclare a selected factor before the run for practical labels."
-            if selection_source == "research_validation"
-            else (
-                frozen_policy.get("warning")
-                if selection_source == "predeclared" and not selection_policy_frozen_for_live
-                else None
+    guardrail_breaches: list[list[str]] = []
+    contribution_breaches: list[list[str]] = []
+    penalties: list[float] = []
+    for _, row in result.iterrows():
+        standard = [
+            name.removeprefix("guardrail_") for name in standard_guardrails if not bool(row[name])
+        ]
+        contribution = [
+            name.removeprefix("guardrail_")
+            for name in contribution_guardrails
+            if not bool(row[name])
+        ]
+        guardrail_breaches.append([*standard, *contribution])
+        contribution_breaches.append(contribution)
+        if config.selection_extreme_event_action == "penalize" and contribution:
+            severity = max(
+                _ratio_severity(
+                    float(row["max_abs_security_day_contribution"]),
+                    config.selection_max_abs_security_day_contribution,
+                ),
+                _ratio_severity(
+                    float(row["max_security_absolute_contribution_share"]),
+                    config.selection_max_security_absolute_contribution_share,
+                ),
+                _ratio_severity(
+                    float(row["max_abs_leave_one_security_cagr_delta"]),
+                    config.selection_max_leave_one_security_cagr_delta,
+                ),
             )
-        ),
-        "sensitivity_coverage": sensitivity_coverage,
-        "sensitivity_factor_parameter_variant_count": factor_parameter_variants,
-        "selected_factor_description": FACTOR_DESCRIPTIONS.get(selected_factor, selected_factor),
-        "selected_reason": selected_reason,
-        "signal_date": str(analysis_prices.index.max().date()) if not analysis_prices.empty else None,
-        "execution_delay": "one trading day after signal/rebalance schedule",
-        "portfolio_construction": (
-            f"Backtests: long-only top-{config.top_n} factor portfolios at each rebalance, max weight "
-            f"{config.max_weight:.2%}. Current recommendations: {config.recommendation_weighting_method} "
-            "weights using selected-factor score plus market-cap/ADV liquidity evidence."
-        ),
-        "recommendation_weighting_method": config.recommendation_weighting_method,
-        "recommendation_weight_sum": float(recommendations["weight"].sum()) if "weight" in recommendations else 0.0,
-        "recommendation_cash_weight": max(
-            0.0,
-            1.0 - float(recommendations["weight"].sum()) if "weight" in recommendations else 1.0,
-        ),
-        "recommendation_weighting_components": {
-            "score_weight": config.recommendation_score_weight,
-            "market_cap_weight": config.recommendation_market_cap_weight,
-            "liquidity_weight": config.recommendation_liquidity_weight,
-            "rank_floor": config.recommendation_rank_floor,
-            "market_cap_lookup": config.recommendation_market_cap_lookup,
-        },
-        "recommendation_market_cap_source_counts": recommendations["market_cap_source"].value_counts().to_dict()
-        if "market_cap_source" in recommendations
-        else {},
-        "recommendation_size_component_source_counts": recommendations["size_component_source"].value_counts().to_dict()
-        if "size_component_source" in recommendations
-        else {},
-        "universe_profile": config.universe_profile,
-        "universe_source_mode": config.universe_source_mode,
-        "point_in_time_universe": _has_point_in_time_universe(market_data),
-        "candidate_universe_size": len(market_data.candidate_universe),
-        "eligible_price_universe_size": len(analysis_prices.columns),
-        "liquidity_eligible_universe_size": int(eligibility_mask.iloc[-1].fillna(False).sum()) if not eligibility_mask.empty else 0,
-        "fetched_price_symbol_count": len(prices.columns),
-        "benchmark_symbol": normalize_symbol(config.benchmark),
-        "benchmark_price_available": normalize_symbol(config.benchmark) in prices.columns,
-        "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
-        "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark) in prices.columns,
-        "excluded_symbols": len(market_data.exclusions),
-        "subset_run": subset_run,
-        "factor_count": len(factor_definitions),
-        "factor_validation_status": "pass" if factor_validation["status"].eq("pass").all() else "fail",
-        "transaction_cost_bps": config.transaction_cost_bps,
-        "slippage_bps": config.slippage_bps,
-        "cost_stress_high_bps": config.cost_stress_high_bps,
-        "benchmark": normalize_symbol(config.benchmark),
-        "chart_benchmark": normalize_symbol(config.chart_benchmark),
-        "selected_factor_avg_turnover": float(selected_metrics.get("full_avg_turnover", 0.0)),
-        "selected_factor_total_turnover": float(selected_metrics.get("full_total_turnover", 0.0)),
-        "selected_factor_annualized_turnover": float(selected_metrics.get("full_annualized_turnover", 0.0)),
-        "selected_factor_total_cost": float(selected_metrics.get("full_total_cost", 0.0)),
-        "selected_factor_annualized_cost_drag": float(selected_metrics.get("full_annualized_cost_drag", 0.0)),
-        "recommendation_liquidity_lookback_days": 63,
-        "data_quality_manifest_available": _data_quality_manifest_available(market_data),
-        "row_level_data_quality_pass": _row_level_data_quality_pass(recommendations),
-        "data_quality_lookback_days": config.data_quality_lookback_days,
-        "max_price_missing_ratio": config.max_price_missing_ratio,
-        "max_volume_missing_ratio": config.max_volume_missing_ratio,
-        "max_extreme_daily_return": config.max_extreme_daily_return,
-        "data_quality_gate": {
-            "manifest_available": _data_quality_manifest_available(market_data),
-            "recommendation_rows_pass": _row_level_data_quality_pass(recommendations),
-            "lookback_days": config.data_quality_lookback_days,
-            "max_price_missing_ratio": config.max_price_missing_ratio,
-            "max_volume_missing_ratio": config.max_volume_missing_ratio,
-            "max_extreme_daily_return": config.max_extreme_daily_return,
-        },
-        "data_quality_status_counts": data_quality["data_quality_status"].value_counts().to_dict()
-        if "data_quality_status" in data_quality
-        else {},
-        "recommendation_data_quality_status_counts": recommendations["data_quality_status"].value_counts().to_dict()
-        if "data_quality_status" in recommendations
-        else {},
-        "recommendation_capacity_status_counts": recommendations["capacity_status"].value_counts().to_dict(),
-        "recommendation_capacity_warning": "; ".join(sorted(set(recommendations["capacity_warning"].dropna()))),
-        "recommendation_liquidity_status_counts": recommendations["liquidity_evidence_status"].value_counts().to_dict(),
-        "multiple_testing_warning": (
-            "Many explainable momentum factors are compared; validation diagnostics and an explicitly "
-            "predeclared factor policy "
-            "and multiple-testing/data-snooping warnings are required before treating outputs as investable."
-        ),
-        "factor_library_scope": "price_momentum_only",
-        "factor_rank_ic_horizon_days": 21,
-        "factor_rank_ic_max_dates": 756,
-        "factor_diagnostic_methodology": {
-            "rank_ic": (
-                "Exploratory in-sample cross-sectional Spearman Rank-IC from signal date t to future "
-                "t+21 trading-day returns. Daily observations overlap, so counts are diagnostic coverage, "
-                "not independent statistical sample sizes."
-            ),
-            "redundancy": "Latest common signal-date cross-sectional Spearman rank-correlation between factor score vectors.",
-            "scope": "Price-only momentum, trend, breakout, acceleration, drawdown, robust, and risk-adjusted variants.",
-        },
-        "factor_high_redundancy_count": int(
-            pd.to_numeric(factor_redundancy.get("high_corr_peer_count", pd.Series(dtype=float)), errors="coerce")
-            .fillna(0)
-            .gt(0)
-            .sum()
+            penalties.append(config.selection_extreme_event_penalty_points * severity)
+        else:
+            penalties.append(0.0)
+    result["guardrail_breaches"] = guardrail_breaches
+    result["contribution_guardrail_breaches"] = contribution_breaches
+    result["extreme_event_penalty_points"] = penalties
+    result["selection_score"] = (
+        result["base_composite_score"] - result["extreme_event_penalty_points"]
+    ).clip(lower=0.0)
+    result["selection_eligible"] = metric_available & result["standard_guardrail_pass"]
+    if config.selection_extreme_event_action == "exclude":
+        result["selection_eligible"] &= result["contribution_guardrail_pass"]
+    result.loc[~result["selection_eligible"], "selection_score"] = np.nan
+    result["selection_status"] = "data_excluded"
+    result.loc[metric_available & ~result["standard_guardrail_pass"], "selection_status"] = (
+        "absolute_guardrail_excluded"
+    )
+    result.loc[
+        metric_available
+        & result["standard_guardrail_pass"]
+        & ~result["contribution_guardrail_pass"],
+        "selection_status",
+    ] = (
+        "extreme_event_excluded"
+        if config.selection_extreme_event_action == "exclude"
+        else (
+            "extreme_event_penalized"
+            if config.selection_extreme_event_action == "penalize"
+            else "extreme_event_warning"
         )
-        if not factor_redundancy.empty
-        else 0,
-        "survivorship_bias_caveat": disclaimers.DATA_LIMITATIONS,
-        "non_advice_disclaimer": disclaimers.NON_ADVICE,
-        "live_data_gate": disclaimers.LIVE_DATA_GATE,
+    )
+    result.loc[result["selection_eligible"], "selection_status"] = "eligible"
+    if config.selection_extreme_event_action in {"warn", "penalize"}:
+        warned = (
+            metric_available
+            & result["standard_guardrail_pass"]
+            & ~result["contribution_guardrail_pass"]
+        )
+        result.loc[warned, "selection_status"] = (
+            "extreme_event_penalized"
+            if config.selection_extreme_event_action == "penalize"
+            else "extreme_event_warning"
+        )
+
+    candidates = result[result["selection_eligible"]].copy()
+    if candidates.empty:
+        detail = result.loc[
+            metric_available,
+            ["factor", "policy_id", "guardrail_breaches"],
+        ].to_dict(orient="records")
+        raise ValueError(
+            "no factor-policy pair passes the absolute selection guardrails: "
+            + json.dumps(detail, ensure_ascii=False)
+        )
+    sort_columns = [
+        "selection_score",
+        "base_composite_score",
+        "max_abs_leave_one_security_cagr_delta",
+        "max_abs_security_day_contribution",
+        "sortino",
+        "calmar",
+        "max_drawdown",
+        "cagr",
+        "sharpe",
+        "stability",
+        "annualized_cost_drag",
+        "annualized_turnover",
+        "factor",
+        "policy_id",
+    ]
+    ascending = [
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+    ]
+    ordered = candidates.sort_values(sort_columns, ascending=ascending, kind="stable")
+    selected_index = ordered.index[0]
+    result["selected"] = False
+    result.loc[selected_index, "selected"] = True
+    result["rank"] = np.nan
+    result.loc[ordered.index, "rank"] = np.arange(1, len(ordered) + 1, dtype=int)
+    result = result.sort_values(
+        ["selected", "rank", "factor", "policy_id"],
+        ascending=[False, True, True, True],
+        na_position="last",
+        kind="stable",
+    ).reset_index(drop=True)
+    selected_row = result.loc[result["selected"]].iloc[0]
+    selected_factor = str(selected_row["factor"])
+    selected_policy = str(selected_row["policy_id"])
+    reason = (
+        f"Selected the joint factor-policy pair {selected_factor}@{selected_policy} with "
+        f"selection score {float(selected_row['selection_score']):.4f} from every metric-complete "
+        f"independent pair under {ABSOLUTE_GUARDRAIL_VERSION}. Net Sharpe="
+        f"{float(selected_row['sharpe']):.4f}, MDD={float(selected_row['max_drawdown']):.4f}, "
+        f"annualized cost drag={float(selected_row['annualized_cost_drag']):.4f}, maximum "
+        f"exact one-session security contribution="
+        f"{float(selected_row['max_abs_security_day_contribution']):.4f}."
+    )
+    decision = {
+        "method": "joint_factor_policy",
+        "version": JOINT_SELECTION_VERSION,
+        "dynamicSelection": True,
+        "selectedFactor": selected_factor,
+        "selectedPolicyId": selected_policy,
+        "selectedPolicyVersion": POLICY_REGISTRY[selected_policy]["version"],
+        "selectedBaseCompositeScore": float(selected_row["base_composite_score"]),
+        "selectedExtremeEventPenaltyPoints": float(selected_row["extreme_event_penalty_points"]),
+        "selectedSelectionScore": float(selected_row["selection_score"]),
+        "guardrailProfile": _absolute_guardrail_profile(config),
+        "tieBreakPolicy": list(JOINT_TIE_BREAK_POLICY),
+        "reason": reason,
     }
-    return RunResult(
+    return result, selected_factor, selected_policy, reason, decision
+
+
+def _grid_accounting(
+    ranking: pd.DataFrame,
+    definitions: pd.DataFrame,
+) -> dict[str, Any]:
+    canonical = _canonical_factor_definitions()
+    canonical_names = set(canonical["factor"].astype(str))
+    observed_definition_names = set(definitions["factor"].astype(str))
+    if observed_definition_names != canonical_names:
+        raise ValueError(
+            "factor-policy grid canonical factor definitions are incomplete: "
+            + json.dumps(
+                {
+                    "missing": sorted(canonical_names.difference(observed_definition_names)),
+                    "unexpected": sorted(observed_definition_names.difference(canonical_names)),
+                },
+                ensure_ascii=False,
+            )
+        )
+    aliases = definitions["compatibility_alias_of"].notna()
+    independent = set(
+        definitions.loc[
+            definitions["selection_eligible"].fillna(True).astype(bool) & ~aliases,
+            "factor",
+        ].astype(str)
+    )
+    expected_pairs = {(factor, policy) for factor in independent for policy in WEIGHTING_POLICIES}
+    independent_rows = ranking[ranking["factor"].isin(independent)]
+    observed_pairs = list(
+        zip(
+            independent_rows["factor"].astype(str),
+            independent_rows["policy_id"].astype(str),
+            strict=True,
+        )
+    )
+    duplicates = sorted({pair for pair in observed_pairs if observed_pairs.count(pair) > 1})
+    missing = sorted(expected_pairs.difference(observed_pairs))
+    unexpected = sorted(set(observed_pairs).difference(expected_pairs))
+    if duplicates or missing or unexpected:
+        raise ValueError(
+            "factor-policy grid invariant failed: "
+            + json.dumps(
+                {"duplicates": duplicates, "missing": missing, "unexpected": unexpected},
+                ensure_ascii=False,
+            )
+        )
+    available = independent_rows["comparison_status"].eq("available")
+    reason_counts: dict[str, int] = {}
+    for codes in independent_rows.loc[~available, "exclusion_reason_codes"]:
+        if not codes:
+            raise ValueError("excluded independent factor-policy row has no exact reason")
+        for code in codes:
+            reason_counts[str(code)] = reason_counts.get(str(code), 0) + 1
+    common_count = sum(
+        bool(group["comparison_status"].eq("available").all())
+        for _, group in independent_rows.groupby("factor", sort=False)
+    )
+    alias_factor_count = int(aliases.sum())
+    alias_pair_count = int(
+        ranking["factor"].isin(definitions.loc[aliases, "factor"].astype(str)).sum()
+    )
+    expected_alias_pairs = alias_factor_count * len(WEIGHTING_POLICIES)
+    if alias_pair_count != expected_alias_pairs:
+        raise ValueError("diagnostic alias factor-policy grid is incomplete")
+    expected_count = len(expected_pairs)
+    if (
+        len(independent) != CANONICAL_INDEPENDENT_FACTOR_COUNT
+        or alias_factor_count != CANONICAL_ALIAS_FACTOR_COUNT
+        or expected_count != CANONICAL_INDEPENDENT_FACTOR_COUNT * len(WEIGHTING_POLICIES)
+        or len(ranking) != CANONICAL_TOTAL_FACTOR_COUNT * len(WEIGHTING_POLICIES)
+    ):
+        raise ValueError("factor-policy grid does not satisfy the canonical 64/61/3 registry")
+    available_count = int(available.sum())
+    excluded_count = expected_count - available_count
+    if available_count + excluded_count != expected_count:
+        raise ValueError("available plus excluded factor-policy rows must equal expected rows")
+    return {
+        "version": 1,
+        "independentFactorCount": len(independent),
+        "policyCount": len(WEIGHTING_POLICIES),
+        "expectedIndependentPairCount": expected_count,
+        "evaluatedIndependentPairCount": len(independent_rows),
+        "availableIndependentPairCount": available_count,
+        "excludedIndependentPairCount": excluded_count,
+        "missingIndependentPairCount": 0,
+        "diagnosticAliasFactorCount": alias_factor_count,
+        "diagnosticAliasPairCount": alias_pair_count,
+        "commonComparableFactorCount": common_count,
+        "exclusionReasonCounts": dict(sorted(reason_counts.items())),
+        "invariant": "availableIndependentPairCount + excludedIndependentPairCount = expectedIndependentPairCount",
+    }
+
+
+def _policy_diagnostics(
+    ranking: pd.DataFrame,
+    definitions: pd.DataFrame,
+    selected_factor: str,
+    selected_policy: str,
+) -> pd.DataFrame:
+    independent = set(
+        definitions.loc[
+            definitions["selection_eligible"].fillna(True).astype(bool)
+            & definitions["compatibility_alias_of"].isna(),
+            "factor",
+        ].astype(str)
+    )
+    independent_rows = ranking[ranking["factor"].isin(independent)]
+    available_sets = {
+        policy: set(
+            independent_rows.loc[
+                independent_rows["policy_id"].eq(policy)
+                & independent_rows["comparison_status"].eq("available"),
+                "factor",
+            ].astype(str)
+        )
+        for policy in WEIGHTING_POLICIES
+    }
+    common = set.intersection(*(available_sets[policy] for policy in WEIGHTING_POLICIES))
+    metric_columns = (
+        "cagr",
+        "sharpe",
+        "sortino",
+        "calmar",
+        "max_drawdown",
+        "annualized_turnover",
+        "annualized_cost_drag",
+        "median_target_effective_names",
+        "min_target_effective_names",
+        "median_target_hhi",
+        "max_target_hhi",
+        "median_target_cash_weight",
+        "median_target_top1_weight",
+        "median_target_top5_weight",
+        "max_target_weight",
+        "max_abs_security_observation_contribution",
+        "max_security_absolute_contribution_share",
+        "max_abs_leave_one_security_cagr_delta",
+    )
+    rows: list[dict[str, object]] = []
+    for policy in WEIGHTING_POLICIES:
+        frame = independent_rows[independent_rows["policy_id"].eq(policy)]
+        paired = frame[frame["factor"].isin(common)]
+        row: dict[str, object] = {
+            "policy_id": policy,
+            "policy_version": POLICY_REGISTRY[policy]["version"],
+            "diagnostic_only": True,
+            "paired_factor_count": len(paired),
+            "available_factor_count": len(available_sets[policy]),
+            "excluded_factor_count": len(independent) - len(available_sets[policy]),
+            "data_status": (
+                "complete" if len(available_sets[policy]) == len(independent) else "partial"
+            ),
+            "contains_selected_pair": policy == selected_policy,
+            "selected_factor_if_policy": selected_factor if policy == selected_policy else None,
+            "current_available_independent_factor_count": int(
+                frame["current_portfolio_available"].fillna(False).astype(bool).sum()
+            ),
+            "current_median_holding_count": float(
+                pd.to_numeric(paired["current_holding_count"], errors="coerce").median()
+            ),
+            "current_median_cash_weight": float(
+                pd.to_numeric(paired["current_cash_weight"], errors="coerce").median()
+            ),
+        }
+        for metric in metric_columns:
+            row[metric] = float(pd.to_numeric(paired[metric], errors="coerce").median())
+        rows.append(row)
+    order = {policy: position for position, policy in enumerate(WEIGHTING_POLICIES)}
+    return (
+        pd.DataFrame(rows)
+        .assign(_order=lambda frame: frame["policy_id"].map(order))
+        .sort_values("_order")
+        .drop(columns="_order")
+        .reset_index(drop=True)
+    )
+
+
+def _latest_portfolios(
+    factor_scores: dict[str, pd.Series],
+    market: MarketData,
+    config: RunConfig,
+    policy_id: str,
+    trailing_volatility: pd.DataFrame,
+    trailing_liquidity: pd.DataFrame,
+) -> dict[str, ModelPortfolio]:
+    analysis_columns = [column for column in market.prices.columns if column != market.benchmark]
+    names = _names_by_symbol(market)
+    return {
+        factor: construct_model_portfolio(
+            factor,
+            market.as_of,
+            scores.reindex(analysis_columns),
+            market.prices.loc[market.as_of].reindex(analysis_columns),
+            market.eligibility_mask.loc[market.as_of].reindex(analysis_columns),
+            config,
+            policy_id=policy_id,
+            trailing_volatility=trailing_volatility.loc[market.as_of].reindex(analysis_columns),
+            trailing_dollar_volume=trailing_liquidity.loc[market.as_of].reindex(analysis_columns),
+            names=names,
+        )
+        for factor, scores in factor_scores.items()
+    }
+
+
+def _benchmark_metrics(market: MarketData, config: RunConfig) -> dict[str, object]:
+    if market.benchmark not in market.prices:
+        return {"available": False}
+    returns = mark_to_last_observed_returns(market.prices[[market.benchmark]])[market.benchmark]
+    summary = metric_summary(
+        returns.tail(config.evaluation_window_days),
+        risk_free_rate=config.annual_cash_return,
+    )
+    return {"available": True, **summary}
+
+
+def run_analysis(
+    config: RunConfig,
+    *,
+    market_data: MarketData | None = None,
+) -> AnalysisResult:
+    started = perf_counter()
+    config.validate()
+    market = market_data if market_data is not None else load_market_data(config)
+    input_snapshot_paths = (
+        write_market_data_snapshot(market, config.output_dir / "input")
+        if config.export_input_snapshot
+        else {}
+    )
+    prices = _analysis_prices(market)
+    eligibility = market.eligibility_mask.reindex(columns=prices.columns).fillna(False)
+    dollar_volumes = market.dollar_volumes.reindex(index=prices.index, columns=prices.columns)
+    volatility, liquidity = _policy_context(prices, dollar_volumes, config)
+    latest_scores: dict[str, pd.Series] = {}
+    all_backtests: dict[str, dict[str, BacktestResult]] = {
+        policy: {} for policy in WEIGHTING_POLICIES
+    }
+
+    def consume_factor(factor: str, panel: pd.DataFrame) -> None:
+        latest_scores[factor] = panel.loc[market.as_of].copy()
+        for policy in WEIGHTING_POLICIES:
+            all_backtests[policy][factor] = run_factor_backtest(
+                factor,
+                policy,
+                prices,
+                panel,
+                config,
+                eligibility_mask=eligibility,
+                trailing_volatility=volatility,
+                trailing_dollar_volume=liquidity,
+                retain_weight_history=False,
+            )
+
+    for factor, panel in iter_factor_scores(prices, eligibility_mask=eligibility):
+        consume_factor(factor, panel)
+    advanced = compute_advanced_factor_scores(
+        prices,
+        volumes=market.volumes.reindex(columns=prices.columns),
+        dollar_volumes=dollar_volumes,
+        eligibility_mask=eligibility,
+    )
+    advanced_input_issues = _advanced_factor_input_issues(advanced.status)
+    for factor, panel in advanced.scores.items():
+        consume_factor(factor, panel)
+    definitions = _canonical_factor_definitions()
+    expected_factor_names = set(definitions["factor"].astype(str))
+    observed_factor_names = set(latest_scores)
+    if observed_factor_names != expected_factor_names:
+        raise ValueError(
+            "implementation_error_canonical_factor_execution_set: "
+            + json.dumps(
+                {
+                    "missing": sorted(expected_factor_names.difference(observed_factor_names)),
+                    "unexpected": sorted(observed_factor_names.difference(expected_factor_names)),
+                },
+                ensure_ascii=False,
+            )
+        )
+    evaluation_index = pd.DatetimeIndex(prices.index[-config.evaluation_window_days :])
+    policy_grid_reasons = _policy_grid_reasons(
+        all_backtests,
+        evaluation_index,
+        expected_factors=latest_scores,
+    )
+    portfolios_by_policy = {
+        policy: _latest_portfolios(
+            latest_scores,
+            market,
+            config,
+            policy,
+            volatility,
+            liquidity,
+        )
+        for policy in WEIGHTING_POLICIES
+    }
+    raw_by_policy: list[pd.DataFrame] = []
+    for policy in WEIGHTING_POLICIES:
+        raw_by_policy.append(
+            _raw_factor_metrics(
+                policy,
+                all_backtests[policy],
+                definitions,
+                config,
+                evaluation_index,
+                portfolios=portfolios_by_policy[policy],
+                policy_grid_reasons=policy_grid_reasons,
+                factor_input_issues=advanced_input_issues,
+            )
+        )
+    joint_raw = pd.concat(raw_by_policy, ignore_index=True, sort=False)
+    joint_scored = _with_exclusion_accounting(
+        _score_factor_metrics(joint_raw, config),
+        config,
+    )
+    (
+        joint_ranking,
+        selected_factor,
+        selected_policy,
+        selected_reason,
+        joint_decision,
+    ) = _apply_joint_guardrails(
+        joint_scored,
+        config,
+    )
+    grid_accounting = _grid_accounting(joint_ranking, definitions)
+    joint_decision = {
+        **joint_decision,
+        "evaluationStart": evaluation_index.min().date().isoformat(),
+        "evaluationEnd": evaluation_index.max().date().isoformat(),
+        "evaluationWindowDays": len(evaluation_index),
+        "minimumObservations": config.min_evaluation_observations,
+        "minimumValuationCoverage": config.min_valuation_coverage,
+        "minimumDailyRiskObservations": config.min_daily_risk_observations,
+        "selectionEligiblePairCount": int(joint_ranking["selection_eligible"].sum()),
+        "gridAccounting": grid_accounting,
+    }
+    policy_comparison = _policy_diagnostics(
+        joint_ranking,
+        definitions,
+        selected_factor,
+        selected_policy,
+    )
+    policy_decision = {
+        "diagnosticOnly": True,
+        "selectedByPolicyAggregate": False,
+        "policyCount": len(WEIGHTING_POLICIES),
+        "commonComparableFactorCount": grid_accounting["commonComparableFactorCount"],
+        "note": (
+            "Policy medians are descriptive diagnostics only; the winner is selected directly "
+            "from the complete independent factor-policy grid."
+        ),
+    }
+    portfolios = portfolios_by_policy[selected_policy]
+    selected_portfolio = portfolios[selected_factor]
+    return AnalysisResult(
+        generated_at_utc=datetime.now(UTC),
+        runtime_seconds=perf_counter() - started,
+        max_rss_bytes=_max_rss_bytes(),
         config=config,
-        market_data=market_data,
-        factor_scores=factor_scores,
-        backtests=backtests,
-        metrics=metrics,
-        score_components=score_components,
+        market_data=market,
+        factor_scores=latest_scores,
+        backtests=all_backtests[selected_policy],
+        policy_factor_metrics=joint_ranking,
+        policy_comparison=policy_comparison,
+        selected_policy=selected_policy,
+        selected_policy_reason=selected_reason,
+        policy_selection_decision=policy_decision,
+        factor_ranking=joint_ranking,
         selected_factor=selected_factor,
         selected_reason=selected_reason,
-        recommendations=recommendations,
-        robustness=robustness,
-        sensitivity=sensitivity,
-        benchmark_relative=benchmark_relative,
-        factor_validation=factor_validation,
-        factor_definitions=factor_definitions,
-        data_sources=market_data.data_sources,
-        metadata=metadata,
-        output_paths={},
-        data_quality=data_quality,
-        cost_stress=cost_stress,
-        selection_history=selection_history,
-        factor_rank_ic=factor_rank_ic,
-        factor_redundancy=factor_redundancy,
-        factor_category_summary=factor_category_summary,
+        factor_selection_decision=joint_decision,
+        model_portfolio=selected_portfolio,
+        factor_portfolios=portfolios,
+        factor_definitions=definitions,
+        benchmark_metrics=_benchmark_metrics(market, config),
+        grid_accounting=grid_accounting,
+        result_identity=build_result_identity(config, market),
+        advanced_factor_status=advanced.status,
+        input_snapshot_paths=input_snapshot_paths,
     )
-
-
-def write_run_results_json(result: RunResult, path: Path) -> None:
-    from .dashboard import build_dashboard_payload
-
-    output_key = result.metadata.get("recommendation_output_key", "recommendations")
-    payload = {
-        "metadata": result.metadata,
-        "config": result.config.to_dict(),
-        "selected_factor": result.selected_factor,
-        "dashboard": build_dashboard_payload(result),
-        "score_components": result.score_components.reset_index(names="factor").to_dict(orient="records"),
-        "benchmark_relative": result.benchmark_relative.to_dict(orient="records"),
-        "sensitivity": result.sensitivity.to_dict(orient="records"),
-        "cost_stress": result.cost_stress.to_dict(orient="records"),
-        "selection_history": result.selection_history.to_dict(orient="records"),
-        "factor_rank_ic": result.factor_rank_ic.to_dict(orient="records"),
-        "factor_redundancy": result.factor_redundancy.to_dict(orient="records"),
-        "factor_category_summary": result.factor_category_summary.to_dict(orient="records"),
-        output_key: result.recommendations.to_dict(orient="records"),
-        "data_quality": result.data_quality.to_dict(orient="records"),
-        "data_sources": result.data_sources.to_dict(orient="records"),
-        "price_sources": result.market_data.price_sources.to_dict(orient="records"),
-        "factor_validation": result.factor_validation.to_dict(orient="records"),
-        "factor_definitions": result.factor_definitions.to_dict(orient="records"),
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_safe(payload), indent=2, allow_nan=False), encoding="utf-8")
 
 
 def _json_safe(value: Any) -> Any:
-    if value is None:
-        return None
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
-    if isinstance(value, tuple):
-        return [_json_safe(item) for item in value]
+    if isinstance(value, pd.DataFrame):
+        return _json_safe(value.to_dict(orient="records"))
+    if isinstance(value, pd.Series):
+        return _json_safe(value.to_dict())
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, pd.Timestamp):
-        return None if pd.isna(value) else value.isoformat()
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date_cls):
-        return value.isoformat()
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
     if isinstance(value, np.integer):
         return int(value)
-    if isinstance(value, np.floating):
+    if isinstance(value, (np.floating, float)):
         number = float(value)
-        return number if math.isfinite(number) else None
+        return number if np.isfinite(number) else None
     if isinstance(value, np.bool_):
         return bool(value)
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
     return value
+
+
+def _normalized_curve(series: pd.Series, dates: pd.DatetimeIndex) -> list[float | None]:
+    aligned = pd.to_numeric(series.reindex(dates), errors="coerce")
+    valid = aligned.dropna()
+    if valid.empty:
+        return [None] * len(dates)
+    base = float(valid.iloc[0])
+    if not np.isfinite(base) or base == 0.0:
+        return [None] * len(dates)
+    return [float(value / base) if pd.notna(value) else None for value in aligned]
+
+
+def _public_config(config: RunConfig) -> dict[str, Any]:
+    return {
+        "data_mode": config.data_mode,
+        "start_date": config.start_date,
+        "end_date": config.end_date,
+        "effective_end_date": config.effective_end_date,
+        "benchmark": config.benchmark,
+        "chart_benchmark": config.chart_benchmark,
+        "rebalance_frequency": config.rebalance_frequency,
+        "top_n": config.top_n,
+        "max_weight": config.max_weight,
+        "transaction_cost_bps": config.transaction_cost_bps,
+        "slippage_bps": config.slippage_bps,
+        "total_cost_bps": config.total_cost_bps,
+        "annual_cash_return": config.annual_cash_return,
+        "min_history_days": config.min_history_days,
+        "min_price": config.min_price,
+        "min_avg_dollar_volume": config.min_avg_dollar_volume,
+        "min_avg_volume": config.min_avg_volume,
+        "liquidity_lookback_days": config.liquidity_lookback_days,
+        "min_liquidity_observations": config.min_liquidity_observations,
+        "max_price_missing_ratio": config.max_price_missing_ratio,
+        "stale_after_days": config.stale_after_days,
+        "data_quality_lookback_days": config.data_quality_lookback_days,
+        "max_volume_missing_ratio": config.max_volume_missing_ratio,
+        "max_extreme_daily_return": config.max_extreme_daily_return,
+        "evaluation_window_days": config.evaluation_window_days,
+        "min_evaluation_observations": config.min_evaluation_observations,
+        "min_valuation_coverage": config.min_valuation_coverage,
+        "min_daily_risk_observations": config.min_daily_risk_observations,
+        "stability_periods": config.stability_periods,
+        "score_weights": config.score_weights,
+        "score_winsor_lower": config.score_winsor_lower,
+        "score_winsor_upper": config.score_winsor_upper,
+        "weighting_policies": list(config.weighting_policies),
+        "volatility_lookback_days": config.volatility_lookback_days,
+        "min_volatility_observations": config.min_volatility_observations,
+        "volatility_floor": config.volatility_floor,
+        "volatility_cap": config.volatility_cap,
+        "score_liquidity_score_weight": config.score_liquidity_score_weight,
+        "score_liquidity_liquidity_weight": config.score_liquidity_liquidity_weight,
+        "score_liquidity_rank_floor": config.score_liquidity_rank_floor,
+        "selection_min_sharpe": config.selection_min_sharpe,
+        "selection_max_drawdown": config.selection_max_drawdown,
+        "selection_max_annualized_cost_drag": config.selection_max_annualized_cost_drag,
+        "selection_min_effective_names": config.selection_min_effective_names,
+        "selection_max_target_hhi": config.selection_max_target_hhi,
+        "selection_max_target_weight": config.selection_max_target_weight,
+        "selection_max_abs_security_day_contribution": (
+            config.selection_max_abs_security_day_contribution
+        ),
+        "selection_max_security_absolute_contribution_share": (
+            config.selection_max_security_absolute_contribution_share
+        ),
+        "selection_max_leave_one_security_cagr_delta": (
+            config.selection_max_leave_one_security_cagr_delta
+        ),
+        "selection_extreme_event_action": config.selection_extreme_event_action,
+        "selection_extreme_event_penalty_points": (config.selection_extreme_event_penalty_points),
+        "universe_source_mode": config.universe_source_mode,
+        "universe_profile": config.universe_profile,
+        "candidate_universe_size": len(config.universe),
+        "policy_registry_version": POLICY_REGISTRY_VERSION,
+        "joint_selection_version": JOINT_SELECTION_VERSION,
+        "absolute_guardrail_version": ABSOLUTE_GUARDRAIL_VERSION,
+    }
+
+
+def _held_portfolio_payload(result: AnalysisResult) -> dict[str, Any]:
+    backtest = result.backtests[result.selected_factor]
+    weights = backtest.ending_weights[backtest.ending_weights.gt(1e-15)].sort_values(
+        ascending=False
+    )
+    latest_scores = result.factor_scores[result.selected_factor]
+    latest_prices = result.market_data.prices.loc[result.market_data.as_of]
+    names = _names_by_symbol(result.market_data)
+    rows = [
+        {
+            "rank": rank,
+            "symbol": symbol,
+            "name": str(names.get(symbol, symbol)),
+            "factorScore": latest_scores.get(symbol),
+            "latestPrice": latest_prices.get(symbol),
+            "weight": float(weight),
+        }
+        for rank, (symbol, weight) in enumerate(weights.items(), start=1)
+    ]
+    return {
+        "factor": result.selected_factor,
+        "weightingPolicyId": result.selected_policy,
+        "asOf": result.market_data.as_of.date().isoformat(),
+        "lastSignalDate": (
+            backtest.last_signal_date.date().isoformat() if backtest.last_signal_date else None
+        ),
+        "lastExecutionDate": (
+            backtest.last_execution_date.date().isoformat()
+            if backtest.last_execution_date
+            else None
+        ),
+        "valuationAvailable": bool(backtest.valuation_available.iloc[-1]),
+        "cashWeight": backtest.ending_cash_weight,
+        "weights": rows,
+    }
+
+
+def _current_transition_payload(result: AnalysisResult) -> dict[str, Any]:
+    """Apply the historical turnover/cost formulas to the latest known close.
+
+    The target itself is for the next session close.  That future pre-trade
+    drift cannot be known yet, so this is an explicitly indicative as-of-close
+    transition rather than a claimed executable fill.
+    """
+
+    backtest = result.backtests[result.selected_factor]
+    symbols = backtest.ending_weights.index.union(result.model_portfolio.allocation.weights().index)
+    held = backtest.ending_weights.reindex(symbols, fill_value=0.0).astype(float)
+    target = result.model_portfolio.allocation.weights(symbols).astype(float)
+    held_cash = float(backtest.ending_cash_weight)
+    target_cash = float(result.model_portfolio.cash_weight)
+    valuation_available = bool(
+        not backtest.valuation_available.empty and backtest.valuation_available.iloc[-1]
+    )
+    turnover = (
+        0.5 * (float((target - held).abs().sum()) + abs(target_cash - held_cash))
+        if valuation_available
+        else float("nan")
+    )
+    modeled_cost = (
+        turnover * result.config.total_cost_rate if np.isfinite(turnover) else float("nan")
+    )
+    return {
+        "status": (
+            "indicative_as_of_close"
+            if valuation_available
+            else "unavailable_latest_held_valuation_incomplete"
+        ),
+        "asOf": result.market_data.as_of.date().isoformat(),
+        "targetSignalDate": result.model_portfolio.as_of.date().isoformat(),
+        "expectedExecutionTiming": result.model_portfolio.execution_timing,
+        "actualNextClosePretradeDriftKnown": False,
+        "valuationAvailable": valuation_available,
+        "pretradeCashWeight": held_cash,
+        "targetCashWeight": target_cash,
+        "oneWayTurnover": turnover,
+        "totalCostBps": result.config.total_cost_bps,
+        "modeledCostFraction": modeled_cost,
+        "turnoverFormula": "0.5*(sum_abs_target_minus_pretrade_stock+abs_target_minus_pretrade_cash)",
+        "costFormula": "one_way_turnover*total_cost_bps/10000",
+        "note": (
+            "Uses the last observed close's backtest-held weights. Actual next-close turnover "
+            "and cost remain unknown until that execution close is observed."
+        ),
+    }
+
+
+def result_payload(result: AnalysisResult) -> dict[str, Any]:
+    market = result.market_data
+    config = result.config
+    curve_dates = pd.DatetimeIndex(market.prices.index[-config.evaluation_window_days :])
+    definitions = result.factor_definitions.copy()
+    for column in ("limitations", "references"):
+        definitions[column] = definitions.get(column, pd.Series(dtype=object)).map(
+            lambda value: list(value) if isinstance(value, tuple) else value
+        )
+    latest_eligible = int(
+        market.eligibility_mask.drop(columns=[market.benchmark], errors="ignore").iloc[-1].sum()
+    )
+    exclusion_counts: dict[str, int] = {}
+    if not market.quality.empty:
+        for reasons in market.quality.loc[
+            market.quality["role"].eq("candidate"), "exclusion_reasons"
+        ]:
+            for reason in reasons:
+                exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+    benchmark_curve = None
+    if market.benchmark in market.prices:
+        benchmark_prices = market.prices[market.benchmark].reindex(curve_dates)
+        valid = benchmark_prices.dropna()
+        if not valid.empty:
+            base = float(valid.iloc[0])
+            benchmark_curve = [
+                float(value / base) if pd.notna(value) else None for value in benchmark_prices
+            ]
+    selected_backtest = result.backtests[result.selected_factor]
+    payload = {
+        "schemaVersion": 4,
+        "resultKey": result.result_identity["resultKey"],
+        "resultIdentity": result.result_identity,
+        "generatedAtUtc": result.generated_at_utc.isoformat(),
+        "selectedFactor": result.selected_factor,
+        "selectedWeightingPolicy": result.selected_policy,
+        "selectedReason": result.selected_reason,
+        "selectionDecision": result.factor_selection_decision,
+        "gridAccounting": result.grid_accounting,
+        "factorPolicyRanking": result.factor_ranking.to_dict(orient="records"),
+        "policyDiagnostics": result.policy_comparison.to_dict(orient="records"),
+        "weightingPolicyRegistry": {
+            "registryVersion": POLICY_REGISTRY_VERSION,
+            "policies": POLICY_REGISTRY,
+        },
+        "contributionDiagnostics": selected_backtest.contribution_diagnostics.to_dict(),
+        "portfolioPolicy": {
+            "selectedPolicyId": result.selected_policy,
+            "version": POLICY_REGISTRY[result.selected_policy]["version"],
+            "selectedReason": result.selected_policy_reason,
+            "historyCurrentParity": {
+                "targetWeightKernel": True,
+                "capAndCashContract": True,
+                "turnoverFormula": "same_cash_inclusive_half_l1",
+                "costFormula": "same_turnover_times_total_cost_rate",
+                "historicalRebalanceGridRequired": True,
+                "currentTransitionBasis": "latest_observed_close_indicative",
+                "actualNextCloseTransitionKnown": False,
+            },
+            "policyAggregateDiagnostics": result.policy_selection_decision,
+            "parameters": {
+                "topN": config.top_n,
+                "maxWeight": config.max_weight,
+                "rebalanceFrequency": config.rebalance_frequency,
+                "transactionCostBps": config.transaction_cost_bps,
+                "slippageBps": config.slippage_bps,
+                "volatilityLookbackDays": config.volatility_lookback_days,
+                "volatilityFloor": config.volatility_floor,
+                "volatilityCap": config.volatility_cap,
+            },
+        },
+        "researchScope": {
+            "researchOnly": True,
+            "notInvestmentRecommendation": True,
+            "evidenceStatus": "same_sample_descriptive_actual_market"
+            if market.source_mode == "live_market"
+            else "same_sample_descriptive",
+            "limitations": list(RESEARCH_LIMITATIONS),
+        },
+        "researchInputs": ResearchInputs.from_config(config).to_dict(),
+        "config": _public_config(config),
+        "data": {
+            "mode": market.source_mode,
+            "synthetic": market.source_mode == "demo",
+            "sourceLabel": market.source_label,
+            "provider": market.provider,
+            "priceBasis": market.price_basis,
+            "volumeBasis": market.volume_basis,
+            "inputSha256": market.input_sha256,
+            "requestedThrough": market.requested_through,
+            "asOf": market.as_of.date().isoformat(),
+            "startDate": market.prices.index.min().date().isoformat(),
+            "observations": len(market.prices),
+            "requestedCandidateCount": market.requested_candidate_count,
+            "providerReturnedCandidateCount": market.provider_returned_candidate_count,
+            "inputSecurityCount": len(market.candidate_symbols),
+            "analyzedSecurityCount": len(market.candidate_symbols),
+            "analyzedSymbols": list(market.candidate_symbols),
+            "latestEligibleSecurityCount": latest_eligible,
+            "funnel": {
+                "label": "canonical_analysis_funnel",
+                "authoritative": True,
+                "requestedCandidateCount": market.requested_candidate_count,
+                "providerUsableCandidateCount": market.provider_returned_candidate_count,
+                "analyzedSecurityCount": len(market.candidate_symbols),
+                "latestEligibleSecurityCount": latest_eligible,
+                "eligibilityTiming": "date_t_inputs_only",
+                "eligibilityRules": [
+                    "minimum_observed_history",
+                    "current_minimum_price",
+                    "trailing_price_coverage",
+                    "trailing_extreme_return_clear",
+                    "trailing_volume_coverage_when_required",
+                    "trailing_liquidity",
+                ],
+                "exclusionCountsMayOverlap": True,
+            },
+            "latestEligibilityExclusionCounts": exclusion_counts,
+            "rawCloseProxySymbolCount": market.raw_close_proxy_symbol_count,
+            "rawCloseBasis": "provider_raw_close_unfilled",
+            "rawCloseAvailable": not market.raw_closes.empty,
+            "rawCloseProxyDefinition": (
+                "adjusted_close_used_only_where_provider_raw_close_is_missing"
+            ),
+            "snapshotReadContract": SNAPSHOT_READ_CONTRACT,
+            "benchmark": market.benchmark,
+            "benchmarkAvailable": market.benchmark in market.prices,
+            "liquidityFilterApplied": config.min_avg_dollar_volume > 0.0,
+            "notes": market.notes,
+        },
+        "selectionMethod": {
+            "name": "joint_factor_policy_absolute_guardrails",
+            "version": JOINT_SELECTION_VERSION,
+            "guardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
+            "evaluationWindowDays": config.evaluation_window_days,
+            "minimumObservations": config.min_evaluation_observations,
+            "minimumValuationCoverage": config.min_valuation_coverage,
+            "minimumDailyRiskObservations": config.min_daily_risk_observations,
+            "weights": config.score_weights,
+            "netOfCosts": True,
+            "signalTiming": "close_t",
+            "executionTiming": "next_session_close",
+            "returnExposureStarts": "following_close_to_close_session",
+            "tieBreakPolicy": list(JOINT_TIE_BREAK_POLICY),
+            "policyAggregatesAreDiagnosticOnly": True,
+            "equalWeightIsPeerCandidate": True,
+        },
+        "currentResearchTarget": result.model_portfolio.to_dict(),
+        "backtestHeldPortfolio": _held_portfolio_payload(result),
+        "currentTransition": _current_transition_payload(result),
+        "factorPortfolios": {
+            factor: portfolio.to_dict() for factor, portfolio in result.factor_portfolios.items()
+        },
+        "factorDefinitions": definitions.to_dict(orient="records"),
+        "advancedFactorStatus": result.advanced_factor_status.to_dict(orient="records"),
+        "benchmarkMetrics": result.benchmark_metrics,
+        "performance": {
+            "weightingPolicyId": result.selected_policy,
+            "dates": [date.date().isoformat() for date in curve_dates],
+            "factorCurves": {
+                factor: _normalized_curve(backtest.equity, curve_dates)
+                for factor, backtest in result.backtests.items()
+            },
+            "benchmarkCurve": benchmark_curve,
+        },
+        "quality": market.quality.to_dict(orient="records"),
+        "priceSources": market.price_sources.to_dict(orient="records"),
+        "sourceHealth": market.data_sources.to_dict(orient="records"),
+        "meta": {
+            "factorCount": len(result.factor_scores),
+            "independentFactorCount": result.grid_accounting["independentFactorCount"],
+            "availableIndependentPairCount": result.grid_accounting[
+                "availableIndependentPairCount"
+            ],
+            "excludedIndependentPairCount": result.grid_accounting["excludedIndependentPairCount"],
+            "aliasFactorCount": result.grid_accounting["diagnosticAliasFactorCount"],
+            "portfolioCount": len(result.factor_portfolios),
+            "policyCount": len(result.policy_comparison),
+            "policyFactorRunCount": len(result.factor_ranking),
+            "runtimeSeconds": result.runtime_seconds,
+            "maxRssBytes": result.max_rss_bytes,
+            "purpose": "actual_market_momentum_factor_and_weighting_policy_comparison",
+            "factorDefinitionSha256": factor_definition_sha256(),
+            "policyDefinitionSha256": policy_definition_sha256(),
+            "selectionSpecSha256": selection_spec_sha256(config),
+        },
+    }
+    return _json_safe(payload)
+
+
+def write_payload_json(payload: dict[str, Any], output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    path = output_dir / f"momentum_factor_results_{timestamp}.json"
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_result_json(result: AnalysisResult) -> Path:
+    path = write_payload_json(result_payload(result), result.config.output_dir)
+    result.output_paths["json"] = str(path)
+    return path
+
+
+def load_result_payload(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schemaVersion") != 4:
+        raise ValueError("dashboard input must use schemaVersion 4")
+    return payload

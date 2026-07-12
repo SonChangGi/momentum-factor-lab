@@ -1,89 +1,195 @@
 # Momentum Factor Lab methodology
 
-## Universe construction
+## 연구 질문
 
-The default candidate universe is packaged as `momentum_factor_lab/resources/default_universe.csv` and contains 2,800+ current US-listed individual stocks. ETFs, ETNs, exchange-traded debt, commodity/royalty trusts, closed-end style income/term/equity trusts, and listed partnership units are excluded from candidate holdings so the cross-sectional ranks stay closer to ordinary common-stock behavior. The seed is built from public listing-style sources and ordered toward large/liquid stocks before broader stocks.
+같은 실제 시장 입력, eligibility, 평가기간, 리밸런싱, 비용 조건에서 어떤 모멘텀 팩터와 비중 정책의 조합이 가장 견고한 후행 결과를 보였는지 비교합니다. 결과는 동일 표본의 설명적 연구이며 미래 수익이나 실제 주문을 뜻하지 않습니다.
 
-User-supplied symbol lists are intentionally fail-closed: a symbol-only custom input is not treated as an individual stock unless it resolves to packaged/public stock metadata. Common ETF/ETN/fund tickers and fund-like instrument names are denied, and refresh-mode source rows preserve any Nasdaq Trader ETF flag before combined stock-only filtering.
+## 데이터와 기준일
 
-Runtime separates:
+- 기본 후보군은 현재 상장 미국 개별주 2,700개 이상입니다.
+- 라이브 실행은 후보 전체를 요청하며 내부에서 200개로 자르지 않습니다.
+- 팩터 수익률은 adjusted close를 사용합니다.
+- 거래대금은 provider raw close × raw share volume을 사용하고 필요한 proxy 수를 공개합니다.
+- `data.asOf`는 마지막 실제 가격 관측일입니다. 요청 종료일이나 생성일로 덮어쓰지 않습니다.
+- 실제시장 수집 실패는 demo나 정적 이전 결과로 대체하지 않습니다.
 
-1. **candidate universe** — broad source-aware symbol list;
-2. **requested price universe** — stock-candidate list requested for live pricing; by default this is uncapped, while optional `--max-price-symbols` is reserved for explicit smoke/debug subset runs; benchmark symbols may be fetched separately for comparison;
-3. **eligible price universe** — stock-candidate symbols with enough price history, fresh prices, minimum price, and per-date rolling liquidity evidence for model-portfolio backtests.
+시장 스냅샷 v2는 adjusted prices, raw closes, share volumes, dollar volumes와 요청
+universe 메타데이터, 종목별 가격 공급자(`priceSources`)·수집 source
+health(`dataSources`)를 별도 저장합니다. 모든 파일 SHA-256과 행렬·ordered symbol·canonical
+record SHA-256을 함께 기록하며, 검증된 snapshot replay는 모든 hash, universe 순서,
+후보 수와 actual as-of가 일치할 때만 허용합니다. 따라서 같은 스냅샷에서 파생한 rolling
+preset도 refresh universe의 종목명과 원래의 Yahoo/Nasdaq/Stooq/FDR provenance를 잃지
+않습니다.
 
-Only eligible stock-candidate symbols can enter factor backtests or model-portfolio output rows. Benchmark ETFs such as SPY may be present in raw price data solely for benchmark-relative metrics and are excluded from factor scores, backtest weights, sensitivity, and recommendations. Current live runs emit the primary `recommendations` output only when all practical tradability requirements pass; otherwise they fail closed into zero-weight `research_signals` with candidate/requested/eligible/exclusion counts, data-quality diagnostics, liquidity evidence, and capacity warnings.
+## Eligibility
 
-The practical execution checklist requires live-data freshness, a validated frozen factor-selection policy artifact, no explicit price-symbol cap, complete provider price coverage for the requested stock-candidate symbols, broad or explicitly approved tradable-universe provenance, structured point-in-time universe provenance, row-level data-quality pass, row-level liquidity pass, and row-level capacity pass. Provider coverage is tracked separately from the stricter eligible-price universe: a provider can return a symbol that is later excluded by history, liquidity, freshness, or price-quality gates. By default, `research_validation` selects a factor for research ranking only and is blocked from tradable recommendation output. `--factor-selection-mode predeclared --selected-factor ...` is also blocked from practical labels unless `--frozen-policy-path` points to a JSON policy whose selected factor and mode match the run configuration. Broad packaged/refresh stock universes should meet the configured 2,000-symbol minimum; smaller user-supplied stock universes are tradable only when marked as approved tradable universes and backed by point-in-time provenance. Row-level hard checks reject missing prices, excessive missing prices, non-positive prices, stale prices, insufficient history, below-minimum prices, provider-adjustment-incompatible close-price fallbacks, insufficient liquidity evidence, failed liquidity floors, failed capacity checks, and extreme adjusted daily-return anomalies. Practical PIT provenance should include structured source, as-of date, symbol count, and hash/snapshot evidence, not only a free-text date.
+각 신호일 `t`에 다음 후행 조건을 만족하는 종목만 후보가 됩니다.
 
-## Data collection
+- 유효한 양수 adjusted close와 최소 가격
+- 최소 관측 히스토리
+- 최근 가격·거래량 결측률 한도
+- 최근 품질 창의 절대 일수익률 한도
+- 후행 거래대금과 최소 유효 관측일
 
-- Listing metadata can use the packaged stock-only seed or optional public-source refresh. Public refresh filters ETF/test-issue rows out of the candidate universe.
-- yfinance is the primary daily adjusted-price provider and is downloaded in configurable chunks.
-- Yahoo chart adjusted close is the first fallback for yfinance-bulk symbols that are stale, sparse, or missing. By default, every fallback candidate is retried; `--yahoo-chart-fallback-limit 0` disables this repair step and positive limits are smoke/debug bounds. These rows remain adjusted-close compatible and are labeled separately as `yahoo-chart-adjusted-daily-fallback`.
-- Nasdaq latest-close repair runs after Yahoo chart for symbols that still have an existing adjusted-price history but lack the newest trading dates. It fills only missing tail dates after the adjusted-history cutoff, preserves existing adjusted prices, does not replace full histories for symbols with no adjusted history, and is labeled as `nasdaq-latest-close-repair`. The appended tail is Nasdaq close data, so corporate-action-sensitive rows remain source-labeled for review instead of being silently treated as fully adjusted histories.
-- Stooq daily CSV is the next fallback for symbols still missing or unusable after Yahoo chart repair. By default, every remaining missing/unusable symbol is retried; `--stooq-fallback-limit 0` disables this fallback and positive limits are smoke/debug bounds. Stooq fallback rows are labeled separately because close-price/adjustment semantics can differ from yfinance.
-- FinanceDataReader is an optional final fallback for still-missing symbols when installed via the `live` extra. By default, every remaining missing symbol is retried; `--finance-datareader-fallback-limit 0` disables this fallback and positive limits are smoke/debug bounds. FinanceDataReader fallback rows are also labeled separately when used.
-- Finviz is used only as an optional final market-cap metadata fallback for final recommendation/research-signal rows when yfinance market-cap lookup is unavailable. It is labeled as `finviz-snapshot-market-cap`, is non-blocking, and never adds or repairs price history.
-- Source summary sheets include cache, retry, partial-failure, subset-run, and provider notes.
-- `data_quality` exports one row per requested symbol, including source labels, first/last price dates, recent missing-price and missing-volume ratios, non-positive price counts, recent and full-history extreme adjusted daily-return counts, stale-days, exclusion reasons, and pass/fail status. Recommended/research-signal rows inherit these diagnostics; hard price-integrity checks reject hard price-integrity failures, fallback close-price sources, volume/liquidity gaps, and failed capacity checks before any current recommendations can be emitted.
-- The web dashboard also exports aggregate data-quality controls: price coverage, eligible-price ratio, liquidity-eligible ratio, fresh-price ratio, price-source distribution, and per-source success/failure/no-newer health so overall provider reliability is visible rather than inferred from one symbol.
-- Free/public current-universe sources are not treated as survivorship-free historical membership. Point-in-time provenance can be recorded for gating, but the lab does not independently validate external membership data.
+미래 사건을 과거에 역적용하지 않습니다. 큰 실제 수익은 기존 보유 sleeve의 관측수익에서 삭제하지 않고, 관측된 날의 종가 신호부터 후행 품질 창이 끝날 때까지만 신규 target eligibility에 영향을 줍니다.
 
-## Factor library
+## 팩터 카탈로그와 grid 완전성
 
-The factor registry is `FactorSpec` based. Each factor has a name, category, formula, description, validation notes, and function. The current library has 62 factors; the full formula and definition table is kept in `docs/factor-catalog.md` and exported in the `factor_definitions` report sheet:
+총 64개 팩터 중 compatibility alias 3개는 독립 선택에서 제외합니다.
 
-- traditional skipped return: 12-1, 9-1, 6-1;
-- recent momentum: 12m, 6m, 3m, 2m, 1m, including unskipped and short-skip variants where economically distinct;
-- composite multi-horizon;
-- volatility/risk/downside-risk adjusted;
-- dual and moving-average trend;
-- time-series trend;
-- drawdown-aware and 52-week-high proximity;
-- 63-day breakout;
-- reversal-adjusted;
-- acceleration;
-- consistency;
-- long-horizon persistence;
-- low-vol momentum;
-- relative-strength percentile;
-- residual and information-ratio momentum versus an equal-weight universe proxy;
-- up/down market capture asymmetry;
-- left-tail-resilient momentum;
-- trend quality;
-- gap-resistant clipped-return momentum;
-- single-jump-excluded robust momentum;
-- robust median/winsorized variants;
-- volatility/downside/ulcer-adjusted variants;
-- moving-average slope/stack variants;
-- multiple breakout and acceleration horizons;
-- range-position, high-persistence, and path-efficiency quality variants.
+- `acceleration` → `accel_3m_vs_6m`
+- `short_acceleration` → `accel_1m_vs_3m`
+- `relative_strength_6m` → `mom_6m`
 
-## Formula validation
+독립 팩터 61개와 정책 4개의 Cartesian product 244개를 먼저 생성합니다. 각 기대 조합은 정확히 한 행이어야 하며 누락은 데이터 부족이 아니라 구현 오류입니다. 각 독립 행은 `available` 또는 구조화된 `excluded` 사유를 가져야 합니다. alias 12개 행은 별도 진단 회계로 유지합니다.
 
-Momentum factors are checked three ways:
+## 시점·회계 계약
 
-1. registry metadata must include formula/category/description/validation notes;
-2. runtime audit checks shape/index, finite coverage, and no-lookahead perturbation for every factor;
-3. deterministic tests validate core formula helpers and every registered factor’s no-lookahead behavior.
+1. Signal: close `t`
+2. Execution: next available session close `t+1`
+3. First market exposure return: close `t+1` → close `t+2`
 
-The runtime audit is exported to PDF, Excel, and JSON as `factor_validation`.
+보유는 종목별 share sleeve와 cash sleeve로 유지합니다. 중간 quote gap이 있으면 그 날짜의 종목수익을 0으로 발명하지 않습니다. 다음 완전 valuation일의 관측 구간 수익이 이전 완전 NAV 이후 변화를 catch up 합니다. Terminal quote가 없으면 ending NAV와 이에 의존하는 CAGR·Calmar는 unavailable입니다.
 
-## Backtest and scoring
+```text
+one_way_turnover = 0.5 × (
+  Σ |target_stock - drifted_pretrade_stock|
+  + |target_cash - drifted_pretrade_cash|
+)
+```
 
-Each factor is backtested as a long-only top-20 portfolio by default. Portfolio targets are generated from the previous trading day’s factor signal and applied with a one-trading-day execution delay. Turnover, transaction cost, and slippage are included. Drift-aware turnover preserves liquidation turnover even when a held symbol has missing trade-date price evidence, so stale/gappy data does not erase exit costs.
+```text
+modeled_cost = one_way_turnover
+             × (transaction_cost_bps + slippage_bps) / 10000
+```
 
-Factor selection uses validation-first composite scoring across Sharpe, Sortino, Calmar, max drawdown, CAGR, turnover, and train/validation stability. Benchmark-relative metrics include excess return, tracking error, information ratio, and beta to the benchmark; benchmark prices are comparator-only and non-investable in this stock-only project.
+비용은 체결일에 한 번만 차감합니다. 첫 신호 전 cash warm-up은 팩터 성과 관측치가 아닙니다.
 
-Backtest portfolios are diagnostics for factor comparison and remain comparable capped top-N portfolios. Daily returns and turnover now use the same drifted holdings state between rebalances: targets are formed from the previous trading day signal, applied with a one-day delay, drift with price movement, and are compared to the same drifted state for turnover/costs. Current `recommendations` are then sized separately with `score_size_liquidity` weights: selected-factor score, best-effort market cap when available, and 63-day average dollar volume as a size/liquidity proxy when market cap is unavailable. Live runs export `recommendations` only when current ranked rows pass every tradability gate; point-in-time universe evidence, fallback-source compatibility, and configured capacity inputs (`target_aum` plus `max_adv_participation`) are hard gates rather than advisory labels. Cost-stress exports recompute return/risk metrics from realized turnover at each stress cost rate; they are not just descriptive turnover × bps totals.
+## 비중 정책
 
-## Reporting scalability
+### `equal_weight`
 
-Excel cannot safely store every symbol × month × factor row for a 2,000+ universe. Therefore:
+Top-N에 같은 raw score를 주고 종목 상한을 적용합니다.
 
-- `factor_scores` stores latest all-symbol/all-factor scores with eligibility scope columns so raw ineligible diagnostics are distinguishable from current model-portfolio-eligible scores;
-- `factor_score_history_top20` stores eligibility-aware monthly top-20-per-factor history;
-- full huge matrices are intentionally not written to Excel.
+### `capped_linear_rank`
 
-Selected-factor sensitivity reports factor-parameter variants when supported by the factor family and labels unsupported families as base-factor plus portfolio-parameter coverage only.
+동점 인식 선형 rank strength를 사용합니다. 같은 팩터 점수는 같은 강도를 받습니다.
+
+### `capped_vol_adjusted_rank`
+
+```text
+raw_i = tie_aware_rank_strength_i
+      / clipped_trailing_annualized_volatility_i
+```
+
+기본 후행 창은 63거래일, 최소 42관측, 변동성 floor 10%, cap 100%입니다.
+
+### `score_liquidity_rank`
+
+```text
+raw_i = floor
+      + 0.60 × factor_score_percentile_i
+      + 0.40 × trailing_raw_dollar_volume_percentile_i
+```
+
+규모·현재 시가총액·부분 market-cap fallback을 사용하지 않습니다.
+
+### Top-N 경계 동점
+
+팩터 점수가 Top-N 경계를 가로질러 동률이면 trailing raw-dollar-volume 내림차순, symbol 오름차순으로 멤버십을 결정합니다. 필요한 거래대금이 없으면 target을 unavailable로 둡니다.
+
+## 팩터–정책 공동 선택
+
+정책을 먼저 고른 뒤 팩터를 고르는 계층 선택을 사용하지 않습니다.
+
+1. 244개 기대 독립 조합을 전부 계산합니다.
+2. 정책 입력, 현재 target, valuation, exact daily-risk, 체결 coverage를 평가합니다.
+3. 유효 조합 전체를 하나의 모집단으로 합칩니다.
+4. Sortino, Calmar, MDD, CAGR, Sharpe, stability를 한 번만 robust percentile로 변환합니다.
+5. 절대 가드레일과 extreme-event 규칙을 조합별로 적용합니다.
+6. `selection_score`와 결정론 tie-break로 `(factor, policy)` 한 쌍을 직접 선택합니다.
+
+정책별 중앙 성과는 `policyDiagnostics`에만 기록하며 선택·순위 의미가 없습니다. `equal_weight`는 동등한 후보일 뿐 허용선 기준이 아닙니다.
+
+## 절대·버전형 가드레일
+
+가드레일 profile은 version과 다음 rule metadata를 갖습니다.
+
+- rule ID
+- 대상 metric
+- operator
+- threshold
+- unit
+
+기본 규칙은 최소 Sharpe, 최대 drawdown magnitude, 최대 연율 비용 drag, 최소 effective names, 최대 HHI·종목 비중, 완전한 입력·체결·현재 target·기여도 진단, 최대 종목/일 기여도, 최대 종목 절대기여 점유율, 최대 leave-one CAGR 변화를 포함합니다.
+
+표준 가드레일 위반은 선택에서 제외합니다. 극단사건 규칙은 `warn`, `penalize`, `exclude` 중 versioned action을 사용합니다. 관측수익 자체는 어느 action에서도 제거하지 않습니다. 절대 임계값과 action은 Python의 `--selection-*` 기본값이면서 공개 `ResearchInputs` v1의 canonical per-request 필드입니다. 요청별 값은 정규화 입력과 selection hash에 포함되므로 변경 시 별도 result key로 전체 grid를 다시 계산합니다.
+
+## 종목별 기여도와 민감도
+
+각 valuation interval의 exact contribution은 기존 share sleeve 회계에서 계산합니다.
+
+```text
+security contribution_i
+  = pretrade_sleeve_value_i / previous_complete_nav
+  - previous_complete_weight_i
+```
+
+현금과 비용 contribution을 더하면 net portfolio return과 일치해야 합니다. 단일 세션 event와 multi-session quote-gap recovery event를 구분합니다.
+
+기간 종목 집중도는 다음으로 계산합니다.
+
+```text
+security_absolute_contribution_share_i
+  = Σ_t |contribution_i,t|
+  / Σ_j Σ_t |contribution_j,t|
+```
+
+Leave-one sensitivity는 실제 경로·비용을 동결한 realized-contribution deletion입니다. 종목을 제거한 뒤 신호·순위·비중을 재최적화한 반사실 결과가 아닙니다.
+
+## 현재 연구 목표
+
+`currentResearchTarget`은 마지막 실제 입력일 점수를 선택된 정책의 역사 kernel에 넣은 다음 세션 목표입니다. `backtestHeldPortfolio`는 마지막 체결 이후 as-of까지 drift된 연구 보유입니다.
+
+`currentTransition`은 마지막 관측 종가 기준 두 상태 사이의 indicative turnover/cost입니다. 다음 종가 전의 실제 pre-trade drift와 비용은 아직 알 수 없으므로 `actualNextClosePretradeDriftKnown=false`입니다.
+
+## Schema v4와 identity
+
+Canonical payload는 다음을 포함합니다.
+
+- `resultIdentity`와 top-level `resultKey`
+- `researchInputs`
+- `factorPolicyRanking`
+- `gridAccounting`
+- `policyDiagnostics`
+- `weightingPolicyRegistry`
+- `contributionDiagnostics`
+- `currentResearchTarget`, `backtestHeldPortfolio`, `currentTransition`
+- 데이터 funnel, source health, input hashes, runtime, peak RSS
+
+이전 `factorRanking`, `policyFactorMetrics`, `weightingPolicyComparison`, `modelPortfolio` 중복 필드는 허용하지 않습니다.
+
+브라우저는 Python-selected 행과 Python target을 표시할 뿐 winner, weight, turnover, cost를 다시 계산하지 않습니다.
+
+## 정적 grid와 arbitrary inputs
+
+정적 Pages는 `grid/v1/manifest.json`에 등록된 sparse, content-addressed 실제시장 결과만 제공합니다. `keyParts`는 Python과 JavaScript가 공유하는 RFC 8785 JCS로 canonicalize하며, manifest와 detail/summary의 전체 identity, canonical bytes, artifact bytes, SHA-256을 검증합니다. 같은 JSON 구조라도 공백이나 다른 숫자 표기를 사용한 비정규 identity transport는 거절합니다. 2,700개 미만 또는 synthetic 결과는 게시할 수 없습니다.
+
+전체 입력 tuple과 정확히 맞지 않는 URL 상태는 정적 결과로 대체하지 않습니다. 가장 가까운 preset을 사용하지 않고, 별도의 loopback Python API에 canonical `ResearchInputs`를 제출해 canonical engine을 실행합니다. 브라우저는 `202` status를 polling하고 완료 결과의 actual 2,700+·identity·61×4 grid·exact exclusion reasons를 검증한 뒤에만 표시합니다. 동적 API result key는 manifest preset으로 가장하지 않으며, URL은 최신 default base와 반환된 공개 입력을 보존해 reload/share 시 같은 최신 조건을 다시 실행합니다.
+
+정기 publication은 설정에 선언된 모든 `static_grid_presets`를 한 번의 검증된 최신 actual-market 스냅샷에서 다시 계산합니다. 현재 preset은 최신 Top‑20, 최신 Top‑30, 직전 7개 완료 세션의 Top‑20입니다. 각 preset은 동일 Python engine과 독립 identity/cache key를 사용하고, writer는 완성된 bounded manifest를 원자적으로 교체한 뒤 참조되지 않는 content-addressed artifact와 비활성 alias를 제거합니다.
+
+## 캐시 무효화
+
+시장 cache는 TTL/refresh, 실제 as-of, 반환 종목, component bytes/hash를 검증합니다. 분석 cache key는 연구 입력, 시장 내용, 유니버스, 팩터, 정책, 선택·가드레일, 엔진 source digest를 포함합니다. 같은 날짜의 공급자 보정도 matrix hash가 바뀌면 다른 result key가 됩니다.
+
+## 연구 한계
+
+- 동일 표본에서 다수 조합을 비교하는 선택 편향
+- 현재 상장 종목 기반 survivorship 한계
+- 역사적 구성종목·상장폐지·ticker history의 불완전성
+- quote gap 내부 일별 수익률을 추정하지 않음
+- 무료 제공자의 adjustment·symbol mapping·지연 차이
+- walk-forward/OOS/embargo와 완전한 PIT universe는 현 범위 밖임
+
+이 한계는 결과에 명시하며, 현재 구현이 이를 해결했다고 주장하지 않습니다.

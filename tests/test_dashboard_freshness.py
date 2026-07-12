@@ -3,15 +3,44 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from momentum_factor_lab.dashboard_freshness import decide_dashboard_freshness, expected_recent_us_close_date, load_dashboard_payload, main
+from momentum_factor_lab.dashboard_freshness import (
+    decide_dashboard_freshness,
+    expected_recent_us_close_date,
+    load_dashboard_payload,
+    main,
+)
 
 
-def _dashboard(timestamp: str, *, data_as_of: str = "2026-06-09", latest_run_index: int = 0) -> dict[str, object]:
+def _dashboard(
+    timestamp: str, *, data_as_of: str = "2026-06-09", latest_run_index: int = 0
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "latest_run_index": latest_run_index,
         "runs": [{"summary": {"run_timestamp_utc": timestamp, "data_as_of": data_as_of}}],
     }
+
+
+def _dashboard_v4(timestamp: str, *, data_as_of: str = "2026-06-09") -> dict[str, object]:
+    return {
+        "schemaVersion": 4,
+        "generatedAtUtc": timestamp,
+        "data": {"asOf": data_as_of},
+    }
+
+
+def test_schema_v4_uses_generated_at_and_actual_data_as_of() -> None:
+    decision = decide_dashboard_freshness(
+        _dashboard_v4("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
+        event_name="schedule",
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+
+    assert decision.skip is False
+    assert decision.latest_run_kst is not None
+    assert decision.latest_run_kst.isoformat() == "2026-06-10T06:40:00+09:00"
+    assert decision.latest_data_as_of is not None
+    assert decision.latest_data_as_of.isoformat() == "2026-06-09"
 
 
 def test_schedule_runs_when_latest_execution_is_before_kst_cutoff() -> None:
@@ -26,15 +55,15 @@ def test_schedule_runs_when_latest_execution_is_before_kst_cutoff() -> None:
     assert decision.latest_run_kst.hour == 2
 
 
-def test_schedule_skips_when_dashboard_already_executed_after_kst_cutoff_with_target_data() -> None:
+def test_schedule_revalidates_even_after_cutoff_with_target_date() -> None:
     decision = decide_dashboard_freshness(
         _dashboard("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
     )
 
-    assert decision.skip is True
-    assert "target data_as_of" in decision.reason
+    assert decision.skip is False
+    assert "snapshot revalidation" in decision.reason
     assert decision.latest_data_as_of is not None
     assert decision.latest_data_as_of.isoformat() == "2026-06-09"
     assert decision.target_data_as_of.isoformat() == "2026-06-09"
@@ -48,18 +77,18 @@ def test_schedule_retries_when_execution_after_cutoff_has_stale_data_as_of() -> 
     )
 
     assert decision.skip is False
-    assert "did not reach target data_as_of" in decision.reason
+    assert "snapshot revalidation" in decision.reason
     assert decision.target_data_as_of.isoformat() == "2026-06-10"
 
 
-def test_exact_kst_cutoff_counts_as_already_executed_when_data_is_current() -> None:
+def test_exact_kst_cutoff_still_requires_snapshot_revalidation() -> None:
     decision = decide_dashboard_freshness(
         _dashboard("2026-06-09T21:30:00Z", data_as_of="2026-06-09"),
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 17, tzinfo=UTC),
     )
 
-    assert decision.skip is True
+    assert decision.skip is False
 
 
 def test_generated_at_is_used_when_run_timestamp_is_missing() -> None:
@@ -67,13 +96,18 @@ def test_generated_at_is_used_when_run_timestamp_is_missing() -> None:
         {
             "schema_version": 1,
             "latest_run_index": 0,
-            "runs": [{"generated_at_utc": "2026-06-09T21:40:00Z", "summary": {"data_as_of": "2026-06-09"}}],
+            "runs": [
+                {
+                    "generated_at_utc": "2026-06-09T21:40:00Z",
+                    "summary": {"data_as_of": "2026-06-09"},
+                }
+            ],
         },
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
     )
 
-    assert decision.skip is True
+    assert decision.skip is False
     assert decision.latest_run_kst is not None
     assert decision.latest_run_kst.hour == 6
     assert decision.latest_run_kst.minute == 40
@@ -114,7 +148,10 @@ def test_invalid_latest_index_fails_open() -> None:
 
 
 def test_expected_recent_us_close_date_skips_weekends() -> None:
-    assert expected_recent_us_close_date(datetime(2026, 6, 15, 8, 30, tzinfo=UTC)).isoformat() == "2026-06-12"
+    assert (
+        expected_recent_us_close_date(datetime(2026, 6, 15, 8, 30, tzinfo=UTC)).isoformat()
+        == "2026-06-12"
+    )
 
 
 def test_dashboard_freshness_cli_emits_github_outputs(tmp_path: Path, capsys) -> None:
@@ -137,7 +174,7 @@ def test_dashboard_freshness_cli_emits_github_outputs(tmp_path: Path, capsys) ->
 
     stdout = capsys.readouterr().out
     assert exit_code == 0
-    assert "skip=true" in stdout
+    assert "skip=false" in stdout
     assert "latest_run_kst=2026-06-10T06:40:00+09:00" in stdout
     assert "latest_data_as_of=2026-06-09" in stdout
     assert "target_data_as_of=2026-06-09" in stdout
