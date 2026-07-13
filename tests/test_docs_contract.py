@@ -50,11 +50,16 @@ def test_published_actual_grid_regresses_web_input_and_market_asof_outcome_chang
 
             if differences == {"top_n"}:
                 web_input_comparisons += 1
-                assert left["selectedFactor"] != right["selectedFactor"]
-                assert left["selectedWeightingPolicy"] != right["selectedWeightingPolicy"]
+                left_top_n = left_entry["normalizedInputs"]["top_n"]
+                right_top_n = right_entry["normalizedInputs"]["top_n"]
+                left_count = left["currentResearchTarget"]["selectedSecurityCount"]
+                right_count = right["currentResearchTarget"]["selectedSecurityCount"]
+                assert left_count == left_top_n
+                assert right_count == right_top_n
+                assert left_count != right_count
                 assert left_symbols != right_symbols
                 assert left_weights != right_weights
-                observed_changes.update({"factor", "policy", "holdings", "weights"})
+                observed_changes.update({"portfolio_size", "holdings", "weights"})
 
             if differences == {"end_date", "effective_end_date"}:
                 market_asof_comparisons += 1
@@ -65,7 +70,7 @@ def test_published_actual_grid_regresses_web_input_and_market_asof_outcome_chang
 
     assert web_input_comparisons >= 1
     assert market_asof_comparisons >= 1
-    assert observed_changes == {"factor", "policy", "holdings", "weights"}
+    assert observed_changes == {"portfolio_size", "holdings", "weights"}
 
 
 def test_readme_declares_the_live_2700_factor_and_policy_contract() -> None:

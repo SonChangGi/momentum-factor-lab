@@ -1,415 +1,760 @@
 <!doctype html>
 <html lang="ko" data-theme="light">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="2,700개 이상 실제 시장 후보군에서 독립 모멘텀 팩터와 네 가지 비중 정책을 같은 조건으로 비교하는 연구 대시보드"
-    />
-    <title>__TITLE__</title>
-    <link rel="stylesheet" href="assets/styles.css?v=__ASSET_VERSION__" />
-  </head>
-  <body>
-    <a class="skip-link" href="#main">본문으로 이동</a>
-    <header class="site-header">
-      <div class="header-inner">
-        <a class="brand" href="#top" aria-label="Momentum Factor Lab 홈">
-          <span class="brand-mark" aria-hidden="true">M</span>
-          <span><strong>Momentum</strong><small>Factor Lab</small></span>
-        </a>
-        <nav class="site-nav" aria-label="주요 섹션">
-          <a href="#research-controls">연구 입력</a>
-          <a href="#allocation">현재 비중</a>
-          <a href="#policies">비중 정책</a>
-          <a href="#factors">팩터 비교</a>
-          <a href="#data-scope">데이터</a>
-        </nav>
-        <button id="theme-toggle" class="icon-button" type="button" aria-label="색상 테마 전환">◐</button>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>__TITLE__</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%233182f6'/%3E%3Cpath d='M14 43 27 29l9 8 14-18' fill='none' stroke='white' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="assets/styles.css?v=__ASSET_VERSION__" />
+</head>
+<body id="top">
+  <a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
+  <nav class="site-nav" aria-label="연결 프로젝트 바로가기">
+    <a class="site-nav-brand" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="Quant Research Hub로 이동">Quant Research Hub</a>
+    <div class="site-nav-links" aria-label="프로젝트 목록">
+      <a href="https://sonchanggi.github.io/quant-dashboard/">Hub</a>
+      <a class="is-active" href="https://sonchanggi.github.io/momentum-factor-lab/" aria-current="page">Momentum</a>
+      <a href="https://sonchanggi.github.io/dram-price/">DRAM</a>
+      <a href="https://sonchanggi.github.io/best-factor/">Best Factor</a>
+      <a href="https://sonchanggi.github.io/etf-tracking/">ETF</a>
+      <a href="https://sonchanggi.github.io/sox/">SOX</a>
+      <a href="https://sonchanggi.github.io/quant-dashboard/risk-score/">Risk Score</a>
+      <a href="https://sonchanggi.github.io/port/">Port</a>
+      <a href="https://sonchanggi.github.io/valuation/">Valuation</a>
+    </div>
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="다크 모드로 전환">
+      <span class="theme-toggle-icon" aria-hidden="true"></span>
+      <span class="theme-toggle-text">다크 모드</span>
+    </button>
+  </nav>
+
+  <header class="hero">
+    <div class="hero-content">
+      <p class="eyebrow">모멘텀 팩터 랩</p>
+      <h1>모멘텀 팩터 데일리 대시보드</h1>
+      <p class="hero-copy">
+        매일 미국 종가 기준으로 업데이트되는 모멘텀 팩터 비교 화면입니다.
+        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 모형 비중을 한 화면에서 비교합니다.
+      </p>
+      <div class="hero-actions">
+        <a class="button hero-link" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="투자 리서치 프로젝트 통합 대시보드로 돌아가기">통합 대시보드</a>
+        <a class="button secondary hero-link" href="#visual-dashboard">시각화 보기</a>
       </div>
-    </header>
+    </div>
+    <div class="status-card" id="run-status">데이터를 불러오는 중...</div>
+  </header>
+  <noscript>
+    <div class="noscript-warning">
+      이 대시보드는 정적 JSON 데이터를 불러와 표와 차트를 그리므로 JavaScript가 필요합니다.
+      JavaScript를 켠 뒤 다시 열어주세요.
+    </div>
+  </noscript>
 
-    <main id="main">
-      <section id="research-controls" class="page-shell input-console" aria-labelledby="input-title">
-        <div class="input-console-heading">
-          <div>
-            <p class="section-kicker">Precomputed static research grid</p>
-            <h2 id="input-title">연구 조건을 변경하면 정확히 일치하는 Python 결과만 엽니다</h2>
-            <p>
-              이 GitHub Pages는 제한된 사전 계산 grid를 조회하는 정적 뷰어입니다.
-              브라우저는 승자·비중·회전율·비용을 계산하지 않습니다.
-            </p>
-          </div>
-          <div class="result-identity">
-            <span id="result-source">결과 없음</span>
-            <code id="result-key">—</code>
-          </div>
+  <main id="main-content" tabindex="-1">
+
+
+    <section class="controls controls-enhanced" aria-label="대시보드 입력값">
+      <div class="control-group control-group-run">
+        <div class="control-group-heading">
+          <p class="eyebrow">분석 기준</p>
+          <h2>기준일 · 기간 · 선택 팩터</h2>
         </div>
-
-        <form id="research-input-form" class="research-input-form">
-          <label class="span-2">사전 계산 스냅샷
-            <select id="input-result-key" name="result"></select>
-          </label>
-          <label>리밸런싱
-            <select id="input-rebalance-frequency" name="rebalance_frequency"></select>
-          </label>
-          <label>평가 기간(년)
-            <input id="input-evaluation-years" type="number" min="1" max="10" step="1" inputmode="numeric" />
-          </label>
-          <label>평가 창(거래일)
-            <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="1" step="1" inputmode="numeric" />
-          </label>
-          <label>Top-N
-            <input id="input-top-n" name="top_n" type="number" min="1" step="1" inputmode="numeric" />
-          </label>
-          <label>종목당 최대 비중(%)
-            <input id="input-max-weight" name="max_weight" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
-          </label>
-          <label>거래 비용(bps)
-            <input id="input-transaction-cost" name="transaction_cost_bps" type="number" min="0" step="0.1" inputmode="decimal" />
-          </label>
-          <label>슬리피지(bps)
-            <input id="input-slippage" name="slippage_bps" type="number" min="0" step="0.1" inputmode="decimal" />
-          </label>
-          <label>최저 가격(USD)
-            <input id="input-min-price" name="min_price" type="number" min="0" step="0.01" inputmode="decimal" />
-          </label>
-          <label>최소 가격 이력(거래일)
-            <input id="input-min-history" name="min_history_days" type="number" min="21" step="1" inputmode="numeric" />
-          </label>
-          <label>최소 평균 거래대금(USD)
-            <input id="input-min-dollar-volume" name="min_avg_dollar_volume" type="number" min="0" step="1000" inputmode="decimal" />
-          </label>
-          <label>최소 평균 거래량
-            <input id="input-min-volume" name="min_avg_volume" type="number" min="0" step="100" inputmode="decimal" />
-          </label>
-          <label>유동성 lookback(거래일)
-            <input id="input-liquidity-lookback" name="liquidity_lookback_days" type="number" min="1" step="1" inputmode="numeric" />
-          </label>
-          <label>최소 유동성 관측일
-            <input id="input-liquidity-observations" name="min_liquidity_observations" type="number" min="1" step="1" inputmode="numeric" />
-          </label>
-          <label>최대 가격 결측률(%)
-            <input id="input-price-missing" name="max_price_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
-          </label>
-          <label>최대 거래량 결측률(%)
-            <input id="input-volume-missing" name="max_volume_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
-          </label>
-          <label>최대 일간 절대 수익률(%)
-            <input id="input-extreme-return" name="max_extreme_daily_return" type="number" min="0.01" step="0.1" inputmode="decimal" />
-          </label>
-          <label>선택 최소 Sharpe
-            <input id="input-selection-min-sharpe" name="selection_min_sharpe" type="number" min="-10" step="0.01" inputmode="decimal" />
-          </label>
-          <label>선택 최대 MDD magnitude(%)
-            <input id="input-selection-max-drawdown" name="selection_max_drawdown" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
-          </label>
-          <label>선택 최대 연율 비용 drag(%)
-            <input id="input-selection-max-cost-drag" name="selection_max_annualized_cost_drag" type="number" min="0" step="0.01" inputmode="decimal" />
-          </label>
-          <label>선택 최소 유효 종목 수
-            <input id="input-selection-min-effective-names" name="selection_min_effective_names" type="number" min="0.01" step="0.1" inputmode="decimal" />
-          </label>
-          <label>선택 최대 target HHI(%)
-            <input id="input-selection-max-target-hhi" name="selection_max_target_hhi" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
-          </label>
-          <label>선택 최대 target 종목 비중(%)
-            <input id="input-selection-max-target-weight" name="selection_max_target_weight" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
-          </label>
-          <label>최대 종목·단일 세션 기여도(%)
-            <input id="input-selection-max-day-contribution" name="selection_max_abs_security_day_contribution" type="number" min="0" step="0.1" inputmode="decimal" />
-          </label>
-          <label>최대 종목 절대기여 점유율(%)
-            <input id="input-selection-max-contribution-share" name="selection_max_security_absolute_contribution_share" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
-          </label>
-          <label>최대 leave-one CAGR 변화(%)
-            <input id="input-selection-max-leave-one-delta" name="selection_max_leave_one_security_cagr_delta" type="number" min="0" step="0.1" inputmode="decimal" />
-          </label>
-          <label>극단사건 조치
-            <select id="input-selection-extreme-action" name="selection_extreme_event_action">
-              <option value="exclude">제외</option>
-              <option value="penalize">감점</option>
-              <option value="warn">경고</option>
-            </select>
-          </label>
-          <label>극단사건 최대 감점(points)
-            <input id="input-selection-penalty-points" name="selection_extreme_event_penalty_points" type="number" min="0" step="0.1" inputmode="decimal" />
-          </label>
-          <div class="input-actions span-2">
-            <button class="primary-button" type="submit">이 조건 분석·열기</button>
-            <button id="reset-default-inputs" class="secondary-button" type="button">기본 스냅샷</button>
-          </div>
-        </form>
-        <div id="input-status" class="input-status" role="status" aria-live="polite">
-          사전 계산 manifest를 불러오는 중입니다.
+        <label>실행 결과
+          <select id="run-select"></select>
+        </label>
+        <label>기준일
+          <select id="date-select"></select>
+        </label>
+        <label>최근 기간
+          <select id="window-select"></select>
+          <span class="control-hint">기본값은 최근 12개월입니다.</span>
+        </label>
+        <label>선택 팩터 시나리오
+          <select id="factor-select"></select>
+          <span class="control-hint">초기값은 Python 공동 선택 팩터이며, 기간 최고 팩터는 비교선으로 표시합니다.</span>
+        </label>
+      </div>
+      <div class="control-group control-group-backtest">
+        <div class="control-group-heading">
+          <p class="eyebrow">브라우저 프록시 민감도 조건</p>
+          <h2>브라우저 프록시 시나리오 입력</h2>
+          <p class="control-hint">아래 입력은 팩터 막대·기간 비교·상위 N개 비중 등 브라우저 프록시 패널에만 적용됩니다. Python 전체 공통 평가기간 성과 그래프와 표, canonical 결과에는 적용되지 않습니다.</p>
         </div>
-        <p class="local-api-note">
-          manifest exact preset은 정적 artifact를 엽니다. 그 밖의 임의 조건은
-          <code>127.0.0.1:8765</code>의 loopback Python API가 실행 중일 때 canonical 입력으로
-          자동 분석하며, 정적 결과와 로컬 API 결과를 위 resultKey 옆에 구분해 표시합니다.
-        </p>
-      </section>
-
-      <section id="top" class="hero page-shell">
-        <div class="hero-copy">
-          <div class="hero-meta">
-            <span id="data-mode-badge" class="status-badge">데이터 확인 중</span>
-            <span id="asof-label">기준일 —</span>
-            <span id="source-label">소스 —</span>
-          </div>
-          <p class="eyebrow">Actual market · complete factor×policy grid · Python-selected pair</p>
-          <h1>전체 grid에서<br /><span id="winner-factor">선택 팩터·정책</span> 조합을 찾았습니다.</h1>
-          <div class="decision-grid">
-            <article>
-              <span>선택 팩터</span>
-              <strong id="decision-factor">—</strong>
-              <small><b id="winner-score">—</b> / 100</small>
-            </article>
-            <article>
-              <span>선택 비중 정책</span>
-              <strong id="decision-policy">—</strong>
-              <small>Python 공동 선택</small>
-            </article>
-          </div>
-          <div id="winner-metrics" class="hero-metrics" aria-label="선택 전략 핵심 성과"></div>
-          <div class="reason-box">
-            <strong>왜 이 조합인가</strong>
-            <p id="winner-reason">선택 근거를 불러오는 중입니다.</p>
-            <p id="policy-reason" class="muted">팩터×정책 공동 선택 계약을 확인하는 중입니다.</p>
-          </div>
+        <label>프록시 최근 분석 기간
+          <select id="lookback-months-select">
+            <option value="3">최근 3개월</option>
+            <option value="6">최근 6개월</option>
+            <option value="12" selected>최근 12개월</option>
+            <option value="24">최근 24개월</option>
+          </select>
+        </label>
+        <label>상위 N개 종목
+          <input id="topn-input" type="number" min="1" max="20" value="20" />
+          <span id="topn-hint" class="control-hint">현재 공개 payload에 저장된 선택 팩터의 canonical 구성종목 20개 안에서만 프록시를 계산합니다.</span>
+        </label>
+        <label>브라우저 시나리오 종목당 최대 비중
+          <input id="max-weight-input" type="number" min="1" max="50" step="1" value="50" />
+          <span class="unit">%</span>
+          <span class="control-hint">표시용 가정 기본값 50%. 변경 시 브라우저 프록시 비중과 민감도 패널만 갱신됩니다.</span>
+        </label>
+        <label>리밸런싱 주기
+          <select id="rebalance-select">
+            <option value="W">주간</option>
+            <option value="ME" selected>월간</option>
+            <option value="QE">분기</option>
+          </select>
+        </label>
+        <label>거래 비용
+          <input id="transaction-cost-input" type="number" min="0" max="200" step="1" value="5" />
+          <span class="unit">bps</span>
+        </label>
+        <label>슬리피지
+          <input id="slippage-input" type="number" min="0" max="200" step="1" value="5" />
+          <span class="unit">bps</span>
+        </label>
+        <div class="preset-row" aria-label="빠른 입력 프리셋">
+          <button type="button" data-topn-preset="10">상위 10</button>
+          <button type="button" data-topn-preset="20">상위 20</button>
+          <button type="button" data-topn-preset="30" disabled aria-disabled="true" title="현재 공개 payload에는 팩터별 canonical 구성종목이 20개만 저장되어 있습니다.">상위 30</button>
+          <button type="button" data-max-weight-preset="10">최대 10%</button>
+          <button type="button" data-max-weight-preset="20">최대 20%</button>
+          <button type="button" data-max-weight-preset="50">최대 50%</button>
         </div>
-
-        <aside class="target-card" aria-live="polite" aria-labelledby="compact-target-title">
-          <div class="target-card-heading">
+        <p id="scenario-live-summary" class="scenario-live-summary" aria-live="polite">선택값을 불러오는 중입니다.</p>
+      </div>
+      <details id="research-controls" class="advanced-canonical-inputs canonical-input-details">
+        <summary>Canonical Python ResearchInputs · 정적 preset / 로컬 API</summary>
+        <div class="canonical-input-shell">
+          <div class="canonical-input-heading">
             <div>
-              <p>Next-session research target</p>
-              <h2 id="compact-target-title">현재 목표 비중</h2>
+              <p class="eyebrow">검증된 Python 입력</p>
+              <h2>정적 preset과 임의 Python 분석 조건</h2>
+              <p>
+                위 실행 결과 선택은 manifest에 있는 정확한 preset을 엽니다. 아래 입력은 별도의 canonical
+                ResearchInputs이며, 정확한 정적 결과가 없을 때만 loopback Python API로 전달됩니다.
+                브라우저 프록시 입력과 서로 섞이지 않습니다.
+              </p>
             </div>
-            <span id="portfolio-status" class="mini-status">확인 중</span>
-          </div>
-          <p id="target-timing" class="target-timing">마지막 입력일 신호로 계산한 다음 세션 종가용 연구 목표입니다.</p>
-          <ol id="compact-holdings" class="compact-holdings" aria-label="상위 현재 목표 종목"></ol>
-          <div class="target-totals">
-            <div><span>투자 비중</span><strong id="compact-invested">—</strong></div>
-            <div><span>현금</span><strong id="compact-cash">—</strong></div>
-            <div><span>종목 수</span><strong id="compact-count">—</strong></div>
-          </div>
-          <a class="text-link" href="#allocation">전체 목표 종목과 산식 보기 →</a>
-        </aside>
-      </section>
-
-      <section class="page-shell summary-strip" aria-label="분석 범위 요약">
-        <article class="metric-card"><span>요청 후보</span><strong id="requested-count">—</strong><small>패키지 전체 후보군</small></article>
-        <article class="metric-card"><span>제공자 반환</span><strong id="returned-count">—</strong><small>실제 가격이 반환된 종목</small></article>
-        <article class="metric-card"><span>분석 입력</span><strong id="analyzed-count">—</strong><small>전체 팩터 계산 패널</small></article>
-        <article class="metric-card"><span>최신 적격</span><strong id="eligible-count">—</strong><small>마지막 날짜 투자 가능</small></article>
-        <article class="metric-card"><span>독립 팩터</span><strong id="factor-count">—</strong><small id="factor-count-context">전체 —개</small></article>
-        <article class="metric-card"><span>비중 정책</span><strong id="policy-count">—</strong><small>동일 역사 그리드</small></article>
-      </section>
-
-      <section id="allocation" class="page-shell section-block" aria-labelledby="allocation-title">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">01 · Current target</p>
-            <h2 id="allocation-title">지금 어떤 종목을 얼마만큼 담는가</h2>
-            <p id="allocation-note">Python 정책 커널이 만든 비중을 그대로 표시합니다. 브라우저에서 다시 계산하지 않습니다.</p>
-          </div>
-          <div class="section-total">
-            <span>현금 포함 합계</span>
-            <strong id="allocation-total">100.0%</strong>
-            <small id="allocation-factor-policy">—</small>
-          </div>
-        </div>
-        <div id="concentration-strip" class="concentration-strip" aria-label="현재 목표 집중도"></div>
-        <div class="allocation-grid">
-          <article class="panel allocation-bars-panel">
-            <div class="panel-title"><h3>목표 비중</h3><span>Python output · 최대 비중 상한 적용</span></div>
-            <div id="allocation-bars" class="allocation-bars"></div>
-          </article>
-          <article class="panel table-panel">
-            <div class="table-wrap allocation-table-wrap">
-              <table id="allocation-table">
-                <thead>
-                  <tr>
-                    <th>순위</th><th>종목</th><th>이름</th><th>팩터 점수</th><th>가격</th>
-                    <th>정책 원점수</th><th>변동성</th><th>거래대금</th><th>상한 전</th><th>목표 비중</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+            <div class="result-identity" aria-live="polite">
+              <span id="result-source">결과 없음</span>
+              <code id="result-key">-</code>
             </div>
-          </article>
-        </div>
-        <dl id="allocation-contract" class="contract-grid"></dl>
-      </section>
-
-      <section id="policies" class="page-shell section-block" aria-labelledby="policy-title">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">02 · Weighting policy</p>
-            <h2 id="policy-title">선택된 조합의 정책과 버전된 정책 레지스트리</h2>
-            <p>승자는 모든 유효한 팩터×정책 조합에서 직접 선택됩니다. 정책별 집계는 선택 순서가 아닌 진단 정보입니다.</p>
           </div>
-          <span id="policy-selected-badge" class="selection-badge">선택 정책 —</span>
+          <form id="research-input-form" class="research-input-form" autocomplete="off">
+            <label>리밸런싱
+              <select id="input-rebalance-frequency" name="rebalance_frequency">
+                <option value="W">주간(W)</option>
+                <option value="ME">월말(ME)</option>
+                <option value="QE">분기말(QE)</option>
+              </select>
+            </label>
+            <label>평가 기간(년)
+              <input id="input-evaluation-years" type="number" min="1" max="10" step="1" inputmode="numeric" />
+            </label>
+            <label>평가 창(거래일)
+              <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="252" inputmode="numeric" />
+            </label>
+            <label>Top-N
+              <input id="input-top-n" name="top_n" type="number" min="1" max="50" step="1" inputmode="numeric" />
+            </label>
+            <label>종목당 최대 비중
+              <input id="input-max-weight" name="max_weight" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>거래 비용
+              <input id="input-transaction-cost" name="transaction_cost_bps" type="number" min="0" max="200" step="0.1" inputmode="decimal" />
+              <span class="unit">bps</span>
+            </label>
+            <label>슬리피지
+              <input id="input-slippage" name="slippage_bps" type="number" min="0" max="200" step="0.1" inputmode="decimal" />
+              <span class="unit">bps</span>
+            </label>
+            <label>최저 가격(USD)
+              <input id="input-min-price" name="min_price" type="number" min="0" step="0.01" inputmode="decimal" />
+            </label>
+            <label>최소 가격 이력(거래일)
+              <input id="input-min-history" name="min_history_days" type="number" min="21" step="1" inputmode="numeric" />
+            </label>
+            <label>최소 평균 거래대금(USD)
+              <input id="input-min-dollar-volume" name="min_avg_dollar_volume" type="number" min="0" step="1000" inputmode="decimal" />
+            </label>
+            <label>최소 평균 거래량
+              <input id="input-min-volume" name="min_avg_volume" type="number" min="0" step="100" inputmode="decimal" />
+            </label>
+            <label>유동성 lookback(거래일)
+              <input id="input-liquidity-lookback" name="liquidity_lookback_days" type="number" min="1" step="1" inputmode="numeric" />
+            </label>
+            <label>최소 유동성 관측일
+              <input id="input-liquidity-observations" name="min_liquidity_observations" type="number" min="1" step="1" inputmode="numeric" />
+            </label>
+            <label>최대 가격 결측률
+              <input id="input-price-missing" name="max_price_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>최대 거래량 결측률
+              <input id="input-volume-missing" name="max_volume_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>최대 일간 절대 수익률
+              <input id="input-extreme-return" name="max_extreme_daily_return" type="number" min="0.01" max="10000" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>선택 최소 Sharpe
+              <input id="input-selection-min-sharpe" name="selection_min_sharpe" type="number" min="-10" max="10" step="0.01" inputmode="decimal" />
+            </label>
+            <label>선택 최대 MDD magnitude
+              <input id="input-selection-max-drawdown" name="selection_max_drawdown" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>선택 최대 연율 비용 drag
+              <input id="input-selection-max-cost-drag" name="selection_max_annualized_cost_drag" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>선택 최소 유효 종목 수
+              <input id="input-selection-min-effective-names" name="selection_min_effective_names" type="number" min="0.01" max="50" step="0.1" inputmode="decimal" />
+            </label>
+            <label>선택 최대 target HHI
+              <input id="input-selection-max-target-hhi" name="selection_max_target_hhi" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>선택 최대 target 종목 비중
+              <input id="input-selection-max-target-weight" name="selection_max_target_weight" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>최대 종목·단일 세션 기여도
+              <input id="input-selection-max-day-contribution" name="selection_max_abs_security_day_contribution" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>최대 종목 절대기여 점유율
+              <input id="input-selection-max-contribution-share" name="selection_max_security_absolute_contribution_share" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>최대 leave-one CAGR 변화
+              <input id="input-selection-max-leave-one-delta" name="selection_max_leave_one_security_cagr_delta" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
+              <span class="unit">%</span>
+            </label>
+            <label>극단사건 조치
+              <select id="input-selection-extreme-action" name="selection_extreme_event_action">
+                <option value="exclude">제외</option>
+                <option value="penalize">감점</option>
+                <option value="warn">경고</option>
+              </select>
+            </label>
+            <label>극단사건 최대 감점(points)
+              <input id="input-selection-penalty-points" name="selection_extreme_event_penalty_points" type="number" min="0" step="0.1" inputmode="decimal" />
+            </label>
+            <div class="input-actions">
+              <button class="primary-button" type="submit">이 조건 분석·열기</button>
+              <button id="reset-default-inputs" class="secondary-button" type="button">기본 preset으로 복원</button>
+            </div>
+          </form>
+          <div id="input-status" class="input-status" role="status" aria-live="polite">
+            정적 grid manifest를 불러오는 중입니다.
+          </div>
+          <p class="local-api-note">
+            manifest와 정확히 일치하는 입력은 서명된 정적 detail/summary만 엽니다. 그 밖의 입력은
+            <code>127.0.0.1:8765</code>의 loopback API가 실행 중일 때만 제출되며, 실제시장 2,700개 이상
+            종목·identity·공동 grid 계약을 다시 검증한 뒤 표시합니다.
+          </p>
         </div>
-        <div id="policy-cards" class="policy-cards"></div>
-        <article class="panel table-panel policy-table-panel">
-          <div class="table-wrap">
-            <table id="policy-table">
+      </details>
+    </section>
+
+    <section class="cards" aria-label="요약 카드">
+      <article class="card">
+        <span>선택된 최고 팩터</span>
+        <strong id="best-factor">-</strong>
+        <small id="best-factor-detail">-</small>
+      </article>
+      <article class="card">
+        <span>선택 팩터 시나리오</span>
+        <strong id="selected-factor">-</strong>
+        <small id="selected-factor-detail">-</small>
+      </article>
+      <article class="card">
+        <span>추천/신호 상태</span>
+        <strong id="recommendation-status">-</strong>
+        <small id="data-provider">-</small>
+      </article>
+      <article class="card">
+        <span>최근 실행 시각</span>
+        <strong id="latest-run-at">-</strong>
+        <small id="latest-run-detail">-</small>
+      </article>
+      <article class="card">
+        <span>시나리오 비중 합계</span>
+        <strong id="weight-summary">-</strong>
+        <small>브라우저에서 선택 팩터 점수와 최대 비중 가정으로 다시 계산한 표시용 목표 비중입니다.</small>
+      </article>
+    </section>
+
+    <section class="panel canonical-panel" id="canonical-research" aria-labelledby="canonical-title">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">검증된 Python 결과 · 추가 분석</p>
+          <h2 id="canonical-title">전체 팩터×비중 정책 공동 선택과 현재 연구 목표</h2>
+        </div>
+        <p>
+          아래 영역은 브라우저 민감도 프록시와 분리된 canonical schema-v4 결과입니다.
+          전체 2,700개 이상 종목, 네 가지 비중 정책, 절대 가드레일을 Python에서 계산한 값을 그대로 표시합니다.
+        </p>
+      </div>
+
+      <div class="cards canonical-summary-cards" aria-label="현재 Python 결과 요약">
+        <article class="card">
+          <span>실제 기준일</span>
+          <strong id="canonical-asof">-</strong>
+          <small id="canonical-source">-</small>
+        </article>
+        <article class="card">
+          <span>분석 종목</span>
+          <strong id="canonical-analyzed">-</strong>
+          <small id="canonical-funnel">-</small>
+        </article>
+        <article class="card">
+          <span>공동 선택 팩터</span>
+          <strong id="canonical-factor">-</strong>
+          <small id="canonical-factor-score">-</small>
+        </article>
+        <article class="card">
+          <span>선택 비중 정책</span>
+          <strong id="canonical-policy">-</strong>
+          <small id="canonical-policy-version">-</small>
+        </article>
+        <article class="card">
+          <span>현재 연구 목표</span>
+          <strong id="canonical-invested">-</strong>
+          <small id="canonical-cash">-</small>
+        </article>
+        <article class="card">
+          <span>유니버스 시점성 · 생존편향 한계</span>
+          <strong id="canonical-universe-scope">-</strong>
+          <small id="canonical-universe-evidence">-</small>
+        </article>
+      </div>
+
+      <div class="viz-grid canonical-viz-grid">
+        <article class="viz-card wide">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">현재 canonical 목표</p>
+              <h3>지금 어떤 종목을 얼마만큼 담는가</h3>
+            </div>
+            <span id="canonical-allocation-meta" class="chart-meta">-</span>
+          </div>
+          <div id="canonical-allocation-chart" class="bar-chart compact-bars" aria-live="polite"></div>
+          <div class="table-wrap compact canonical-table-wrap">
+            <table id="canonical-allocation-table">
               <thead>
                 <tr>
-                  <th>정책</th><th>버전</th><th>구현 ID</th><th>공식</th><th>조합 수</th>
-                  <th>중앙 Sharpe</th><th>중앙 CAGR</th><th>중앙 MDD</th><th>회전율</th><th>비용</th>
+                  <th>순위</th><th>종목</th><th>기업명</th><th>팩터 점수</th><th>목표 비중</th><th>정책 원점수</th><th>상한</th>
                 </tr>
               </thead>
               <tbody></tbody>
             </table>
           </div>
         </article>
-      </section>
 
-      <section id="factors" class="page-shell section-block" aria-labelledby="factor-title">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">03 · Factor leaderboard</p>
-            <h2 id="factor-title">모든 팩터×정책 조합을 하나의 랭킹으로 비교</h2>
-            <p>alias와 제외 조합도 Python이 제공한 정확한 상태·사유로 표시합니다.</p>
-          </div>
-          <div class="filters" role="group" aria-label="팩터 필터">
-            <label>카테고리<select id="category-filter"><option value="all">전체</option></select></label>
-            <label>검색<input id="factor-search" type="search" placeholder="팩터 이름" /></label>
-          </div>
-        </div>
-        <div class="factor-grid">
-          <article class="panel ranking-panel">
-            <div class="panel-title"><h3>상위 합성 점수</h3><span>Python 0–100 score</span></div>
-            <div id="ranking-chart" class="ranking-chart" aria-label="팩터 합성 점수 막대 차트"></div>
-          </article>
-          <article class="panel table-panel">
-            <div class="table-wrap factor-table-wrap">
-              <table id="factor-table">
-                <thead>
-                  <tr>
-                    <th>순위</th><th>팩터</th><th>정책</th><th>상태</th><th>합성</th><th>CAGR</th><th>Sharpe</th>
-                    <th>Sortino</th><th>Calmar</th><th>MDD</th><th>회전율</th><th>비용</th><th>평가 커버리지</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
+        <article class="viz-card wide">
+          <div class="viz-card-heading joint-ranking-heading">
+            <div>
+              <p id="joint-ranking-scope" class="eyebrow">전체 256개 조합 · 실제 비교 가능 범위 확인</p>
+              <h3 id="joint-ranking-title">모든 팩터×정책 조합을 하나의 랭킹으로 비교</h3>
             </div>
-          </article>
-        </div>
-      </section>
-
-      <section id="factor-detail" class="page-shell section-block" aria-labelledby="detail-title">
-        <div class="section-heading factor-heading">
-          <div>
-            <p class="section-kicker">04 · Factor detail</p>
-            <h2 id="detail-title">—</h2>
-            <p id="factor-formula" class="formula">—</p>
-            <p id="factor-description">—</p>
+            <span id="joint-ranking-meta" class="chart-meta">-</span>
           </div>
-          <span id="factor-category" class="category-badge">—</span>
-        </div>
-        <div id="factor-metrics" class="metric-grid" aria-label="선택 팩터 성과 지표"></div>
-        <div class="detail-grid">
-          <article class="panel chart-panel wide">
-            <div class="panel-title"><h3>최근 공통 평가기간 누적 성과</h3><span id="curve-caption">비용 차감 · 기준 1.0</span></div>
-            <div id="performance-chart" class="line-chart" aria-label="팩터와 벤치마크 누적 성과"></div>
-          </article>
-          <article class="panel component-panel">
-            <div class="panel-title"><h3>합성 점수 구성</h3><span>독립 팩터 robust percentile</span></div>
-            <div id="component-bars"></div>
-          </article>
-        </div>
-      </section>
-
-      <section id="risk-diagnostics" class="page-shell section-block" aria-labelledby="risk-title">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">05 · Absolute guardrails</p>
-            <h2 id="risk-title">극단 이벤트 의존도와 종목 기여도를 숨기지 않습니다</h2>
-            <p>Python이 적용한 정책 중립 규칙, 조합별 위반 사유, 실제 최대 관측 이벤트와 종목 제거 민감도를 그대로 표시합니다.</p>
+          <div class="joint-ranking-controls" aria-label="팩터 정책 랭킹 필터">
+            <label>비중 정책
+              <select id="joint-policy-filter">
+                <option value="all">전체 정책</option>
+              </select>
+            </label>
+            <label>팩터 검색
+              <input id="joint-factor-search" type="search" placeholder="팩터 이름 또는 분류" />
+            </label>
           </div>
-          <span id="risk-status-badge" class="selection-badge">진단 확인 중</span>
-        </div>
-        <div id="risk-metrics" class="metric-grid" aria-label="선택 조합 위험 기여도"></div>
-        <div class="risk-grid">
-          <article class="panel risk-rules-panel">
-            <div class="panel-title"><h3>절대 가드레일 규칙</h3><span id="guardrail-profile-label">—</span></div>
-            <div class="table-wrap">
-              <table id="guardrail-rules-table">
-                <thead><tr><th>규칙</th><th>지표</th><th>조건</th><th>단위</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </article>
-          <article class="panel risk-event-panel">
-            <div class="panel-title"><h3>현재 상세 조합의 상태·위반</h3><span>Python exclusion reason</span></div>
-            <dl id="guardrail-status" class="contract-grid"></dl>
-            <div class="panel-title nested-title"><h3>최대 단일 세션 기여 이벤트</h3><span id="max-event-scope">선택 조합 관측 결과</span></div>
-            <dl id="max-event-contract" class="contract-grid"></dl>
-          </article>
-          <article class="panel table-panel risk-leave-one-panel">
-            <div class="panel-title"><h3>Leave-one-security 민감도</h3><span id="leave-one-scope">선택 조합 · 재최적화 없음</span></div>
-            <div class="table-wrap">
-              <table id="leave-one-table">
-                <thead><tr><th>종목</th><th>기준 CAGR</th><th>제거 CAGR</th><th>절대 변화</th><th>방법</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section id="data-scope" class="page-shell section-block" aria-labelledby="data-title">
-        <div class="section-heading">
-          <div>
-            <p class="section-kicker">06 · Data &amp; provenance</p>
-            <h2 id="data-title">기준일은 시스템 날짜가 아니라 마지막 실제 관측일</h2>
-            <p>요청일과 마지막 관측일을 분리하고, 실제 제공자 반환 수와 최신 eligibility를 각각 공개합니다.</p>
+          <p id="joint-ranking-scope-note" class="scenario-note">독립 조합의 공통 비교 가능 범위와 선정 제외 진단, 호환 alias 범위를 불러오는 중입니다.</p>
+          <div id="joint-ranking-chart" class="bar-chart joint-ranking-chart" aria-live="polite"></div>
+          <div class="table-wrap compact canonical-table-wrap">
+            <table id="joint-ranking-table">
+              <thead>
+                <tr>
+                  <th>전체 순위</th><th>팩터</th><th>분류</th><th>비중 정책</th><th>동일 표본 상대 점수</th><th>CAGR</th><th>Sharpe</th><th>MDD</th><th>상태</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
-        </div>
-        <div class="data-grid">
-          <article class="panel data-panel">
-            <div class="universe-flow" aria-label="유니버스 흐름">
-              <div><span>요청</span><strong id="flow-requested">—</strong></div><b>→</b>
-              <div><span>반환</span><strong id="flow-returned">—</strong></div><b>→</b>
-              <div><span>분석</span><strong id="flow-analyzed">—</strong></div><b>→</b>
-              <div><span>최신 적격</span><strong id="flow-eligible">—</strong></div>
+        </article>
+
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">선택 근거</p>
+              <h3>합성 점수 구성</h3>
             </div>
-            <dl id="data-contract" class="contract-grid"></dl>
-          </article>
-          <article class="panel limitations-panel">
-            <div class="panel-title"><h3>연구 한계</h3><span>결과 해석 전 필독</span></div>
-            <ul id="limitations-list"></ul>
-          </article>
-        </div>
-        <p id="data-note" class="evidence-note"></p>
-      </section>
+            <span class="chart-meta">동일 표본 상대 percentile · 절대 신뢰도 아님</span>
+          </div>
+          <div id="canonical-component-chart" class="bar-chart component-chart" aria-live="polite"></div>
+          <p id="canonical-selection-reason" class="scenario-note">선택 근거를 불러오는 중입니다.</p>
+        </article>
 
-      <section class="page-shell methodology" aria-labelledby="method-title">
-        <div>
-          <p class="section-kicker">Methodology</p>
-          <h2 id="method-title">팩터×정책 조합을 하나의 절대 규칙으로 선택합니다</h2>
-          <p id="method-description"></p>
-          <p id="method-decision" class="method-decision"></p>
-          <p class="research-warning">
-            이 결과는 동일 표본의 후행 연구 비교입니다. 미래 성과를 보장하지 않으며 투자 권고나 주문 지시가 아닙니다.
-          </p>
-        </div>
-        <div id="method-weights" class="method-weights"></div>
-      </section>
-    </main>
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">비중 정책</p>
+              <h3>네 가지 정책과 선택 결과</h3>
+            </div>
+            <span id="canonical-policy-meta" class="chart-meta">-</span>
+          </div>
+          <div id="canonical-policy-cards" class="mini-list policy-mini-list" aria-live="polite"></div>
+        </article>
 
-    <footer class="site-footer">
-      <div class="page-shell">
-        <p><strong>Momentum Factor Lab</strong> · actual-market research dashboard</p>
-        <p id="footer-runtime">실행 정보 확인 중</p>
       </div>
-    </footer>
+    </section>
 
-    <div id="loading-state" class="loading-overlay" role="status">정적 manifest와 Python 결과를 불러오는 중…</div>
-    <script src="assets/dashboard.js?v=__ASSET_VERSION__" defer></script>
-  </body>
+    <section class="panel diagnostics-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">팩터 해석</p>
+          <h2>경제적 의미 · 중복도 · Forward Rank-IC</h2>
+        </div>
+        <p>
+          현재 라이브러리는 가격 기반 모멘텀 팩터들의 변형입니다. 서로 비슷한 팩터가 많은지,
+          신호가 이후 수익률과 어떤 순위 상관을 보였는지 진단합니다.
+        </p>
+      </div>
+      <p id="factor-scope-note" class="diagnostic-note">-</p>
+      <article class="diagnostic-card factor-method-card">
+        <div class="method-card-heading">
+          <div>
+            <p class="eyebrow">선택 팩터 계산법</p>
+            <h3 id="selected-factor-method-title">-</h3>
+          </div>
+          <span id="selected-factor-method-badge" class="badge">브라우저 시나리오 설명</span>
+        </div>
+        <p id="selected-factor-method-summary" class="method-summary">선택한 팩터의 산식과 현재 입력값 적용 방식을 표시합니다.</p>
+        <div id="selected-factor-method-steps" class="method-grid" aria-live="polite"></div>
+        <p id="selected-factor-method-note" class="scenario-note">팩터 설명을 불러오는 중입니다.</p>
+      </article>
+      <div class="diagnostic-grid three">
+        <article class="diagnostic-card">
+          <h3>팩터 카테고리</h3>
+          <div id="factor-category-summary" class="mini-list"></div>
+        </article>
+        <article class="diagnostic-card">
+          <h3>Forward Rank-IC 상위</h3>
+          <div id="factor-rank-ic-summary" class="diagnostic-evidence" aria-live="polite"></div>
+        </article>
+        <article class="diagnostic-card">
+          <h3>팩터 중복도</h3>
+          <div id="factor-redundancy-summary" class="diagnostic-evidence" aria-live="polite"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel visual-panel" id="visual-dashboard">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">시각화 대시보드</p>
+          <h2>팩터별 비교 · 백테스트 추이 · 상위 N개 비중</h2>
+        </div>
+        <p>
+          프록시 입력값을 바꾸면 해당 민감도 차트가 즉시 갱신됩니다. Python 전체 공통 평가기간 성과 그래프와 표는 원자료 그대로 유지됩니다. 임의 팩터/날짜 선택은 사후 비교 분석입니다.
+        </p>
+      </div>
+      <div class="viz-grid">
+        <article class="viz-card wide">
+          <div class="viz-card-heading">
+            <div>
+        <p class="eyebrow">팩터 수익률</p>
+              <h3>팩터 수익률 막대 차트</h3>
+            </div>
+            <span id="factor-chart-meta" class="chart-meta">-</span>
+          </div>
+          <div id="factor-return-chart" class="bar-chart" aria-live="polite"></div>
+        </article>
+        <article class="viz-card wide">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">Python 원자료 · 전체 공통 평가기간</p>
+              <h3>선택 팩터와 기간 최고 팩터 누적 성과 비교</h3>
+            </div>
+            <span id="backtest-chart-meta" class="chart-meta">-</span>
+          </div>
+          <p class="scenario-note">이 그래프와 아래 성과표는 Python 원자료입니다. 그래프는 전체 공통 평가기간을 유지하고, 선택한 최근 기간은 비교 팩터를 정하는 데만 사용합니다. 상위 N·최대 비중·리밸런싱·비용·슬리피지 프록시 입력은 적용하지 않습니다.</p>
+          <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
+          <div id="backtest-chart" class="line-chart" aria-live="polite"></div>
+          <div id="performance-metrics-table" class="performance-metrics" aria-live="polite"></div>
+        </article>
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">기간 비교</p>
+              <h3>기간별 최고 팩터 비교</h3>
+            </div>
+          </div>
+          <div id="window-comparison-chart" class="window-chart" aria-live="polite"></div>
+        </article>
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">리더 추이</p>
+              <h3>최근 30거래일 리더 추이</h3>
+            </div>
+          </div>
+          <div id="leader-trend-chart" class="trend-chart" aria-live="polite"></div>
+        </article>
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">모형 비중</p>
+              <h3>상위 N개 모형 비중 시각화</h3>
+            </div>
+            <span id="weight-chart-meta" class="chart-meta">-</span>
+          </div>
+          <div id="weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
+        </article>
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">팩터 앙상블</p>
+              <h3>상위 10개 팩터 동일비중 합산</h3>
+            </div>
+            <span id="ensemble-chart-meta" class="chart-meta">-</span>
+          </div>
+          <div id="ensemble-weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">최신 출력</p>
+          <h2>기존 결과물 기준 · 해당 날짜 최고 팩터 추천/연구 신호</h2>
+        </div>
+        <p>
+          기준일·기간 최고 팩터의 기존 출력입니다. 매매 비중 0%는 연구용 신호이며 주문 비중이 아닙니다.
+        </p>
+      </div>
+      <p id="current-output-note" class="scenario-note">-</p>
+      <div class="table-wrap">
+        <table id="current-output-table">
+          <thead>
+            <tr>
+              <th>순위</th>
+              <th>종목</th>
+              <th>모멘텀 신호</th>
+              <th>기준 팩터</th>
+              <th>최종 매매 비중</th>
+              <th>게이트 전 모형 비중</th>
+              <th>비중 산출 방식</th>
+              <th>신호일</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">기간별 팩터 비교</p>
+          <h2>최근 기간별 최고 모멘텀 팩터</h2>
+        </div>
+        <p>각 기준일마다 선택한 최근 기간의 누적 수익률이 가장 높았던 팩터를 표시합니다.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="factor-table">
+          <thead>
+            <tr>
+              <th>기준일</th>
+              <th>기간</th>
+              <th>최고 팩터</th>
+              <th>브라우저 시나리오 최고 수익률</th>
+              <th>선택 팩터 시나리오 수익률</th>
+              <th>선택 팩터 순위</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">선택 팩터 시나리오</p>
+          <h2>일별 상위 종목 · 모멘텀 신호 · 산출 비중</h2>
+        </div>
+        <p id="holdings-availability">선택 팩터 점수와 최대 비중 가정으로 표시용 목표 비중을 계산합니다.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="holdings-table">
+          <thead>
+            <tr>
+              <th>순위</th>
+              <th>종목</th>
+              <th>모멘텀 신호</th>
+              <th>시나리오 목표 비중</th>
+              <th>팩터</th>
+              <th>신호일</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel analysis-panel" id="daily-weight-analysis-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">추가 분석</p>
+          <h2>선택 팩터 일별 투자 비중</h2>
+        </div>
+        <p id="daily-weight-analysis-note">웹페이지에서 선택한 팩터의 실제 백테스트 보유 이력과 같은 팩터의 현재 Python 연구 목표를 구분해 비교합니다.</p>
+      </div>
+      <div
+        class="table-wrap daily-weights-scroll"
+        role="region"
+        tabindex="0"
+        aria-label="선택 팩터 실제 백테스트 보유와 현재 연구 목표 비교표"
+        aria-describedby="daily-weight-analysis-note"
+      >
+        <table id="daily-weights-table" aria-describedby="daily-weight-analysis-note">
+          <caption class="visually-hidden">선택 팩터의 최근 최대 21개 보유 세션별 실제 백테스트 보유 비중과 현재 Python 연구 목표 비교</caption>
+          <thead>
+            <tr>
+              <th scope="col">보유 기준일</th>
+              <th scope="col">신호일 · 체결일</th>
+              <th scope="col">종목별 백테스트 보유 / 현재 연구 목표</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel two-col">
+      <div>
+        <p class="eyebrow">최신 팩터 랭킹</p>
+        <h2>기준일별 기간 수익률 상위 팩터</h2>
+        <div class="table-wrap compact">
+          <table id="period-ranking-table">
+                <thead><tr><th>기간</th><th>팩터</th><th>시나리오/원자료 수익률</th><th>순위</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="explain">
+        <p class="eyebrow">읽는 방법</p>
+        <h2>대시보드 설명</h2>
+        <ul>
+          <li><strong>최고 팩터</strong>는 선택 기간의 누적 전략 수익률이 가장 높은 팩터입니다.</li>
+          <li><strong>모멘텀 신호</strong>는 해당 팩터가 계산한 종목별 점수이며, 높을수록 상위 후보입니다.</li>
+          <li><strong>기간 최고 팩터</strong>는 선택 기간의 과거 누적 수익률이 가장 높았던 팩터입니다.</li>
+          <li><strong>선택 팩터 시나리오</strong>는 사용자가 고른 팩터의 점수 스냅샷으로 브라우저가 다시 계산한 표시용 비교입니다.</li>
+          <li><strong>시나리오 목표 비중</strong>은 선택 팩터 점수가 높은 종목에 더 큰 비중을 주되 종목당 최대 비중을 넘지 않도록 계산하며, 상한 때문에 남는 금액은 현금/미사용으로 표시합니다.</li>
+          <li>브라우저 입력값은 자동 실행 설정이나 GitHub Actions 입력값을 바꾸지 않습니다.</li>
+          <li>데이터 품질, 유동성, 생존편향, 무료 데이터 한계는 기존 리포트와 동일하게 적용됩니다.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
+      <div>
+        <p class="eyebrow">수동 업데이트</p>
+        <h2>검토 후 그 시점의 최신 데이터로 수동 실행</h2>
+        <p>
+          자동 예약 실행은 현재 중지되어 있습니다. 버튼을 누르면 GitHub Actions 수동 실행 화면으로 이동합니다. <code>workflow_dispatch</code> 실행이며, 저장소 쓰기 권한이 있는 GitHub 계정으로 <strong>Run workflow</strong>를 누릅니다.
+        </p>
+        <p class="manual-update-note">
+          공개 페이지에는 GitHub 토큰을 저장하지 않습니다. 실행 후 Actions 상태와 대시보드 기준일을 확인하세요.
+        </p>
+      </div>
+      <div class="manual-update-actions">
+        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
+        <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
+        <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
+        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
+      </div>
+    </section>
+
+    <section class="panel canonical-safety-panel" aria-label="Python 선택 안전 규칙과 입력 증거">
+      <div class="viz-grid post-update-safety-grid">
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">절대 안전 규칙</p>
+              <h3>선택 조합 가드레일</h3>
+            </div>
+            <span id="canonical-guardrail-meta" class="chart-meta">-</span>
+          </div>
+          <div id="canonical-guardrail-list" class="gate-list" aria-live="polite"></div>
+        </article>
+
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">입력 증거</p>
+              <h3>데이터 범위와 결과 식별자</h3>
+            </div>
+            <span id="canonical-result-key" class="chart-meta code-meta">-</span>
+          </div>
+          <dl id="canonical-data-contract" class="canonical-data-contract"></dl>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel diagnostics-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">현실성 점검</p>
+          <h2>데이터 품질 · 최종 편입 적격 · 매매 가능성 게이트</h2>
+        </div>
+        <p>
+          현재 출력이 실제 매매 권고인지, 연구용 신호인지 판단하는 핵심 제한 조건을 한글로 풀어 표시합니다.
+          후보 종목, 가격 분석 가능 종목, 모든 필터를 통과한 최종 편입 적격 종목 수를 함께 확인하세요.
+        </p>
+      </div>
+      <div class="diagnostic-grid">
+        <article class="diagnostic-card">
+          <h3>데이터 커버리지</h3>
+          <dl id="data-quality-summary"></dl>
+        </article>
+        <article class="diagnostic-card">
+          <h3>추천/신호 게이트</h3>
+          <div id="tradability-gate-list" class="gate-list"></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="notice moved-notice">
+      <strong>운영 고지:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
+      다음 수동 실행 입력값을 저장하지 않습니다. 검토된 live-run 입력값은 저장소 설정에서 관리합니다. 자동 예약 실행과 watchdog 예약은 중지되어 있으며, 새 데이터 반영은 GitHub Actions 수동 실행 후 publication safety gate를 통과해야 합니다.
+    </section>
+
+    <section class="disclaimer">
+      <h2>주의 및 한계</h2>
+      <p>
+        본 대시보드는 연구/의사결정 보조용이며 개인화된 투자, 세무, 법률 또는 매매 조언이 아닙니다.
+        무료/공개 데이터의 누락, 조정가격 차이, 생존편향, 유동성/용량 한계가 있을 수 있습니다.
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    <span>모멘텀 팩터 랩에서 생성</span>
+    <span id="generated-at"></span>
+  </footer>
+  <script src="assets/dashboard.js?v=__ASSET_VERSION__"></script>
+  <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
+    <a href="#top" aria-label="맨 위로 이동" title="맨 위로">↑</a>
+    <a href="#page-bottom" aria-label="맨 아래로 이동" title="맨 아래로">↓</a>
+  </nav>
+  <div id="page-bottom" tabindex="-1" aria-hidden="true"></div>
+</body>
 </html>

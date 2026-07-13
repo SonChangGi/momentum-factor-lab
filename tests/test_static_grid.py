@@ -9,7 +9,11 @@ import pytest
 
 from momentum_factor_lab.config import WEIGHTING_POLICIES
 from momentum_factor_lab.data import canonical_records_sha256
-from momentum_factor_lab.dashboard import MAX_DASHBOARD_BYTES, dashboard_summary
+from momentum_factor_lab.dashboard import (
+    MAX_DASHBOARD_BYTES,
+    dashboard_summary,
+    externalize_factor_holding_history_sidecar,
+)
 from momentum_factor_lab.identity import (
     canonical_json_bytes,
     canonical_sha256,
@@ -27,7 +31,12 @@ from momentum_factor_lab.static_grid import (
     validate_static_grid,
     write_static_grid,
 )
-from momentum_factor_lab.workflow import AnalysisResult, result_payload
+from momentum_factor_lab.workflow import (
+    MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES,
+    PERFORMANCE_CONTRACT_VERSION,
+    AnalysisResult,
+    result_payload,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +128,20 @@ def _actual_market_detail(source: AnalysisResult) -> dict[str, object]:
     identity["resultKey"] = result_key
     identity["canonicalKeyPartsJson"] = canonical_json_bytes(key_parts).decode("utf-8")
     detail["resultKey"] = result_key
+    sidecar_manifest = detail["factorHoldingHistorySidecar"]
+    sidecar = sidecar_manifest["data"]
+    sidecar["resultKey"] = result_key
+    for factor_history in sidecar["factors"].values():
+        factor_history["resultKey"] = result_key
+    sidecar_bytes = canonical_json_bytes(sidecar)
+    sidecar_manifest.update(
+        {
+            "resultKey": result_key,
+            "path": f"data/factor-holding-history/{result_key}.json",
+            "sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+            "bytes": len(sidecar_bytes),
+        }
+    )
     return detail
 
 
@@ -135,6 +158,20 @@ def _refresh_detail_identity(detail: dict[str, object]) -> None:
     identity["resultKey"] = result_key
     identity["canonicalKeyPartsJson"] = canonical_json_bytes(key_parts).decode("utf-8")
     detail["resultKey"] = result_key
+    sidecar_manifest = detail["factorHoldingHistorySidecar"]
+    sidecar = sidecar_manifest["data"]
+    sidecar["resultKey"] = result_key
+    for factor_history in sidecar["factors"].values():
+        factor_history["resultKey"] = result_key
+    sidecar_bytes = canonical_json_bytes(sidecar)
+    sidecar_manifest.update(
+        {
+            "resultKey": result_key,
+            "path": f"data/factor-holding-history/{result_key}.json",
+            "sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+            "bytes": len(sidecar_bytes),
+        }
+    )
 
 
 def _artifact(
@@ -148,6 +185,28 @@ def _artifact(
     detail["config"]["top_n"] = top_n
     detail["researchInputs"]["topN"] = top_n
     detail["portfolioPolicy"]["parameters"]["topN"] = top_n
+    shortage_reason = "fewer_complete_policy_inputs_than_top_n"
+    cash_reason = "max_weight_capacity_or_missing_policy_inputs"
+    portfolios = detail["factorPortfolios"]
+    for portfolio in portfolios.values():
+        if portfolio["status"] != "available":
+            continue
+        reasons = [reason for reason in portfolio["reasons"] if reason != shortage_reason]
+        if len(portfolio["weights"]) < top_n:
+            insert_at = reasons.index(cash_reason) if cash_reason in reasons else len(reasons)
+            reasons.insert(insert_at, shortage_reason)
+        portfolio["reasons"] = reasons
+
+    selected_factor = detail["selectedFactor"]
+    detail["currentResearchTarget"] = deepcopy(portfolios[selected_factor])
+    selected_policy = detail["selectedWeightingPolicy"]
+    for row in detail["factorPolicyRanking"]:
+        if row["policy_id"] != selected_policy:
+            continue
+        portfolio = portfolios[row["factor"]]
+        row["current_portfolio_input_reasons"] = (
+            [] if portfolio["status"] == "available" else list(portfolio["reasons"])
+        )
     identity = detail["resultIdentity"]
     key_parts = identity["keyParts"]
     key_parts["normalizedInputs"]["top_n"] = top_n
@@ -215,6 +274,15 @@ def test_writes_sparse_content_addressed_grid_and_default_aliases(
     )
     default_detail = (manifest_path.parent / default_entry["detail"]["path"]).read_bytes()
     default_summary = (manifest_path.parent / default_entry["summary"]["path"]).read_bytes()
+    published_detail = json.loads(default_detail)
+    benchmark_order = published_detail["performance"]["benchmarkOrder"]
+    assert benchmark_order == published_detail["config"]["comparison_benchmarks"]
+    assert set(published_detail["data"]["comparisonBenchmarkAvailability"]) == set(benchmark_order)
+    assert set(published_detail["performance"]["benchmarkCurves"]) == set(benchmark_order)
+    assert all(
+        set(period["benchmarks"]) == set(benchmark_order)
+        for period in published_detail["performance"]["periods"]
+    )
     assert (manifest_path.parent / "latest.json").read_bytes() == default_detail
     assert (manifest_path.parent / "latest-summary.json").read_bytes() == default_summary
     assert (tmp_path / "data" / "dashboard.json").read_bytes() == default_detail
@@ -363,7 +431,9 @@ def test_exact_tuple_resolution_has_no_partial_or_nearest_fallback(
 
     assert entry["resultKey"] == _result_key(artifact)
     assert resolved.entry == entry
-    assert resolved.detail == artifact.detail
+    expected_detail, expected_sidecar = externalize_factor_holding_history_sidecar(artifact.detail)
+    assert expected_sidecar is not None
+    assert resolved.detail == expected_detail
     assert resolved.summary == artifact.summary
     with pytest.raises(UnsupportedStaticGridInputs, match="local backend/API"):
         resolve_exact_inputs(manifest, {"top_n": 20})
@@ -571,6 +641,41 @@ def test_rejects_detail_larger_than_dashboard_publication_limit(
             [artifact],
             default_result_key=_result_key(artifact),
         )
+
+
+def test_rejects_sidecar_larger_than_publication_limit_before_writing(
+    canonical_actual_artifact: StaticGridArtifact,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(canonical_actual_artifact)
+    original_externalize = externalize_factor_holding_history_sidecar
+
+    def oversized_externalize(detail):
+        public_detail, sidecar_bytes = original_externalize(detail)
+        assert sidecar_bytes is not None
+        oversized = b"x" * (MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES + 1)
+        manifest = public_detail["factorHoldingHistorySidecar"]
+        manifest["bytes"] = len(oversized)
+        manifest["sha256"] = hashlib.sha256(oversized).hexdigest()
+        return public_detail, oversized
+
+    monkeypatch.setattr(
+        "momentum_factor_lab.static_grid.externalize_factor_holding_history_sidecar",
+        oversized_externalize,
+    )
+    data_dir = tmp_path / "data"
+
+    with pytest.raises(
+        StaticGridContractError,
+        match=rf"limit is {MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:,}",
+    ):
+        write_static_grid(
+            data_dir,
+            [artifact],
+            default_result_key=_result_key(artifact),
+        )
+    assert not data_dir.exists()
 
 
 def _add_excluded_independent_pair(artifact: StaticGridArtifact) -> None:
@@ -824,25 +929,80 @@ def test_validator_rejects_alias_that_is_not_default_copy(
         validate_static_grid(manifest_path)
 
 
-def test_current_three_entry_actual_grid_round_trips_through_publication_boundary(
+def test_tracked_three_entry_grid_matches_one_complete_publication_contract(
     tmp_path: Path,
 ) -> None:
     manifest_path = ROOT / "docs" / "data" / "grid" / "v1" / "manifest.json"
-    manifest = validate_static_grid(manifest_path)
+    raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = validate_manifest(raw_manifest)
     assert manifest["entryCount"] == 3
 
-    artifacts = [
-        StaticGridArtifact(
-            detail=json.loads(
-                (manifest_path.parent / entry["detail"]["path"]).read_text(encoding="utf-8")
-            ),
-            summary=json.loads(
-                (manifest_path.parent / entry["summary"]["path"]).read_text(encoding="utf-8")
-            ),
-            preset_id=entry.get("presetId"),
+    artifacts = []
+    for entry in manifest["entries"]:
+        detail = json.loads(
+            (manifest_path.parent / entry["detail"]["path"]).read_text(encoding="utf-8")
         )
-        for entry in manifest["entries"]
-    ]
+        sidecar_manifest = detail.get("factorHoldingHistorySidecar")
+        if isinstance(sidecar_manifest, dict) and sidecar_manifest.get("storage") == "external":
+            sidecar_path = ROOT / "docs" / str(sidecar_manifest["path"])
+            sidecar_manifest["storage"] = "embedded"
+            sidecar_manifest["data"] = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        artifacts.append(
+            StaticGridArtifact(
+                detail=detail,
+                summary=json.loads(
+                    (manifest_path.parent / entry["summary"]["path"]).read_text(encoding="utf-8")
+                ),
+                preset_id=entry.get("presetId"),
+            )
+        )
+    performance_contracts = {
+        artifact.detail.get("performance", {}).get("contractVersion") for artifact in artifacts
+    }
+    if performance_contracts == {None}:
+        # The checked-in publication predates the Python-owned period and
+        # comparison-benchmark contract.  Preserve and verify that deployment
+        # byte-for-byte until an explicitly approved three-run regeneration;
+        # do not pretend it satisfies the stricter current publication schema.
+        for entry in manifest["entries"]:
+            for kind in ("detail", "summary"):
+                reference = entry[kind]
+                encoded = (manifest_path.parent / reference["path"]).read_bytes()
+                assert len(encoded) == reference["bytes"]
+                assert hashlib.sha256(encoded).hexdigest() == reference["sha256"]
+
+        default_entry = next(
+            entry
+            for entry in manifest["entries"]
+            if entry["resultKey"] == manifest["defaultResultKey"]
+        )
+        default_bytes = {
+            "detail": (manifest_path.parent / default_entry["detail"]["path"]).read_bytes(),
+            "summary": (manifest_path.parent / default_entry["summary"]["path"]).read_bytes(),
+        }
+        for name, reference in manifest["defaultAliases"]["artifacts"].items():
+            encoded = (manifest_path.parent / reference["path"]).read_bytes()
+            assert len(encoded) == reference["bytes"]
+            assert hashlib.sha256(encoded).hexdigest() == reference["sha256"]
+            expected_kind = "summary" if "Summary" in name else "detail"
+            assert encoded == default_bytes[expected_kind]
+
+        with pytest.raises(
+            StaticGridContractError,
+            match=(
+                r"^detail fails the canonical schema-v4 dashboard contract: "
+                r"dashboard payload missing fields: "
+                r"factorDiagnostics, factorHoldingHistorySidecar, "
+                r"selectedBacktestHoldingHistory$"
+            ),
+        ):
+            validate_static_grid(manifest_path)
+        return
+
+    assert performance_contracts == {PERFORMANCE_CONTRACT_VERSION}, (
+        "tracked static-grid publication mixes legacy and current performance contracts"
+    )
+    manifest = validate_static_grid(manifest_path)
     rebuilt_path = write_static_grid(
         tmp_path / "data",
         artifacts,

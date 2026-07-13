@@ -24,7 +24,9 @@ from .universe import (
 
 DEMO_GENERATOR_VERSION = "demo-v2"
 RECORD_CANONICALIZATION_VERSION = "rfc8785-jcs-records-v1"
-SNAPSHOT_READ_CONTRACT = {
+MATRIX_CANONICALIZATION_VERSION = "datetime64-ns-matrix-v2"
+LEGACY_MATRIX_DATETIME_UNITS = ("s", "ms", "us", "ns")
+LEGACY_SNAPSHOT_READ_CONTRACT = {
     "format": "gzip_csv",
     "indexColumn": 0,
     "parseDates": True,
@@ -35,7 +37,12 @@ SNAPSHOT_READ_CONTRACT = {
         "float_precision='round_trip') before recomputing canonical matrix hashes."
     ),
 }
-LIVE_SNAPSHOT_HASH_FIELDS = (
+SNAPSHOT_READ_CONTRACT = {
+    **LEGACY_SNAPSHOT_READ_CONTRACT,
+    "candidateZeroVolumeClosePolicy": "mask_adjusted_and_raw_v1",
+    "matrixCanonicalization": MATRIX_CANONICALIZATION_VERSION,
+}
+LIVE_SNAPSHOT_HASH_FIELDS_V2 = (
     "prices",
     "volumes",
     "dollarVolumes",
@@ -46,6 +53,7 @@ LIVE_SNAPSHOT_HASH_FIELDS = (
     "priceSources",
     "dataSources",
 )
+LIVE_SNAPSHOT_HASH_FIELDS = (*LIVE_SNAPSHOT_HASH_FIELDS_V2, "comparisonPrices")
 
 
 @dataclass(slots=True)
@@ -72,11 +80,16 @@ class MarketData:
     price_sources: pd.DataFrame = field(default_factory=pd.DataFrame)
     data_sources: pd.DataFrame = field(default_factory=pd.DataFrame)
     raw_close_proxy_symbol_count: int = 0
+    comparison_prices: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def candidate_symbols(self) -> list[str]:
         benchmark = normalize_symbol(self.benchmark)
         return [column for column in self.prices.columns if normalize_symbol(column) != benchmark]
+
+    @property
+    def comparison_symbols(self) -> list[str]:
+        return [normalize_symbol(column) for column in self.comparison_prices.columns]
 
 
 def _normalize_matrix(frame: pd.DataFrame, *, source: str) -> pd.DataFrame:
@@ -288,8 +301,13 @@ def _ordered_symbols_sha256(symbols: list[str]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _canonical_matrix_sha256(frame: pd.DataFrame) -> str:
-    """Hash ordered labels, dates, missingness, and finite float64 values."""
+def _matrix_sha256(
+    frame: pd.DataFrame,
+    *,
+    prefix: bytes,
+    datetime_unit: str,
+) -> str:
+    """Hash ordered labels, canonical dates, missingness, and finite float64 values."""
 
     numeric = frame.to_numpy(dtype=np.float64, na_value=np.nan)
     missing = np.isnan(numeric)
@@ -299,17 +317,41 @@ def _canonical_matrix_sha256(frame: pd.DataFrame) -> str:
     stable_values[missing] = 0.0
 
     digest = hashlib.sha256()
-    digest.update(b"momentum-factor-lab-matrix-v1\0")
+    digest.update(prefix)
     digest.update(np.asarray(frame.shape, dtype="<i8").tobytes())
     for column in frame.columns:
         encoded = str(column).encode("utf-8")
         digest.update(len(encoded).to_bytes(8, "little"))
         digest.update(encoded)
-    dates = pd.DatetimeIndex(frame.index).asi8.astype("<i8", copy=False)
+    dates = pd.DatetimeIndex(frame.index).as_unit(datetime_unit).asi8.astype("<i8", copy=False)
     digest.update(dates.tobytes())
     digest.update(np.packbits(missing.reshape(-1), bitorder="little").tobytes())
     digest.update(stable_values.astype("<f8", copy=False).tobytes(order="C"))
     return digest.hexdigest()
+
+
+def _legacy_canonical_matrix_sha256(
+    frame: pd.DataFrame,
+    *,
+    datetime_unit: str,
+) -> str:
+    if datetime_unit not in LEGACY_MATRIX_DATETIME_UNITS:
+        raise ValueError("unsupported legacy matrix datetime unit")
+    return _matrix_sha256(
+        frame,
+        prefix=b"momentum-factor-lab-matrix-v1\0",
+        datetime_unit=datetime_unit,
+    )
+
+
+def _canonical_matrix_sha256(frame: pd.DataFrame) -> str:
+    """Hash a matrix with a datetime-unit-invariant nanosecond date index."""
+
+    return _matrix_sha256(
+        frame,
+        prefix=b"momentum-factor-lab-matrix-v2\0",
+        datetime_unit="ns",
+    )
 
 
 def _business_dates(config: RunConfig) -> pd.DatetimeIndex:
@@ -745,6 +787,7 @@ def _live_inputs(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
     str,
     dict[str, str | None],
     list[str],
@@ -758,9 +801,35 @@ def _live_inputs(
     full_prices = acquired.raw_prices if not acquired.raw_prices.empty else acquired.prices
     full_volumes = acquired.raw_volumes if not acquired.raw_volumes.empty else acquired.volumes
     raw_closes = acquired.raw_closes.reindex(index=full_prices.index, columns=full_prices.columns)
+    comparison_symbols = list(config.comparison_benchmarks)
+    comparison_set = set(comparison_symbols)
+    candidate_symbols = {
+        normalize_symbol(str(symbol))
+        for symbol in acquired.candidate_universe.get("symbol", pd.Series(dtype=object))
+        if normalize_symbol(str(symbol)) not in comparison_set
+    }
+    candidate_columns = [
+        column
+        for column in full_prices.columns
+        if normalize_symbol(str(column)) in candidate_symbols
+    ]
     non_positive_price_cells = int(full_prices.le(0.0).fillna(False).to_numpy().sum())
     non_positive_raw_close_cells = int(raw_closes.le(0.0).fillna(False).to_numpy().sum())
     negative_volume_cells = int(full_volumes.lt(0.0).fillna(False).to_numpy().sum())
+    zero_volume_candidate = full_volumes.reindex(
+        index=full_prices.index,
+        columns=candidate_columns,
+    ).eq(0.0)
+    zero_volume_adjusted_price_cells = int(
+        (zero_volume_candidate & full_prices.reindex(columns=candidate_columns).notna())
+        .to_numpy()
+        .sum()
+    )
+    zero_volume_raw_close_cells = int(
+        (zero_volume_candidate & raw_closes.reindex(columns=candidate_columns).notna())
+        .to_numpy()
+        .sum()
+    )
     # Public providers occasionally encode an unavailable quote as zero. A stock price
     # cannot be zero, so treating those cells as observations would create log(0),
     # artificial -100% returns, and ticker-reuse joins. Preserve the symbol and expose
@@ -768,12 +837,33 @@ def _live_inputs(
     full_prices = full_prices.mask(full_prices.le(0.0))
     raw_closes = raw_closes.mask(raw_closes.le(0.0))
     full_volumes = full_volumes.mask(full_volumes.lt(0.0))
-    candidate_symbols = set(acquired.candidate_universe["symbol"].astype(str))
+    # A provider can repeat the last sale indefinitely while reporting zero
+    # traded shares during a suspension or halt.  Such a row is useful as a
+    # stale reference mark but is not an observed, executable close.  Candidate
+    # stock backtests therefore fail closed on it instead of selling at a
+    # carried quote.  Comparison benchmarks are intentionally excluded because
+    # index volume can be undefined and comparator prices are never executed.
+    if candidate_columns:
+        full_prices.loc[:, candidate_columns] = full_prices.loc[:, candidate_columns].mask(
+            zero_volume_candidate
+        )
+        raw_closes.loc[:, candidate_columns] = raw_closes.loc[:, candidate_columns].mask(
+            zero_volume_candidate
+        )
     benchmark = normalize_symbol(config.benchmark)
+    analysis_universe = acquired.candidate_universe.loc[
+        ~acquired.candidate_universe["symbol"]
+        .astype(str)
+        .map(normalize_symbol)
+        .isin(comparison_set)
+    ].copy()
+    candidate_symbols = set(analysis_universe["symbol"].astype(str))
     returned_candidates = [
         symbol
-        for symbol in acquired.candidate_universe["symbol"].astype(str)
-        if symbol in full_prices and full_prices[symbol].notna().any()
+        for symbol in analysis_universe["symbol"].astype(str)
+        if symbol not in comparison_set
+        and symbol in full_prices
+        and full_prices[symbol].notna().any()
     ]
     columns = ([benchmark] if benchmark in full_prices else []) + returned_candidates
     prices = (
@@ -781,6 +871,10 @@ def _live_inputs(
     )
     volumes = full_volumes.reindex(index=prices.index, columns=prices.columns)
     raw_closes = raw_closes.reindex(index=prices.index, columns=prices.columns)
+    comparison_prices = full_prices.reindex(
+        index=prices.index,
+        columns=comparison_symbols,
+    )
     raw_close_proxy = raw_closes.isna() & prices.notna()
     effective_raw_closes = raw_closes.combine_first(prices)
     dollar_volumes = effective_raw_closes.mul(volumes)
@@ -791,12 +885,13 @@ def _live_inputs(
         "rawCloses": _canonical_matrix_sha256(raw_closes),
         "dollarVolumes": _canonical_matrix_sha256(dollar_volumes),
         "requestedSymbols": _ordered_symbols_sha256(
-            [symbol for symbol in acquired.candidate_universe["symbol"].astype(str)]
+            [symbol for symbol in analysis_universe["symbol"].astype(str)]
         ),
         "returnedSymbols": _ordered_symbols_sha256(returned_candidates),
-        "universeRecords": canonical_records_sha256(acquired.candidate_universe),
+        "universeRecords": canonical_records_sha256(analysis_universe),
         "priceSources": canonical_records_sha256(acquired.price_sources),
         "dataSources": canonical_records_sha256(acquired.data_sources),
+        "comparisonPrices": _canonical_matrix_sha256(comparison_prices),
     }
     notes = [
         "Actual-market analysis uses provider adjusted close for factor returns.",
@@ -814,6 +909,14 @@ def _live_inputs(
             f"raw_close_non_positive={non_positive_raw_close_cells}, "
             f"share_volume_negative={negative_volume_cells}."
         )
+    if zero_volume_adjusted_price_cells or zero_volume_raw_close_cells:
+        notes.append(
+            "Candidate zero-volume quotes were treated as stale/untradable missing "
+            "closes before hashing and analysis: "
+            f"adjusted_price_zero_volume={zero_volume_adjusted_price_cells}, "
+            f"raw_close_zero_volume={zero_volume_raw_close_cells}. Comparison benchmarks were "
+            "not masked by this stock execution rule."
+        )
     returned_set = set(returned_candidates)
     missing_candidates = len(candidate_symbols - returned_set)
     if missing_candidates:
@@ -825,7 +928,8 @@ def _live_inputs(
         volumes,
         dollar_volumes,
         raw_closes,
-        acquired.candidate_universe,
+        comparison_prices,
+        analysis_universe,
         acquired.price_sources,
         acquired.data_sources,
         acquired.provider,
@@ -848,6 +952,7 @@ def _finalize_market_data(
     volume_basis: str,
     input_sha256: dict[str, str | None],
     notes: list[str],
+    comparison_prices: pd.DataFrame | None = None,
     universe: pd.DataFrame | None = None,
     requested_candidate_count: int | None = None,
     provider_returned_candidate_count: int | None = None,
@@ -857,6 +962,16 @@ def _finalize_market_data(
     raw_close_proxy_symbol_count: int = 0,
 ) -> MarketData:
     prices = _slice_dates(prices, config).dropna(axis=0, how="all").dropna(axis=1, how="all")
+    benchmark = normalize_symbol(config.benchmark)
+    comparison_symbols = list(config.comparison_benchmarks)
+    comparison_set = set(comparison_symbols)
+    embedded_comparison_prices = prices.reindex(
+        columns=[symbol for symbol in comparison_symbols if symbol in prices.columns]
+    )
+    analysis_columns = [
+        column for column in prices.columns if column == benchmark or column not in comparison_set
+    ]
+    prices = prices.reindex(columns=analysis_columns)
     volumes = _slice_dates(volumes, config).reindex(index=prices.index, columns=prices.columns)
     dollar_volumes = _slice_dates(dollar_volumes, config).reindex(
         index=prices.index,
@@ -866,6 +981,28 @@ def _finalize_market_data(
         _slice_dates(raw_closes, config).reindex(index=prices.index, columns=prices.columns)
         if raw_closes is not None and not raw_closes.empty
         else pd.DataFrame(index=prices.index)
+    )
+    has_supplied_comparison = comparison_prices is not None and not comparison_prices.empty
+    supplied_comparison_prices = (
+        _slice_dates(comparison_prices, config).copy()
+        if has_supplied_comparison
+        else pd.DataFrame(index=prices.index)
+    )
+    if has_supplied_comparison:
+        supplied_comparison_prices.columns = [
+            normalize_symbol(column) for column in supplied_comparison_prices.columns
+        ]
+        if len(set(supplied_comparison_prices.columns)) != len(supplied_comparison_prices.columns):
+            raise ValueError("comparison prices contain duplicate normalized symbols")
+        comparison_symbols = list(supplied_comparison_prices.columns)
+    canonical_comparison_prices = supplied_comparison_prices.reindex(
+        index=prices.index,
+        columns=comparison_symbols,
+    ).combine_first(
+        embedded_comparison_prices.reindex(
+            index=prices.index,
+            columns=comparison_symbols,
+        )
     )
     if prices.empty or len(prices.index) < config.min_history_days + 2:
         raise ValueError("price input does not contain enough observed rows after date filtering")
@@ -879,7 +1016,8 @@ def _finalize_market_data(
         canonical_raw_closes.le(0.0).fillna(False).to_numpy().any()
     ):
         raise ValueError("raw closes must be strictly positive when observed")
-    benchmark = normalize_symbol(config.benchmark)
+    if bool(canonical_comparison_prices.le(0.0).fillna(False).to_numpy().any()):
+        raise ValueError("comparison prices must be strictly positive when observed")
     candidate_columns = [column for column in prices.columns if column != benchmark]
     if len(candidate_columns) < config.top_n:
         raise ValueError(
@@ -933,6 +1071,7 @@ def _finalize_market_data(
         price_sources=price_sources if price_sources is not None else pd.DataFrame(),
         data_sources=data_sources if data_sources is not None else pd.DataFrame(),
         raw_close_proxy_symbol_count=raw_close_proxy_symbol_count,
+        comparison_prices=canonical_comparison_prices,
     )
 
 
@@ -944,6 +1083,7 @@ def load_market_data(config: RunConfig) -> MarketData:
             volumes,
             dollar_volumes,
             raw_closes,
+            comparison_prices,
             universe,
             price_sources,
             data_sources,
@@ -958,6 +1098,7 @@ def load_market_data(config: RunConfig) -> MarketData:
             volumes=volumes,
             dollar_volumes=dollar_volumes,
             raw_closes=raw_closes,
+            comparison_prices=comparison_prices,
             source_mode="live_market",
             source_label=provider,
             price_basis="provider_adjusted_close",
@@ -1065,6 +1206,29 @@ def write_market_data_snapshot(market: MarketData, output_dir: Path) -> dict[str
         index=market.prices.index,
         columns=market.prices.columns,
     )
+    candidate_zero_volume = canonical_volumes.reindex(columns=candidate_symbols).eq(0.0)
+    if bool(
+        (candidate_zero_volume & market.prices.reindex(columns=candidate_symbols).notna())
+        .to_numpy()
+        .any()
+    ) or bool(
+        (candidate_zero_volume & canonical_raw_closes.reindex(columns=candidate_symbols).notna())
+        .to_numpy()
+        .any()
+    ):
+        raise ValueError("live market violates the candidate zero-volume close policy")
+    canonical_comparison_prices = market.comparison_prices.reindex(index=market.prices.index).copy()
+    canonical_comparison_prices.columns = [
+        normalize_symbol(column) for column in canonical_comparison_prices.columns
+    ]
+    comparison_symbols = list(canonical_comparison_prices.columns)
+    if (
+        canonical_comparison_prices.empty
+        or market.benchmark not in comparison_symbols
+        or any(not symbol for symbol in comparison_symbols)
+        or len(set(comparison_symbols)) != len(comparison_symbols)
+    ):
+        raise ValueError("live market comparison-price contract is incomplete")
     input_hashes = {
         "prices": _canonical_matrix_sha256(market.prices),
         "volumes": _canonical_matrix_sha256(canonical_volumes),
@@ -1074,6 +1238,7 @@ def write_market_data_snapshot(market: MarketData, output_dir: Path) -> dict[str
         "universeRecords": canonical_records_sha256(universe),
         "priceSources": canonical_records_sha256(price_sources),
         "dataSources": canonical_records_sha256(data_sources),
+        "comparisonPrices": _canonical_matrix_sha256(canonical_comparison_prices),
     }
     if market.source_mode == "live_market":
         input_hashes["rawCloses"] = _canonical_matrix_sha256(canonical_raw_closes)
@@ -1102,6 +1267,7 @@ def write_market_data_snapshot(market: MarketData, output_dir: Path) -> dict[str
         "dataSources": staging_dir / "data_sources.json",
         "manifest": staging_dir / "market_data_manifest.json",
         "rawCloses": staging_dir / "raw_closes.csv.gz",
+        "comparisonPrices": staging_dir / "comparison_adjusted_prices.csv.gz",
     }
     try:
         market.prices.to_csv(paths["prices"], compression=compression)
@@ -1114,8 +1280,12 @@ def write_market_data_snapshot(market: MarketData, output_dir: Path) -> dict[str
             paths["rawCloses"],
             compression=compression,
         )
+        canonical_comparison_prices.to_csv(
+            paths["comparisonPrices"],
+            compression=compression,
+        )
         manifest = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "mode": market.source_mode,
             "sourceLabel": market.source_label,
             "provider": market.provider,
@@ -1131,6 +1301,13 @@ def write_market_data_snapshot(market: MarketData, output_dir: Path) -> dict[str
             "priceBasis": market.price_basis,
             "volumeBasis": market.volume_basis,
             "rawCloseProxySymbolCount": market.raw_close_proxy_symbol_count,
+            "comparisonSymbols": comparison_symbols,
+            "comparisonPriceBasis": market.price_basis,
+            "comparisonAsOf": (
+                canonical_comparison_prices.dropna(axis=0, how="all").index.max().date().isoformat()
+                if not canonical_comparison_prices.dropna(axis=0, how="all").empty
+                else None
+            ),
             "readContract": SNAPSHOT_READ_CONTRACT,
             "matrixSha256": input_hashes,
             "fileSha256": {
@@ -1183,12 +1360,15 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("market-data snapshot manifest is missing or invalid") from exc
-    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2:
+    if not isinstance(manifest, dict) or manifest.get("schemaVersion") not in {2, 3}:
         raise ValueError("unsupported market-data snapshot manifest")
+    schema_version = int(manifest["schemaVersion"])
     if manifest.get("mode") != "live_market":
         raise ValueError("market-data snapshot must contain actual live-market data")
+    snapshot_read_contract = manifest.get("readContract")
+    legacy_read_contract = snapshot_read_contract == LEGACY_SNAPSHOT_READ_CONTRACT
     if (
-        manifest.get("readContract") != SNAPSHOT_READ_CONTRACT
+        snapshot_read_contract not in (SNAPSHOT_READ_CONTRACT, LEGACY_SNAPSHOT_READ_CONTRACT)
         or not isinstance(manifest.get("sourceLabel"), str)
         or not str(manifest["sourceLabel"]).strip()
         or not isinstance(manifest.get("provider"), str)
@@ -1199,6 +1379,14 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         or not str(manifest["volumeBasis"]).strip()
         or not isinstance(manifest.get("requestedThrough"), str)
         or not str(manifest["requestedThrough"]).strip()
+        or (
+            schema_version == 3
+            and (
+                not isinstance(manifest.get("comparisonPriceBasis"), str)
+                or not str(manifest["comparisonPriceBasis"]).strip()
+                or not isinstance(manifest.get("comparisonSymbols"), list)
+            )
+        )
     ):
         raise ValueError("market-data snapshot metadata contract is incomplete")
     files = manifest.get("files")
@@ -1208,7 +1396,10 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         raise ValueError("market-data snapshot file contract is incomplete")
     if not isinstance(matrix_hashes, dict):
         raise ValueError("market-data snapshot matrix hashes are missing")
-    if set(matrix_hashes) != set(LIVE_SNAPSHOT_HASH_FIELDS) or any(
+    expected_hash_fields = (
+        LIVE_SNAPSHOT_HASH_FIELDS if schema_version == 3 else LIVE_SNAPSHOT_HASH_FIELDS_V2
+    )
+    if set(matrix_hashes) != set(expected_hash_fields) or any(
         not isinstance(digest, str)
         or len(digest) != 64
         or any(character not in "0123456789abcdef" for character in digest)
@@ -1224,6 +1415,8 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         "priceSources",
         "dataSources",
     )
+    if schema_version == 3:
+        required = (*required, "comparisonPrices")
     if set(files) != set(required) or set(file_hashes) != set(required):
         raise ValueError("market-data snapshot file contract is incomplete")
     paths: dict[str, Path] = {}
@@ -1250,6 +1443,7 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         frame.columns = [normalize_symbol(column) for column in frame.columns]
         return frame.apply(pd.to_numeric, errors="coerce")
 
+    benchmark = normalize_symbol(config.benchmark)
     prices = read_frame("prices")
     volumes = read_frame("volumes").reindex(index=prices.index, columns=prices.columns)
     dollar_volumes = read_frame("dollarVolumes").reindex(
@@ -1257,6 +1451,21 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         columns=prices.columns,
     )
     raw_closes = read_frame("rawCloses").reindex(index=prices.index, columns=prices.columns)
+    if schema_version == 3:
+        comparison_prices = read_frame("comparisonPrices").reindex(index=prices.index)
+        comparison_symbols = [
+            normalize_symbol(symbol) for symbol in manifest.get("comparisonSymbols", [])
+        ]
+        if (
+            not comparison_symbols
+            or any(not symbol for symbol in comparison_symbols)
+            or len(set(comparison_symbols)) != len(comparison_symbols)
+            or comparison_symbols != list(comparison_prices.columns)
+            or benchmark not in comparison_symbols
+        ):
+            raise ValueError("market-data snapshot comparison symbol contract is invalid")
+    else:
+        comparison_prices = prices.reindex(columns=[benchmark])
 
     def read_records(field: str) -> pd.DataFrame:
         try:
@@ -1278,7 +1487,6 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         universe_symbols
     ):
         raise ValueError("market-data snapshot universe symbols are blank or duplicated")
-    benchmark = normalize_symbol(config.benchmark)
     candidate_columns = [column for column in prices.columns if column != benchmark]
     candidate_set = set(candidate_columns)
     if [symbol for symbol in universe_symbols if symbol in candidate_set] != candidate_columns:
@@ -1288,20 +1496,65 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         data_sources,
         candidate_columns,
     )
-    observed_hashes = {
-        "prices": _canonical_matrix_sha256(prices),
-        "volumes": _canonical_matrix_sha256(volumes),
-        "dollarVolumes": _canonical_matrix_sha256(dollar_volumes),
-        "rawCloses": _canonical_matrix_sha256(raw_closes),
+    matrix_frames = {
+        "prices": prices,
+        "volumes": volumes,
+        "dollarVolumes": dollar_volumes,
+        "rawCloses": raw_closes,
+    }
+    if schema_version == 3:
+        matrix_frames["comparisonPrices"] = comparison_prices
+    non_matrix_hashes = {
         "requestedSymbols": _ordered_symbols_sha256(universe_symbols),
         "returnedSymbols": _ordered_symbols_sha256(candidate_columns),
         "universeRecords": canonical_records_sha256(universe),
         "priceSources": canonical_records_sha256(price_sources),
         "dataSources": canonical_records_sha256(data_sources),
     }
-    for component, digest in observed_hashes.items():
+    for component, digest in non_matrix_hashes.items():
         if matrix_hashes.get(component) != digest:
             raise ValueError(f"market-data snapshot {component} matrix hash mismatch")
+    if legacy_read_contract:
+        legacy_datetime_unit = next(
+            (
+                unit
+                for unit in LEGACY_MATRIX_DATETIME_UNITS
+                if all(
+                    matrix_hashes.get(component)
+                    == _legacy_canonical_matrix_sha256(frame, datetime_unit=unit)
+                    for component, frame in matrix_frames.items()
+                )
+            ),
+            None,
+        )
+        if legacy_datetime_unit is None:
+            raise ValueError(
+                "legacy market-data snapshot matrix hashes have no common datetime unit"
+            )
+    else:
+        for component, frame in matrix_frames.items():
+            if matrix_hashes.get(component) != _canonical_matrix_sha256(frame):
+                raise ValueError(f"market-data snapshot {component} matrix hash mismatch")
+    upgraded_input_hashes = {
+        **{
+            component: _canonical_matrix_sha256(frame) for component, frame in matrix_frames.items()
+        },
+        **non_matrix_hashes,
+    }
+    candidate_zero_volume = volumes.reindex(columns=candidate_columns).eq(0.0)
+    adjusted_close_violations = (
+        candidate_zero_volume & prices.reindex(columns=candidate_columns).notna()
+    )
+    raw_close_violations = (
+        candidate_zero_volume & raw_closes.reindex(columns=candidate_columns).notna()
+    )
+    if bool(adjusted_close_violations.to_numpy().any()) or bool(
+        raw_close_violations.to_numpy().any()
+    ):
+        prefix = "legacy " if legacy_read_contract else ""
+        raise ValueError(
+            f"{prefix}market-data snapshot violates the candidate zero-volume close policy"
+        )
     expected_as_of = str(manifest.get("actualAsOf") or "")
     observed_as_of = prices.index.max().date().isoformat() if not prices.empty else ""
     if observed_as_of != expected_as_of:
@@ -1340,7 +1593,7 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
         source_label=str(manifest["sourceLabel"]),
         price_basis=str(manifest["priceBasis"]),
         volume_basis=str(manifest["volumeBasis"]),
-        input_sha256={str(key): value for key, value in matrix_hashes.items()},
+        input_sha256=upgraded_input_hashes,
         notes=[
             *[
                 str(note)
@@ -1354,7 +1607,16 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
                 "the score-liquidity policy uses trailing raw dollar volume and no size factor."
             ),
             "Verified replay of an exported actual-market snapshot; no synthetic fallback used.",
+            *(
+                []
+                if schema_version == 3
+                else [
+                    "Legacy schema-v2 snapshot has no separate chart-comparator matrix; "
+                    "only its primary benchmark can be replayed and other comparisons are unavailable."
+                ]
+            ),
         ],
+        comparison_prices=comparison_prices,
         universe=universe,
         requested_candidate_count=requested_candidate_count,
         provider_returned_candidate_count=provider_returned_candidate_count,

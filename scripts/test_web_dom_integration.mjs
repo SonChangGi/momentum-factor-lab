@@ -1,321 +1,167 @@
 import assert from "node:assert/strict";
-import { createHash, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
-import vm from "node:vm";
 
-const source = readFileSync("momentum_factor_lab/web/dashboard.js", "utf8");
 const html = readFileSync("momentum_factor_lab/web/index.html", "utf8");
-const manifest = JSON.parse(readFileSync("docs/data/grid/v1/manifest.json", "utf8"));
-const defaultEntry = manifest.entries.find(
-  (entry) => entry.resultKey === manifest.defaultResultKey,
+const css = readFileSync("momentum_factor_lab/web/styles.css", "utf8");
+const js = readFileSync("momentum_factor_lab/web/dashboard.js", "utf8");
+
+const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
+const requiredHosts = [
+  "run-status",
+  "best-factor",
+  "selected-factor",
+  "recommendation-status",
+  "data-quality-summary",
+  "tradability-gate-list",
+  "selected-factor-method-title",
+  "factor-category-summary",
+  "factor-rank-ic-summary",
+  "factor-redundancy-summary",
+  "factor-return-chart",
+  "backtest-chart",
+  "performance-metrics-table",
+  "window-comparison-chart",
+  "leader-trend-chart",
+  "weight-chart",
+  "ensemble-weight-chart",
+  "topn-hint",
+  "current-output-table",
+  "factor-table",
+  "holdings-table",
+  "daily-weights-table",
+  "period-ranking-table",
+  "canonical-allocation-chart",
+  "canonical-allocation-table",
+  "joint-ranking-chart",
+  "joint-ranking-table",
+  "joint-ranking-scope",
+  "joint-ranking-title",
+  "joint-ranking-scope-note",
+  "canonical-component-chart",
+  "canonical-policy-cards",
+  "canonical-guardrail-list",
+  "canonical-data-contract",
+  "canonical-universe-scope",
+  "canonical-universe-evidence",
+];
+for (const id of requiredHosts) assert(ids.has(id), `missing live-render host: ${id}`);
+
+const literalSelectors = [
+  ...js.matchAll(/(?:querySelector|setText|appendEmpty)\(['"]#([A-Za-z0-9_-]+)/g),
+].map((match) => match[1]);
+const missingSelectors = [...new Set(literalSelectors)].filter((id) => !ids.has(id));
+assert.deepEqual(missingSelectors, [], "every literal id selector must resolve in the restored HTML");
+
+assert.match(js, /renderAll\(\)[\s\S]*renderFactorReturnChart\(\);[\s\S]*renderBacktestChart\(\);/);
+assert.match(js, /renderAll\(\)[\s\S]*renderWindowComparisonChart\(\);[\s\S]*renderLeaderTrendChart\(\);/);
+assert.match(js, /renderAll\(\)[\s\S]*renderWeightChart\(\);[\s\S]*renderEnsembleWeightChart\(\);/);
+assert.match(js, /renderAll\(\)[\s\S]*renderCanonicalResearch\(\);/);
+assert.match(js, /benchmarkSeriesList\.forEach/);
+assert.match(js, /renderPythonPerformanceMetricsTable/);
+assert.match(js, /series\.symbol !== '\^IXIC'/);
+assert.match(js, /commonPeriod \? '전체 공통 평가기간' : '최근 백테스트'/);
+assert.match(js, /selectedBacktestHoldingHistory/);
+assert.match(js, /\.slice\(0, 21\)/);
+assert.doesNotMatch(js, /historyDates[\s\S]{0,180}\.slice\(0, 5\)/);
+assert.match(js, /aria-pressed/);
+assert.match(js, /const CHART_PALETTE_CLASS_MAP = Object\.freeze/);
+assert.match(js, /canonicalSelectionStatusClass\(row\.selection_status\)/);
+assert.match(js, /CHART_PALETTE_CLASS_MAP\.bars\.focal/);
+assert.match(js, /benchmarkPaletteClass\(series\.symbol\)/);
+assert.match(
+  js,
+  /const best = commonPeriod\s*\? periodBestStats\(run, date, windowKey\)\s*:\s*scenarioBestStats/,
+  "the canonical FULL chart's best factor must not depend on browser proxy inputs",
 );
-assert(defaultEntry, "published manifest must contain its default entry");
-const defaultPayload = JSON.parse(readFileSync(
-  `docs/data/grid/v1/${defaultEntry.detail.path}`,
-  "utf8",
-));
-
-const helperContext = vm.createContext({
-  console,
-  crypto: webcrypto,
-  fetch: async () => {
-    throw new Error("helper context must not fetch");
-  },
-  setTimeout,
-  TextDecoder,
-  TextEncoder,
-  URL,
-  URLSearchParams,
-});
-vm.runInContext(source, helperContext, {
-  filename: "momentum_factor_lab/web/dashboard.js",
-});
-const helperApi = helperContext.__MFL_WEB_TESTS__;
-assert(helperApi, "web helper API must be available");
-
-class FakeClassList {
-  constructor() {
-    this.values = new Set();
-  }
-
-  add(...values) {
-    values.forEach((value) => this.values.add(value));
-  }
-
-  remove(...values) {
-    values.forEach((value) => this.values.delete(value));
-  }
-
-  toggle(value, force) {
-    const enabled = force === undefined ? !this.values.has(value) : Boolean(force);
-    if (enabled) this.values.add(value);
-    else this.values.delete(value);
-    return enabled;
-  }
-}
-
-class FakeElement {
-  constructor(id) {
-    this.id = id;
-    this.value = "";
-    this.textContent = "";
-    this.innerHTML = "";
-    this.dataset = {};
-    this.classList = new FakeClassList();
-    this.listeners = new Map();
-  }
-
-  addEventListener(type, listener) {
-    if (!this.listeners.has(type)) this.listeners.set(type, []);
-    this.listeners.get(type).push(listener);
-  }
-
-  dispatch(type, event = {}) {
-    const payload = { target: this, ...event };
-    for (const listener of this.listeners.get(type) || []) listener(payload);
-  }
-}
-
-const htmlIds = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
-const elements = new Map(htmlIds.map((id) => [id, new FakeElement(id)]));
-const compoundElements = new Map();
-const body = new FakeElement("body");
-const documentElement = new FakeElement("html");
-const document = {
-  body,
-  documentElement,
-  querySelector(selector) {
-    if (!selector.startsWith("#")) return null;
-    const id = selector.slice(1).split(/[ .:[>+~]/, 1)[0];
-    if (!elements.has(id)) return null;
-    if (selector === `#${id}`) return elements.get(id);
-    if (!compoundElements.has(selector)) {
-      compoundElements.set(selector, new FakeElement(selector));
-    }
-    return compoundElements.get(selector);
-  },
-  querySelectorAll(selector) {
-    if (selector === "[data-pair]") return [];
-    return [];
-  },
-};
-
-const pageUrl = new URL("https://sonchanggi.github.io/momentum-factor-lab/index.html");
-const location = {
-  href: pageUrl.href,
-  pathname: pageUrl.pathname,
-  search: "",
-  hash: "",
-};
-function applyLocation(next) {
-  const resolved = new URL(next, location.href);
-  location.href = resolved.href;
-  location.pathname = resolved.pathname;
-  location.search = resolved.search;
-  location.hash = resolved.hash;
-}
-const historyCalls = [];
-const history = {
-  pushState(state, _title, next) {
-    historyCalls.push({ mode: "push", state, next });
-    applyLocation(next);
-  },
-  replaceState(state, _title, next) {
-    historyCalls.push({ mode: "replace", state, next });
-    applyLocation(next);
-  },
-};
-const windowListeners = new Map();
-const window = {
-  location,
-  matchMedia: () => ({ matches: false }),
-  addEventListener(type, listener) {
-    windowListeners.set(type, listener);
-  },
-};
-const storage = new Map();
-const localStorage = {
-  getItem(key) {
-    return storage.get(key) ?? null;
-  },
-  setItem(key, value) {
-    storage.set(key, String(value));
-  },
-};
-
-function byteResponse(bytes, status = 200) {
-  const copied = Uint8Array.from(bytes);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    arrayBuffer: async () => copied.buffer,
-  };
-}
-function jsonResponse(value, status = 200) {
-  return byteResponse(new TextEncoder().encode(JSON.stringify(value)), status);
-}
-
-function canonicalDynamicPayload(researchInputs) {
-  const payload = JSON.parse(JSON.stringify(defaultPayload));
-  const normalizedInputs = JSON.parse(JSON.stringify(defaultEntry.normalizedInputs));
-  const publicToNormalized = {
-    rebalanceFrequency: "rebalance_frequency",
-    evaluationWindowDays: "evaluation_window_days",
-    topN: "top_n",
-    maxWeight: "max_weight",
-    transactionCostBps: "transaction_cost_bps",
-    slippageBps: "slippage_bps",
-    minHistoryDays: "min_history_days",
-    minPrice: "min_price",
-    minAvgDollarVolume: "min_avg_dollar_volume",
-    minAvgVolume: "min_avg_volume",
-    liquidityLookbackDays: "liquidity_lookback_days",
-    minLiquidityObservations: "min_liquidity_observations",
-    maxPriceMissingRatio: "max_price_missing_ratio",
-    maxVolumeMissingRatio: "max_volume_missing_ratio",
-    maxExtremeDailyReturn: "max_extreme_daily_return",
-    selectionMinSharpe: "selection_min_sharpe",
-    selectionMaxDrawdown: "selection_max_drawdown",
-    selectionMaxAnnualizedCostDrag: "selection_max_annualized_cost_drag",
-    selectionMinEffectiveNames: "selection_min_effective_names",
-    selectionMaxTargetHhi: "selection_max_target_hhi",
-    selectionMaxTargetWeight: "selection_max_target_weight",
-    selectionMaxAbsSecurityDayContribution: "selection_max_abs_security_day_contribution",
-    selectionMaxSecurityAbsoluteContributionShare:
-      "selection_max_security_absolute_contribution_share",
-    selectionMaxLeaveOneSecurityCagrDelta:
-      "selection_max_leave_one_security_cagr_delta",
-    selectionExtremeEventAction: "selection_extreme_event_action",
-    selectionExtremeEventPenaltyPoints: "selection_extreme_event_penalty_points",
-  };
-  for (const [publicKey, normalizedKey] of Object.entries(publicToNormalized)) {
-    normalizedInputs[normalizedKey] = researchInputs[publicKey];
-  }
-  normalizedInputs.min_evaluation_observations = Math.max(
-    252,
-    normalizedInputs.evaluation_window_days - 252,
-  );
-  normalizedInputs.min_daily_risk_observations =
-    normalizedInputs.min_evaluation_observations;
-  const keyParts = JSON.parse(JSON.stringify(payload.resultIdentity.keyParts));
-  keyParts.normalizedInputs = normalizedInputs;
-  const canonicalKeyPartsJson = helperApi.canonicalString(keyParts);
-  const resultKey = createHash("sha256")
-    .update(canonicalKeyPartsJson)
-    .digest("hex");
-  const identity = {
-    identityVersion: "momentum-result-identity-v1",
-    resultKey,
-    keyParts,
-    canonicalKeyPartsJson,
-  };
-  payload.resultKey = resultKey;
-  payload.resultIdentity = identity;
-  payload.researchInputs = researchInputs;
-  payload.config.top_n = researchInputs.topN;
-  return payload;
-}
-
-let dynamicPayload = null;
-let postCount = 0;
-async function fetch(url, options = {}) {
-  const parsed = new URL(String(url));
-  if (parsed.origin === "http://127.0.0.1:8765") {
-    if (options.method === "POST" && parsed.pathname === "/api/runs") {
-      postCount += 1;
-      const researchInputs = JSON.parse(options.body);
-      dynamicPayload = canonicalDynamicPayload(researchInputs);
-      return jsonResponse({
-        resultKey: dynamicPayload.resultKey,
-        status: "queued",
-        statusUrl: `/api/runs/${dynamicPayload.resultKey}`,
-      }, 202);
-    }
-    if (options.method === "GET" && parsed.pathname.startsWith("/api/runs/")) {
-      assert(dynamicPayload, "status polling must follow a POST");
-      return jsonResponse({
-        resultKey: dynamicPayload.resultKey,
-        status: "complete",
-        statusUrl: `/api/runs/${dynamicPayload.resultKey}`,
-        result: dynamicPayload,
-      });
-    }
-    return jsonResponse({ error: { message: "unexpected local API request" } }, 404);
-  }
-
-  const prefix = "/momentum-factor-lab/";
-  assert(parsed.pathname.startsWith(prefix), `unexpected static URL: ${parsed.href}`);
-  const relative = parsed.pathname.slice(prefix.length);
-  return byteResponse(readFileSync(`docs/${relative}`));
-}
-
-const context = vm.createContext({
-  console,
-  crypto: webcrypto,
-  document,
-  fetch,
-  history,
-  localStorage,
-  setTimeout: (callback) => {
-    callback();
-    return 0;
-  },
-  TextDecoder,
-  TextEncoder,
-  URL,
-  URLSearchParams,
-  window,
-});
-vm.runInContext(source, context, {
-  filename: "momentum_factor_lab/web/dashboard.js",
-});
-
-async function waitFor(predicate, label) {
-  const deadline = Date.now() + 5_000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
-await waitFor(
-  () => elements.get("result-source").textContent === "정적 사전 계산 결과",
-  "initial static rendering",
+assert.doesNotMatch(js, /fresh_price_ratio:\s*1/);
+assert.match(js, /freshCandidateRows\.length \/ candidateQualityRows\.length/);
+assert.match(js, /score_scope: 'schema_v4_current_python_portfolio_top_constituents'/);
+assert.match(js, /capacity_status_counts: null/);
+assert.match(js, /function formatSourceHealth\(rows, context = \{\}\)/);
+assert.doesNotMatch(js, /\.filter\(\(row\) => row && row\.source\)\s*\.slice\(0, 8\)/);
+assert.match(js, /function canonicalGridAccounting\(payload\)/);
+assert.match(js, /accounting\.availableIndependentPairCount/);
+assert.match(js, /accounting\.excludedIndependentPairCount/);
+assert.match(js, /accounting\.commonComparableFactorCount/);
+assert.match(js, /accounting\.diagnosticAliasPairCount/);
+assert.match(js, /canonicalRankingStatusText\(row\)/);
+assert.doesNotMatch(js, /appendCell\(tr, row\.selected === true \? '선택' : row\.selection_status/);
+assert.match(js, /terminal_nav_unavailable: '최종 NAV 평가 불가\(선정 제외·진단용\)'/);
+assert.match(js, /이미 보유 중 발생한 극단 움직임은 발생 이후 전략 수익률에 인과적으로 반영/);
+assert.match(js, /최종 NAV가 없는 조합은 수익률 크기와 무관하게 선정에서 제외하고 진단용으로만 남깁니다/);
+assert.match(js, /동일 표본 상대 합성 점수/);
+assert.match(js, /절대 신뢰도나 미래 성공 확률이 아닙니다/);
+assert.match(js, /rows\.filter\(\(row\) => finite\(row\.selection_score\)\)/);
+assert.match(
+  js,
+  /function canonicalSelectFactor\(factor\)[\s\S]*syncFactorDependentControls\(currentRun\(\), factor, preferredDate\);[\s\S]*renderAll\(\);/,
+  "joint-ranking clicks must synchronize factor-dependent date and Top-N controls before rendering",
 );
-assert.equal(elements.get("result-key").textContent, defaultEntry.resultKey);
-assert.equal(elements.get("decision-factor").textContent, defaultPayload.selectedFactor);
-assert.match(elements.get("winner-reason").textContent, /Selected the joint factor-policy pair/);
-assert.match(elements.get("winner-metrics").innerHTML, /CAGR/);
-assert.match(elements.get("winner-metrics").innerHTML, /회전율/);
-assert.match(compoundElements.get("#allocation-table tbody").innerHTML, /weight-cell/);
-assert.match(elements.get("allocation-contract").innerHTML, /현재 추정 비용/);
-assert.notEqual(elements.get("compact-cash").textContent, "—");
 
-elements.get("input-top-n").value = "21";
-elements.get("research-input-form").dispatch("submit", {
-  preventDefault() {},
-});
-await waitFor(
-  () => elements.get("result-source").textContent === "로컬 API 계산 결과",
-  "local API rendering",
+assert.match(
+  html,
+  /Python 전체 공통 평가기간 성과 그래프와 표, canonical 결과에는 적용되지 않습니다/,
 );
-assert.equal(postCount, 1);
-assert.equal(elements.get("result-key").textContent, dynamicPayload.resultKey);
-assert.match(location.search, /top_n=21/);
-assert.match(elements.get("winner-metrics").innerHTML, /CAGR/);
-assert.match(compoundElements.get("#allocation-table tbody").innerHTML, /weight-cell/);
-assert(historyCalls.some((call) => call.mode === "replace"));
+assert.match(
+  html,
+  /그래프는 전체 공통 평가기간을 유지하고, 선택한 최근 기간은 비교 팩터를 정하는 데만 사용합니다/,
+);
+assert.match(html, /id="topn-input"[^>]*max="20"/);
+assert.match(html, /data-topn-preset="30"[^>]*disabled[^>]*aria-disabled="true"/);
+assert.match(html, /데이터 품질 · 최종 편입 적격 · 매매 가능성 게이트/);
+assert.doesNotMatch(html, /유동성 적격 종목/);
+assert.match(html, /동일 표본 상대 점수/);
+assert.match(html, /동일 표본 상대 percentile · 절대 신뢰도 아님/);
+assert.match(html, /유니버스 시점성 · 생존편향 한계/);
+assert.match(
+  html,
+  /<a class="skip-link" href="#main-content">본문으로 건너뛰기<\/a>/,
+  "the visible-on-focus skip link must target the dashboard main content",
+);
+assert.match(html, /<main id="main-content" tabindex="-1">/);
 
-const popstate = windowListeners.get("popstate");
-assert.equal(typeof popstate, "function");
-popstate();
-await waitFor(() => postCount === 2, "shared URL popstate replay");
-await waitFor(
-  () => elements.get("result-source").textContent === "로컬 API 계산 결과",
-  "shared URL result rendering",
-);
-assert.match(location.search, /top_n=21/);
+const manualUpdateIndex = html.indexOf('class="manual-update"');
+const guardrailIndex = html.indexOf('id="canonical-guardrail-list"');
+const dataQualityIndex = html.indexOf('id="data-quality-summary"');
+assert(manualUpdateIndex >= 0 && guardrailIndex > manualUpdateIndex, "absolute guardrails must follow manual update");
+assert(dataQualityIndex > guardrailIndex, "data-quality/tradability gates must follow the absolute guardrails");
 
-console.log(
-  "PASS DOM form, static render, local API 202 polling, full render, history, and popstate contracts",
+assert.match(css, /\.canonical-bar-row\s*\{/);
+assert.match(css, /\.canonical-bar-row\.is-selected/);
+assert.match(css, /\.policy-equal-weight/);
+assert.match(css, /\.policy-capped-linear-rank/);
+assert.match(css, /\.policy-capped-vol-adjusted-rank/);
+assert.match(css, /\.policy-score-liquidity-rank/);
+assert.match(css, /\.canonical-bar-row\.status-data-excluded/);
+assert.match(css, /\.canonical-bar-row\.status-extreme-event-excluded/);
+assert.match(css, /\.canonical-bar-row\.chart-bar-focal \.bar-fill/);
+assert.match(css, /\.component-chart \.canonical-bar-row\.chart-bar-component \.bar-fill/);
+assert.match(css, /\.line-path\.selected/);
+assert.match(css, /\.line-path\.best/);
+assert.match(css, /\.line-path\.benchmark-spy/);
+assert.match(css, /\.line-path\.benchmark-ixic/);
+assert.match(css, /\.line-path\.benchmark-qqq/);
+assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.canonical-bar-row/);
+assert.match(css, /\.performance-table\s*\{[\s\S]*min-width:\s*560px/);
+assert.match(css, /\.performance-table-wrap\s*\{[\s\S]*overflow-x:\s*auto/);
+assert.match(css, /\.daily-weights-scroll\s*\{[\s\S]*max-height:\s*560px;[\s\S]*overflow:\s*auto/);
+assert.match(html, /종목별 백테스트 보유 \/ 현재 연구 목표/);
+assert.match(
+  html,
+  /class="table-wrap daily-weights-scroll"[\s\S]*role="region"[\s\S]*tabindex="0"[\s\S]*aria-label="선택 팩터 실제 백테스트 보유와 현재 연구 목표 비교표"[\s\S]*aria-describedby="daily-weight-analysis-note"/,
 );
+assert.match(
+  html,
+  /<table id="daily-weights-table" aria-describedby="daily-weight-analysis-note">[\s\S]*<caption class="visually-hidden">[^<]*최근 최대 21개[^<]*<\/caption>/,
+  "the wide daily-weight table needs a nonvisual caption and the live explanatory note",
+);
+assert.match(
+  html,
+  /<th scope="col">보유 기준일<\/th>[\s\S]*<th scope="col">신호일 · 체결일<\/th>/,
+);
+assert.match(js, /wrap\.setAttribute\('role', 'region'\)/);
+assert.match(js, /wrap\.setAttribute\('tabindex', '0'\)/);
+assert.match(js, /aria-describedby', 'python-performance-metrics-note'/);
+assert.match(css, /\.performance-table tbody th\[scope="row"\]/);
+
+console.log("PASS restored DOM hosts, render wiring, accessible states, palette, and responsive contracts");

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from http.client import HTTPConnection
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any, Callable
 import pandas as pd
 import pytest
 
-from momentum_factor_lab.config import RunConfig
+from momentum_factor_lab.config import MAX_TOP_N, RunConfig
 from momentum_factor_lab.data import (
     MarketData,
     _canonical_matrix_sha256,
@@ -68,6 +69,11 @@ def _market(
     date = pd.Timestamp("2026-07-10")
     columns = ["SPY", *symbols]
     prices = pd.DataFrame([[100.0] * len(columns)], index=[date], columns=columns)
+    comparison_prices = pd.DataFrame(
+        [[100.0, 100.0, 100.0]],
+        index=[date],
+        columns=["SPY", "^IXIC", "QQQ"],
+    )
     candidate = prices[symbols]
     volumes = candidate * 1_000.0
     dollar_volumes = candidate * 100_000.0
@@ -104,6 +110,7 @@ def _market(
             "universeRecords": canonical_records_sha256(universe),
             "priceSources": canonical_records_sha256(price_sources),
             "dataSources": canonical_records_sha256(data_sources),
+            "comparisonPrices": _canonical_matrix_sha256(comparison_prices),
         },
         benchmark="SPY",
         requested_through="2026-07-10",
@@ -112,6 +119,7 @@ def _market(
         provider="fixture-live-provider",
         price_sources=price_sources,
         data_sources=data_sources,
+        comparison_prices=comparison_prices,
     )
 
 
@@ -142,7 +150,6 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
             "requestedThrough": market.requested_through,
             "asOf": as_of,
             "startDate": market.prices.index.min().date().isoformat(),
-            "observations": len(market.prices),
             "requestedCandidateCount": market.requested_candidate_count,
             "providerReturnedCandidateCount": market.provider_returned_candidate_count,
             "inputSecurityCount": len(analyzed_symbols),
@@ -153,6 +160,17 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
             "rawCloseAvailable": not market.raw_closes.empty,
             "benchmark": market.benchmark,
             "benchmarkAvailable": market.benchmark in market.prices,
+            "chartBenchmark": config.chart_benchmark,
+            "additionalComparisonBenchmarks": list(config.additional_comparison_benchmarks),
+            "comparisonBenchmarkAvailability": {
+                symbol: bool(
+                    symbol in market.comparison_prices
+                    and market.comparison_prices[symbol].notna().any()
+                )
+                for symbol in config.comparison_benchmarks
+            },
+            "comparisonSymbols": list(market.comparison_symbols),
+            "comparisonPricesSha256": market.input_sha256.get("comparisonPrices"),
             "liquidityFilterApplied": config.min_avg_dollar_volume > 0.0,
             "notes": list(market.notes),
         }
@@ -177,12 +195,70 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
     payload["backtestHeldPortfolio"]["asOf"] = as_of
     payload["currentTransition"]["asOf"] = as_of
     payload["currentTransition"]["targetSignalDate"] = as_of
+    factor_diagnostics = payload["factorDiagnostics"]
+    rank_ic = factor_diagnostics["rankIc"]
+    rank_ic["signalDates"][-1] = as_of
+    rank_ic["requestedEndDate"] = as_of
+    factor_diagnostics["redundancy"]["diagnosticDate"] = as_of
+    for portfolio in payload["factorPortfolios"].values():
+        portfolio["asOf"] = as_of
+        portfolio["signalDate"] = as_of
+    performance = payload["performance"]
+    performance["dates"][-1] = as_of
+    holding_history = payload["selectedBacktestHoldingHistory"]
+    canonical_history_dates = performance["dates"][-holding_history["sessionCount"] :]
+    for session, session_date in zip(
+        holding_history["sessions"],
+        canonical_history_dates,
+        strict=True,
+    ):
+        session["date"] = session_date
+    holding_history["startDate"] = canonical_history_dates[0]
+    holding_history["endDate"] = canonical_history_dates[-1]
+    for symbol, available in data["comparisonBenchmarkAvailability"].items():
+        curve = performance["benchmarkCurves"].get(symbol)
+        if available and (
+            not isinstance(curve, list)
+            or len(curve) != len(performance["dates"])
+            or curve[-1] is None
+        ):
+            performance["benchmarkCurves"][symbol] = [None] * (len(performance["dates"]) - 1) + [
+                1.0
+            ]
+        elif not available:
+            performance["benchmarkCurves"][symbol] = None
+    performance["benchmarkCurve"] = performance["benchmarkCurves"][market.benchmark]
+    for period in performance["periods"]:
+        period["endDate"] = as_of
+    payload["selectionDecision"]["evaluationEnd"] = as_of
+    payload["contributionDiagnostics"]["evaluationEnd"] = as_of
     for field in (
         "factorDefinitionSha256",
         "policyDefinitionSha256",
         "selectionSpecSha256",
     ):
         payload["meta"][field] = identity["keyParts"][field]
+    sidecar_manifest = payload["factorHoldingHistorySidecar"]
+    sidecar = sidecar_manifest["data"]
+    sidecar["resultKey"] = result_key
+    sidecar["dates"] = canonical_history_dates
+    sidecar["startDate"] = canonical_history_dates[0]
+    sidecar["endDate"] = canonical_history_dates[-1]
+    sidecar["factorDefinitionSha256"] = payload["meta"]["factorDefinitionSha256"]
+    sidecar["policyDefinitionSha256"] = payload["meta"]["policyDefinitionSha256"]
+    for factor_history in sidecar["factors"].values():
+        factor_history["resultKey"] = result_key
+    sidecar_bytes = canonical_json_bytes(sidecar)
+    sidecar_manifest.update(
+        {
+            "resultKey": result_key,
+            "path": f"data/factor-holding-history/{result_key}.json",
+            "startDate": canonical_history_dates[0],
+            "endDate": canonical_history_dates[-1],
+            "sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+            "bytes": len(sidecar_bytes),
+        }
+    )
     return payload
 
 
@@ -299,6 +375,10 @@ def test_capabilities_and_loopback_http_server_contract(tmp_path: Path) -> None:
     assert response.body["syntheticFallback"] is False
     assert response.body["staticPresetFallback"] is False
     assert response.body["researchInputs"]["defaults"] == ResearchInputs().to_dict()
+    assert response.body["researchInputs"]["limits"]["topN"] == {
+        "minimum": 1,
+        "maximum": MAX_TOP_N,
+    }
     assert server.server_address[0] == "127.0.0.1"
     server.server_close()
     api.close()
@@ -548,6 +628,10 @@ def test_cache_miss_is_202_then_get_returns_canonical_result_and_next_post_is_20
             "guardrail_current_target_weight",
         )
     )
+    history = status.body["result"]["selectedBacktestHoldingHistory"]
+    assert [session["date"] for session in history["sessions"]] == status.body["result"][
+        "performance"
+    ]["dates"][-history["sessionCount"] :]
     assert cached.status_code == 200
     assert cached.body == status.body["result"]
     assert len(calls) == 1
@@ -624,6 +708,7 @@ def test_failed_job_is_visible_and_is_never_written_to_cache(tmp_path: Path) -> 
         {"version": "research-inputs-v1", "topN": 20},
         {**ResearchInputs().to_dict(), "evaluationWindowDays": 999},
         {**ResearchInputs().to_dict(), "topN": 0},
+        {**ResearchInputs().to_dict(), "topN": MAX_TOP_N + 1},
     ],
 )
 def test_post_requires_complete_exact_research_inputs_and_rejects_unknown_fields(

@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Any, Mapping
 
-from .config import RunConfig
+from .config import MAX_TOP_N, RunConfig
 from .identity import canonical_sha256
 
 
@@ -39,7 +39,7 @@ class ResearchInputs:
     selection_min_effective_names: float = 10.0
     selection_max_target_hhi: float = 0.15
     selection_max_target_weight: float = 0.15
-    selection_max_abs_security_day_contribution: float = 0.25
+    selection_max_abs_security_day_contribution: float = 0.10
     selection_max_security_absolute_contribution_share: float = 0.35
     selection_max_leave_one_security_cagr_delta: float = 0.25
     selection_extreme_event_action: str = "exclude"
@@ -282,8 +282,12 @@ class ResearchInputs:
             raise ResearchInputError("evaluationYears must be an integer")
         if not 1 <= self.evaluation_years <= 10:
             raise ResearchInputError("evaluationYears must be between 1 and 10")
-        if not isinstance(self.top_n, int) or isinstance(self.top_n, bool) or self.top_n < 1:
-            raise ResearchInputError("topN must be a positive integer")
+        if (
+            not isinstance(self.top_n, int)
+            or isinstance(self.top_n, bool)
+            or not 1 <= self.top_n <= MAX_TOP_N
+        ):
+            raise ResearchInputError(f"topN must be an integer between 1 and {MAX_TOP_N}")
         for field, number in {
             "minHistoryDays": self.min_history_days,
             "liquidityLookbackDays": self.liquidity_lookback_days,

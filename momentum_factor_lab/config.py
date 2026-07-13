@@ -6,7 +6,7 @@ from math import isclose, isfinite
 from pathlib import Path
 from typing import Any
 
-from .universe import DEFAULT_UNIVERSE, is_supported_symbol
+from .universe import DEFAULT_UNIVERSE, is_supported_symbol, normalize_symbol
 
 
 WEIGHTING_POLICIES = (
@@ -15,6 +15,7 @@ WEIGHTING_POLICIES = (
     "capped_vol_adjusted_rank",
     "score_liquidity_rank",
 )
+MAX_TOP_N = 50
 
 POLICY_REGISTRY_VERSION = "weighting-policy-registry-v2"
 POLICY_REGISTRY = {
@@ -91,6 +92,7 @@ class RunConfig:
 
     benchmark: str = "SPY"
     chart_benchmark: str = "^IXIC"
+    additional_comparison_benchmarks: tuple[str, ...] = ("QQQ",)
     rebalance_frequency: str = "ME"
     top_n: int = 20
     max_weight: float = 0.10
@@ -139,7 +141,7 @@ class RunConfig:
     selection_min_effective_names: float = 10.0
     selection_max_target_hhi: float = 0.15
     selection_max_target_weight: float = 0.15
-    selection_max_abs_security_day_contribution: float = 0.25
+    selection_max_abs_security_day_contribution: float = 0.10
     selection_max_security_absolute_contribution_share: float = 0.35
     selection_max_leave_one_security_cagr_delta: float = 0.25
     selection_extreme_event_action: str = "exclude"
@@ -165,9 +167,38 @@ class RunConfig:
     universe_profile: str = "large_liquid"
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
 
+    def __post_init__(self) -> None:
+        self.benchmark = normalize_symbol(self.benchmark)
+        self.chart_benchmark = normalize_symbol(self.chart_benchmark)
+        raw_additional = self.additional_comparison_benchmarks
+        if isinstance(raw_additional, str):
+            raw_additional = tuple(raw_additional.replace("\n", ",").split(","))
+        seen = {self.benchmark, self.chart_benchmark}
+        normalized: list[str] = []
+        for value in raw_additional:
+            symbol = normalize_symbol(value)
+            if symbol and symbol not in seen:
+                normalized.append(symbol)
+                seen.add(symbol)
+        self.additional_comparison_benchmarks = tuple(normalized)
+
     @property
     def total_cost_bps(self) -> float:
         return self.transaction_cost_bps + self.slippage_bps
+
+    @property
+    def comparison_benchmarks(self) -> tuple[str, ...]:
+        """Ordered adjusted-price comparators, distinct from stock candidates."""
+
+        return tuple(
+            dict.fromkeys(
+                (
+                    self.benchmark,
+                    self.chart_benchmark,
+                    *self.additional_comparison_benchmarks,
+                )
+            )
+        )
 
     @property
     def total_cost_rate(self) -> float:
@@ -222,8 +253,15 @@ class RunConfig:
             raise ValueError("choose exactly one data source: --live, --demo, or --prices")
         if not is_supported_symbol(self.benchmark):
             raise ValueError("benchmark must be a supported security symbol")
-        if not self.chart_benchmark.strip():
-            raise ValueError("chart_benchmark must be non-empty")
+        if not _is_supported_comparison_symbol(self.chart_benchmark):
+            raise ValueError("chart_benchmark must be a supported security or index symbol")
+        if any(
+            not _is_supported_comparison_symbol(symbol)
+            for symbol in self.additional_comparison_benchmarks
+        ):
+            raise ValueError(
+                "additional_comparison_benchmarks must contain supported security or index symbols"
+            )
         if self.volumes_path is not None and self.prices_path is None:
             raise ValueError("--volumes requires --prices")
         if self.volumes_path is not None and self.volume_basis != "split_adjusted":
@@ -299,8 +337,12 @@ class RunConfig:
             raise ValueError("positive demo_missing_ratio must be at least 0.001")
         if not self.demo and self.demo_missing_ratio != 0.0:
             raise ValueError("demo_missing_ratio requires --demo")
-        if self.top_n < 1:
-            raise ValueError("top_n must be at least 1")
+        if (
+            not isinstance(self.top_n, int)
+            or isinstance(self.top_n, bool)
+            or not 1 <= self.top_n <= MAX_TOP_N
+        ):
+            raise ValueError(f"top_n must be between 1 and {MAX_TOP_N}")
         if not 0.0 < self.max_weight <= 1.0:
             raise ValueError("max_weight must be in (0, 1]")
         if self.transaction_cost_bps < 0 or self.slippage_bps < 0:
@@ -426,8 +468,16 @@ class RunConfig:
         data["total_cost_bps"] = self.total_cost_bps
         data["effective_end_date"] = self.effective_end_date
         data["candidate_universe_size"] = len(self.universe)
+        data["comparison_benchmarks"] = list(self.comparison_benchmarks)
         data["policy_versions"] = self.policy_versions
         data["joint_selection_version"] = self.joint_selection_version
         data["absolute_guardrail_version"] = self.absolute_guardrail_version
         data["analysis_cache_version"] = self.analysis_cache_version
         return data
+
+
+def _is_supported_comparison_symbol(symbol: str) -> bool:
+    normalized = normalize_symbol(symbol)
+    return is_supported_symbol(normalized) or (
+        normalized.startswith("^") and is_supported_symbol(normalized[1:])
+    )

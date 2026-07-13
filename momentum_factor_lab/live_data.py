@@ -67,6 +67,8 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         "benchmark_price_available",
         "chart_benchmark_symbol",
         "chart_benchmark_price_available",
+        "additional_comparison_symbols",
+        "additional_comparison_prices_available",
         "requested_download_symbols",
         "requested_symbols",
         "returned_symbols",
@@ -133,8 +135,7 @@ def _candidate_universe(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
 def _comparator_symbols(config: RunConfig) -> list[str]:
     """Symbols fetched only for benchmark/comparison charts, never holdings."""
 
-    symbols = [normalize_symbol(config.benchmark), normalize_symbol(config.chart_benchmark)]
-    return list(dict.fromkeys(symbol for symbol in symbols if symbol))
+    return list(config.comparison_benchmarks)
 
 
 def _requested_symbols(config: RunConfig, candidate: pd.DataFrame) -> tuple[list[str], bool]:
@@ -147,12 +148,10 @@ def _requested_symbols(config: RunConfig, candidate: pd.DataFrame) -> tuple[list
     ]
     symbols = list(dict.fromkeys([*comparators, *candidate_symbols]))
     if config.max_price_symbols is not None and len(symbols) > config.max_price_symbols:
-        keep = [comparators[0]]
-        for symbol in [*comparators[1:], *candidate_symbols]:
-            if symbol not in keep and len(keep) < config.max_price_symbols:
-                keep.append(symbol)
-            if len(keep) >= config.max_price_symbols:
-                break
+        # The smoke-test cap may reduce stock coverage, but comparison series are
+        # part of the output contract and must never be silently dropped.
+        candidate_slots = max(0, config.max_price_symbols - len(comparators))
+        keep = [*comparators, *candidate_symbols[:candidate_slots]]
         return keep, True
     return symbols, False
 
@@ -362,7 +361,12 @@ def build_data_quality_frame(
             symbol, "unavailable" if price_column is None else provider
         )
         if symbol in comparator_symbols:
-            role = "benchmark" if symbol == benchmark else "chart_benchmark"
+            if symbol == benchmark:
+                role = "benchmark"
+            elif symbol == config.chart_benchmark:
+                role = "chart_benchmark"
+            else:
+                role = "comparison_benchmark"
             status = (
                 "benchmark_comparator_only"
                 if len(valid_prices) >= 2
@@ -2000,6 +2004,13 @@ def download_live_data(config: RunConfig) -> MarketData:
                 "chart_benchmark_symbol": normalize_symbol(config.chart_benchmark),
                 "chart_benchmark_price_available": normalize_symbol(config.chart_benchmark)
                 in prices.columns,
+                "additional_comparison_symbols": ",".join(config.additional_comparison_benchmarks),
+                "additional_comparison_prices_available": ",".join(
+                    symbol
+                    for symbol in config.additional_comparison_benchmarks
+                    if symbol in prices.columns
+                    and pd.to_numeric(prices[symbol], errors="coerce").gt(0.0).any()
+                ),
                 "excluded_symbols": len(exclusions),
                 "subset_run": subset_run,
                 "point_in_time_universe": False,

@@ -10,7 +10,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 from .config import WEIGHTING_POLICIES
-from .dashboard import MAX_DASHBOARD_BYTES, dashboard_summary
+from .dashboard import (
+    MAX_DASHBOARD_BYTES,
+    MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES,
+    dashboard_summary,
+    externalize_factor_holding_history_sidecar,
+    validate_factor_holding_history_sidecar_bytes,
+)
 from .identity import (
     CANONICAL_JSON_VERSION,
     RESULT_IDENTITY_VERSION,
@@ -640,6 +646,16 @@ def write_static_grid(
             artifact,
             allow_identity_enrichment=True,
         )
+        detail, sidecar_bytes = externalize_factor_holding_history_sidecar(detail)
+        if sidecar_bytes is None:
+            _fail("static-grid detail has no embedded factor holding history sidecar")
+        if len(sidecar_bytes) > MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:
+            _fail(
+                "factor holding history sidecar is "
+                f"{len(sidecar_bytes):,} bytes; limit is "
+                f"{MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:,}"
+            )
+        dashboard_summary(detail)
         result_key = str(identity["resultKey"])
         if result_key in seen_result_keys:
             _fail(f"duplicate resultKey in static grid: {result_key}")
@@ -675,6 +691,8 @@ def write_static_grid(
                 "summary": _artifact_metadata(summary_path, summary_bytes),
                 "detailBytes": detail_bytes,
                 "summaryBytes": summary_bytes,
+                "sidecarBytes": sidecar_bytes,
+                "sidecarPath": detail["factorHoldingHistorySidecar"]["path"],
             }
         )
 
@@ -699,8 +717,12 @@ def write_static_grid(
         summary_path = grid_root / str(item["summary"]["path"])
         _atomic_write(detail_path, item["detailBytes"])
         _atomic_write(summary_path, item["summaryBytes"])
+        sidecar_relative = PurePosixPath(str(item["sidecarPath"]))
+        sidecar_path = data_dir.parent.joinpath(*sidecar_relative.parts)
+        _atomic_write(sidecar_path, item["sidecarBytes"])
         written[f"detail:{result_key}"] = detail_path
         written[f"summary:{result_key}"] = summary_path
+        written[f"factorHoldingHistory:{result_key}"] = sidecar_path
         manifest_entry = {
             "normalizedInputs": item["normalizedInputs"],
             "resultKey": result_key,
@@ -746,6 +768,10 @@ def write_static_grid(
 
     manifest_path = grid_root / "manifest.json"
     _atomic_write(manifest_path, canonical_json_bytes(manifest))
+    _prune_unreferenced_json(
+        data_dir / "factor-holding-history",
+        {f"{item['resultKey']}.json" for item in prepared},
+    )
     if not write_default_aliases:
         for relative_path in (
             _LATEST_DETAIL_ALIAS,
@@ -947,6 +973,17 @@ def validate_static_grid(
             _fail(f"artifact normalized inputs differ from manifest for {result_key}")
         if validated_detail != detail or validated_summary != summary:  # pragma: no cover
             _fail(f"artifact changed during validation for {result_key}")
+        sidecar_reference = _mapping(
+            detail.get("factorHoldingHistorySidecar"),
+            f"detail[{result_key}].factorHoldingHistorySidecar",
+        )
+        sidecar_relative = PurePosixPath(str(sidecar_reference.get("path")))
+        sidecar_path = grid_root.parents[2].joinpath(*sidecar_relative.parts)
+        try:
+            sidecar_bytes = sidecar_path.read_bytes()
+            validate_factor_holding_history_sidecar_bytes(detail, sidecar_bytes)
+        except (OSError, TypeError, ValueError) as error:
+            _fail(f"factor holding history sidecar is invalid for {result_key}: {error}")
         loaded_by_key[result_key] = (detail_bytes, summary_bytes)
 
     aliases = manifest.get("defaultAliases")

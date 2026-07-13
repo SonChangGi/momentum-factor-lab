@@ -1,6 +1,7 @@
 import hashlib
 import inspect
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import pandas as pd
 import pytest
 
 from momentum_factor_lab import data
+from momentum_factor_lab.backtest import run_factor_backtest
 from momentum_factor_lab.config import RunConfig
 from momentum_factor_lab.data import (
     build_eligibility_mask,
@@ -17,6 +19,7 @@ from momentum_factor_lab.data import (
     write_market_data_snapshot,
 )
 from momentum_factor_lab.identity import build_result_identity
+from momentum_factor_lab.metrics import metric_summary
 
 
 def test_demo_uses_200_candidates_and_keeps_benchmark_out_of_eligibility() -> None:
@@ -391,6 +394,171 @@ def test_live_provider_non_positive_prices_are_missing_and_disclosed(monkeypatch
     assert any("adjusted_price_non_positive=1" in note for note in notes)
 
 
+def test_zero_volume_candidate_quote_blocks_halt_exit_and_terminal_metrics(
+    monkeypatch,
+) -> None:
+    dates = pd.bdate_range("2025-06-02", "2025-10-10")
+    halt_date = pd.Timestamp("2025-09-29")
+    event_date = pd.Timestamp("2025-09-09")
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(600.0, 620.0, len(dates)),
+            "^IXIC": np.linspace(21_000.0, 22_000.0, len(dates)),
+            "QQQ": np.linspace(520.0, 540.0, len(dates)),
+            "QMMM": 11.27,
+            "SAFE": np.linspace(50.0, 55.0, len(dates)),
+        },
+        index=dates,
+    )
+    prices.loc[event_date, "QMMM"] = 207.0
+    prices.loc[event_date + pd.offsets.BDay() : halt_date - pd.offsets.BDay(), "QMMM"] = 119.4
+    prices.loc[halt_date:, "QMMM"] = 119.4
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+    volumes.loc[:, ["SPY", "^IXIC", "QQQ"]] = 0.0
+    volumes.loc[halt_date:, "QMMM"] = 0.0
+    acquired = SimpleNamespace(
+        live_error=None,
+        raw_prices=prices,
+        prices=prices,
+        raw_volumes=volumes,
+        volumes=volumes,
+        raw_closes=prices.copy(),
+        candidate_universe=pd.DataFrame({"symbol": ["QMMM", "SAFE", "QQQ"]}),
+        price_sources=pd.DataFrame(),
+        data_sources=pd.DataFrame(),
+        provider="public-test-provider",
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.live_data.download_live_data",
+        lambda _config: acquired,
+    )
+    config = RunConfig(
+        live=True,
+        top_n=1,
+        max_weight=1.0,
+        selection_min_effective_names=1.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+    )
+
+    (
+        analysis_prices,
+        analysis_volumes,
+        dollar_volumes,
+        raw_closes,
+        comparison_prices,
+        analysis_universe,
+        _,
+        _,
+        _,
+        hashes,
+        notes,
+        _,
+    ) = data._live_inputs(config)
+
+    assert list(analysis_universe["symbol"]) == ["QMMM", "SAFE"]
+    assert analysis_prices.loc[: halt_date - pd.offsets.BDay(), "QMMM"].notna().all()
+    assert analysis_prices.loc[halt_date:, "QMMM"].isna().all()
+    assert raw_closes.loc[halt_date:, "QMMM"].isna().all()
+    assert analysis_volumes.loc[halt_date:, "QMMM"].eq(0.0).all()
+    assert dollar_volumes.loc[halt_date:, "QMMM"].isna().all()
+    pd.testing.assert_frame_equal(
+        comparison_prices,
+        prices.loc[:, ["SPY", "^IXIC", "QQQ"]],
+    )
+    assert hashes["prices"] == data._canonical_matrix_sha256(analysis_prices)
+    assert hashes["rawCloses"] == data._canonical_matrix_sha256(raw_closes)
+    halted_quote_count = int((dates >= halt_date).sum())
+    assert any(
+        "Candidate zero-volume quotes were treated as stale/untradable" in note
+        and f"adjusted_price_zero_volume={halted_quote_count}" in note
+        and f"raw_close_zero_volume={halted_quote_count}" in note
+        and "Comparison benchmarks were not masked" in note
+        for note in notes
+    )
+
+    candidate_prices = analysis_prices.drop(columns=["SPY"])
+    scores = pd.DataFrame(
+        {"QMMM": 2.0, "SAFE": 1.0},
+        index=candidate_prices.index,
+    )
+    eligibility = candidate_prices.notna()
+    backtest = run_factor_backtest(
+        "gap_resistant_fixture",
+        "equal_weight",
+        candidate_prices,
+        scores,
+        config,
+        eligibility_mask=eligibility,
+    )
+
+    assert backtest.returns.loc[event_date] == pytest.approx(207.0 / 11.27 - 1.0)
+    assert backtest.returns.loc[event_date] > 17.0
+    assert backtest.execution_statuses.loc["2025-10-01"] == "blocked_missing_held_quote"
+    assert backtest.returns.loc[halt_date:].isna().all()
+    summary = metric_summary(
+        backtest.returns,
+        backtest.turnover,
+        backtest.costs,
+        strategy_active=backtest.strategy_active,
+        execution_statuses=backtest.execution_statuses,
+        return_interval_sessions=backtest.return_interval_sessions,
+    )
+    assert summary["ending_nav_available"] is False
+    assert summary["risk_metrics_complete"] is False
+    assert summary["blocked_execution_count"] == pytest.approx(1.0)
+
+
+def test_live_comparator_prices_are_preserved_outside_the_analyzed_universe(monkeypatch) -> None:
+    dates = pd.bdate_range("2024-01-02", periods=260)
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(100.0, 120.0, len(dates)),
+            "^IXIC": np.linspace(15_000.0, 17_000.0, len(dates)),
+            "QQQ": np.linspace(300.0, 360.0, len(dates)),
+            "AAA": np.linspace(10.0, 20.0, len(dates)),
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+    acquired = SimpleNamespace(
+        live_error=None,
+        raw_prices=prices,
+        prices=prices,
+        raw_volumes=volumes,
+        volumes=volumes,
+        raw_closes=prices.copy(),
+        candidate_universe=pd.DataFrame({"symbol": ["QQQ", "AAA"]}),
+        price_sources=pd.DataFrame(),
+        data_sources=pd.DataFrame(),
+        provider="public-test-provider",
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.live_data.download_live_data",
+        lambda _config: acquired,
+    )
+
+    (
+        analysis_prices,
+        _,
+        _,
+        _,
+        comparison_prices,
+        analysis_universe,
+        _,
+        _,
+        _,
+        hashes,
+        _,
+        _,
+    ) = data._live_inputs(RunConfig(live=True, top_n=1))
+
+    assert list(analysis_prices.columns) == ["SPY", "AAA"]
+    assert list(comparison_prices.columns) == ["SPY", "^IXIC", "QQQ"]
+    assert list(analysis_universe["symbol"]) == ["AAA"]
+    assert hashes["comparisonPrices"] == data._canonical_matrix_sha256(comparison_prices)
+
+
 @pytest.mark.parametrize(
     ("symbol", "event_position", "event_multiplier"),
     [("EVENT_A", 32, 3.0), ("EVENT_B", 47, 0.10)],
@@ -445,8 +613,17 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
         index=dates,
     )
     volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+    volumes["SPY"] = 0.0
     raw_closes = prices.copy()
     dollar_volumes = raw_closes * volumes
+    comparison_prices = pd.DataFrame(
+        {
+            "SPY": prices["SPY"],
+            "^IXIC": np.linspace(15_000.0, 16_000.0, len(dates)),
+            "QQQ": np.linspace(300.0, 330.0, len(dates)),
+        },
+        index=dates,
+    )
     config = RunConfig(
         live=True,
         start_date=dates.min().date().isoformat(),
@@ -491,6 +668,7 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
         "universeRecords": data.canonical_records_sha256(universe),
         "priceSources": data.canonical_records_sha256(price_sources),
         "dataSources": data.canonical_records_sha256(data_sources),
+        "comparisonPrices": data._canonical_matrix_sha256(comparison_prices),
     }
     market = data.MarketData(
         prices=prices,
@@ -513,6 +691,7 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
         provider="actual-provider-fixture",
         price_sources=price_sources,
         data_sources=data_sources,
+        comparison_prices=comparison_prices,
     )
     snapshot_dir = tmp_path / "snapshot"
     write_market_data_snapshot(market, snapshot_dir)
@@ -521,6 +700,7 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
     assert replayed.source_mode == "live_market"
     assert replayed.as_of == dates.max()
     assert replayed.input_sha256 == hashes
+    pd.testing.assert_frame_equal(replayed.comparison_prices, comparison_prices, check_freq=False)
     assert build_result_identity(config, replayed) == build_result_identity(config, market)
     stricter_replay = read_market_data_snapshot(
         RunConfig(
@@ -557,6 +737,13 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
     assert not (tmp_path / "rejected-snapshot").exists()
     market.input_sha256["prices"] = original_price_hash
 
+    original_volumes = market.volumes.copy()
+    market.volumes.loc[dates[10], "AAA"] = 0.0
+    with pytest.raises(ValueError, match="candidate zero-volume close policy"):
+        write_market_data_snapshot(market, tmp_path / "rejected-zero-volume-snapshot")
+    assert not (tmp_path / "rejected-zero-volume-snapshot").exists()
+    market.volumes = original_volumes
+
     market.source_mode = "demo"
     with pytest.raises(ValueError, match="actual live-market"):
         write_market_data_snapshot(market, tmp_path / "rejected-demo-snapshot")
@@ -569,10 +756,133 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
 
     manifest_path = snapshot_dir / "market_data_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["schemaVersion"] == 2
+    assert manifest["schemaVersion"] == 3
     assert manifest["files"]["priceSources"] == "price_sources.json"
     assert manifest["files"]["dataSources"] == "data_sources.json"
     assert manifest["files"]["universe"] == "universe.json"
+    assert manifest["files"]["comparisonPrices"] == "comparison_adjusted_prices.csv.gz"
+    assert manifest["comparisonSymbols"] == ["SPY", "^IXIC", "QQQ"]
+    assert manifest["readContract"] == data.SNAPSHOT_READ_CONTRACT
+    assert manifest["readContract"]["candidateZeroVolumeClosePolicy"] == (
+        "mask_adjusted_and_raw_v1"
+    )
+
+    transitional_dir = tmp_path / "legacy-contract-sanitized-v3-snapshot"
+    shutil.copytree(snapshot_dir, transitional_dir)
+    transitional_manifest_path = transitional_dir / "market_data_manifest.json"
+    transitional_manifest = json.loads(transitional_manifest_path.read_text(encoding="utf-8"))
+    transitional_manifest["readContract"] = data.LEGACY_SNAPSHOT_READ_CONTRACT
+    legacy_matrix_frames = {
+        "prices": market.prices,
+        "volumes": market.volumes,
+        "dollarVolumes": market.dollar_volumes,
+        "rawCloses": market.raw_closes,
+        "comparisonPrices": market.comparison_prices,
+    }
+    for component, frame in legacy_matrix_frames.items():
+        transitional_manifest["matrixSha256"][component] = data._legacy_canonical_matrix_sha256(
+            frame, datetime_unit="s"
+        )
+    transitional_manifest_path.write_text(
+        json.dumps(transitional_manifest),
+        encoding="utf-8",
+    )
+    transitional_replay = read_market_data_snapshot(config, transitional_dir)
+    pd.testing.assert_frame_equal(
+        transitional_replay.prices,
+        replayed.prices,
+        check_freq=False,
+    )
+    assert transitional_replay.input_sha256 == replayed.input_sha256 == hashes
+    assert build_result_identity(config, transitional_replay) == build_result_identity(
+        config,
+        replayed,
+    )
+
+    mixed_unit_dir = tmp_path / "legacy-contract-mixed-unit-v3-snapshot"
+    shutil.copytree(transitional_dir, mixed_unit_dir)
+    mixed_unit_manifest_path = mixed_unit_dir / "market_data_manifest.json"
+    mixed_unit_manifest = json.loads(mixed_unit_manifest_path.read_text(encoding="utf-8"))
+    mixed_unit_manifest["matrixSha256"]["volumes"] = data._legacy_canonical_matrix_sha256(
+        market.volumes, datetime_unit="us"
+    )
+    mixed_unit_manifest_path.write_text(
+        json.dumps(mixed_unit_manifest),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no common datetime unit"):
+        read_market_data_snapshot(config, mixed_unit_dir)
+
+    unsanitized_dir = tmp_path / "legacy-contract-unsanitized-v3-snapshot"
+    shutil.copytree(transitional_dir, unsanitized_dir)
+    unsanitized_manifest_path = unsanitized_dir / "market_data_manifest.json"
+    unsanitized_manifest = json.loads(unsanitized_manifest_path.read_text(encoding="utf-8"))
+    volume_path = unsanitized_dir / unsanitized_manifest["files"]["volumes"]
+    unsanitized_volumes = pd.read_csv(
+        volume_path,
+        index_col=0,
+        parse_dates=True,
+        float_precision="round_trip",
+    )
+    unsanitized_volumes.loc[dates[10], "AAA"] = 0.0
+    unsanitized_volumes.to_csv(
+        volume_path,
+        compression={"method": "gzip", "compresslevel": 6, "mtime": 0},
+    )
+    unsanitized_manifest["matrixSha256"]["volumes"] = data._legacy_canonical_matrix_sha256(
+        unsanitized_volumes,
+        datetime_unit="s",
+    )
+    unsanitized_manifest["fileSha256"]["volumes"] = data._sha256_file(volume_path)
+    unsanitized_manifest_path.write_text(
+        json.dumps(unsanitized_manifest),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="candidate zero-volume close policy"):
+        read_market_data_snapshot(config, unsanitized_dir)
+    unsanitized_manifest["readContract"] = data.SNAPSHOT_READ_CONTRACT
+    for component, filename in unsanitized_manifest["files"].items():
+        if component not in legacy_matrix_frames:
+            continue
+        frame = pd.read_csv(
+            unsanitized_dir / filename,
+            index_col=0,
+            parse_dates=True,
+            float_precision="round_trip",
+        )
+        unsanitized_manifest["matrixSha256"][component] = data._canonical_matrix_sha256(frame)
+    unsanitized_manifest_path.write_text(
+        json.dumps(unsanitized_manifest),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="candidate zero-volume close policy"):
+        read_market_data_snapshot(config, unsanitized_dir)
+
+    legacy_dir = tmp_path / "legacy-v2-snapshot"
+    shutil.copytree(snapshot_dir, legacy_dir)
+    legacy_manifest_path = legacy_dir / "market_data_manifest.json"
+    legacy_manifest = json.loads(legacy_manifest_path.read_text(encoding="utf-8"))
+    legacy_manifest["schemaVersion"] = 2
+    legacy_manifest["readContract"] = data.LEGACY_SNAPSHOT_READ_CONTRACT
+    for field in ("comparisonSymbols", "comparisonPriceBasis", "comparisonAsOf"):
+        legacy_manifest.pop(field)
+    legacy_manifest["matrixSha256"].pop("comparisonPrices")
+    comparison_filename = legacy_manifest["files"].pop("comparisonPrices")
+    legacy_manifest["fileSha256"].pop("comparisonPrices")
+    (legacy_dir / comparison_filename).unlink()
+    for component, frame in legacy_matrix_frames.items():
+        if component == "comparisonPrices":
+            continue
+        legacy_manifest["matrixSha256"][component] = data._legacy_canonical_matrix_sha256(
+            frame,
+            datetime_unit="s",
+        )
+    legacy_manifest_path.write_text(json.dumps(legacy_manifest), encoding="utf-8")
+
+    legacy_replay = read_market_data_snapshot(config, legacy_dir)
+    assert legacy_replay.comparison_symbols == ["SPY"]
+    assert "comparisonPrices" not in legacy_replay.input_sha256
+    assert any("Legacy schema-v2" in note for note in legacy_replay.notes)
 
     original_manifest_bytes = manifest_path.read_bytes()
     with monkeypatch.context() as scoped:
@@ -684,7 +994,36 @@ def test_record_provenance_hash_has_a_versioned_nullable_round_trip() -> None:
     assert data.SNAPSHOT_READ_CONTRACT["recordCanonicalization"] == (
         data.RECORD_CANONICALIZATION_VERSION
     )
+    assert "candidateZeroVolumeClosePolicy" not in data.LEGACY_SNAPSHOT_READ_CONTRACT
+    assert data.SNAPSHOT_READ_CONTRACT["candidateZeroVolumeClosePolicy"] == (
+        "mask_adjusted_and_raw_v1"
+    )
+    assert data.SNAPSHOT_READ_CONTRACT["matrixCanonicalization"] == (
+        data.MATRIX_CANONICALIZATION_VERSION
+    )
     assert data.canonical_records_sha256(frame) == data.canonical_records_sha256(records)
+
+
+def test_canonical_matrix_hash_is_datetime_unit_invariant() -> None:
+    base = pd.DataFrame(
+        {"AAA": [10.0, np.nan, 12.0]},
+        index=pd.date_range("2026-01-02", periods=3, freq="D"),
+    )
+    frames = {
+        unit: base.set_axis(pd.DatetimeIndex(base.index).as_unit(unit))
+        for unit in data.LEGACY_MATRIX_DATETIME_UNITS
+    }
+
+    assert len({data._canonical_matrix_sha256(frame) for frame in frames.values()}) == 1
+    assert (
+        len(
+            {
+                data._legacy_canonical_matrix_sha256(frame, datetime_unit=unit)
+                for unit, frame in frames.items()
+            }
+        )
+        > 1
+    )
 
 
 def test_live_raw_close_proxy_snapshot_is_auditable_and_hash_reproducible(

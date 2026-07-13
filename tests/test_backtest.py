@@ -103,6 +103,54 @@ def test_month_end_signal_uses_next_close_without_capturing_that_session_return(
     assert result.returns.loc[effective] == pytest.approx(0.001)
 
 
+def test_weight_history_tail_retains_only_exact_recent_sessions() -> None:
+    prices, scores, eligible, config = _fixture()
+    full = _run(prices, scores, config, eligible)
+    tail = run_factor_backtest(
+        "factor",
+        "equal_weight",
+        prices,
+        scores,
+        config,
+        eligibility_mask=eligible,
+        retain_weight_history=True,
+        weight_history_tail_sessions=7,
+    )
+
+    assert tail.weights.equals(full.weights.tail(7))
+    assert tail.pre_trade_weights.equals(full.pre_trade_weights.tail(7))
+    assert tail.cash_weights.equals(full.cash_weights.tail(7))
+    assert tail.returns.equals(full.returns)
+    assert tail.ending_weights.equals(full.ending_weights)
+    assert tail.ending_cash_weight == full.ending_cash_weight
+
+
+def test_weight_history_tail_requires_positive_retained_history() -> None:
+    prices, scores, eligible, config = _fixture()
+
+    with pytest.raises(ValueError, match="positive integer"):
+        run_factor_backtest(
+            "factor",
+            "equal_weight",
+            prices,
+            scores,
+            config,
+            eligibility_mask=eligible,
+            retain_weight_history=False,
+            weight_history_tail_sessions=7,
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        run_factor_backtest(
+            "factor",
+            "equal_weight",
+            prices,
+            scores,
+            config,
+            eligibility_mask=eligible,
+            weight_history_tail_sessions=0,
+        )
+
+
 def test_real_extreme_move_is_earned_before_causal_gate_blocks_later_signals() -> None:
     prices, scores, _, config = _fixture()
     config.transaction_cost_bps = 0.0

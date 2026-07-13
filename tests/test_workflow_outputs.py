@@ -1,10 +1,28 @@
+import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from momentum_factor_lab.config import WEIGHTING_POLICIES
-from momentum_factor_lab.workflow import AnalysisResult, result_payload, write_result_json
+from momentum_factor_lab.identity import canonical_json_bytes
+from momentum_factor_lab.workflow import (
+    FACTOR_DIAGNOSTICS_CONTRACT_VERSION,
+    FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS,
+    FACTOR_DIAGNOSTICS_REDUNDANCY_THRESHOLD,
+    FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT,
+    MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES,
+    SELECTED_HOLDING_HISTORY_SESSION_COUNT,
+    SELECTED_HOLDING_HISTORY_WEIGHT_TIMING,
+    AnalysisResult,
+    _factor_rank_ic_diagnostic_row,
+    _factor_holding_history_sidecar_manifest,
+    _selected_backtest_holding_history_payload,
+    result_payload,
+    write_result_json,
+)
 
 
 def test_result_json_persists_schema_v4_joint_grid_and_identity(
@@ -56,6 +74,105 @@ def test_result_json_persists_schema_v4_joint_grid_and_identity(
     )
     assert not list(Path(demo_result.config.output_dir).glob("*.pdf"))
     assert not list(Path(demo_result.config.output_dir).glob("*.xlsx"))
+
+
+def test_factor_diagnostics_cover_all_independent_factors_and_exclude_aliases(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    diagnostics = payload["factorDiagnostics"]
+    definitions = payload["factorDefinitions"]
+    independent = {row["factor"] for row in definitions if row["compatibility_alias_of"] is None}
+    aliases = {
+        row["factor"]: row["compatibility_alias_of"]
+        for row in definitions
+        if row["compatibility_alias_of"] is not None
+    }
+
+    assert diagnostics["contractVersion"] == FACTOR_DIAGNOSTICS_CONTRACT_VERSION
+    assert diagnostics["scope"] == {
+        "factorCount": 64,
+        "independentFactorCount": 61,
+        "diagnosticAliasCount": 3,
+        "aliasHandling": "excluded_from_rankings",
+        "aliases": [
+            {"factor": factor, "canonicalFactor": aliases[factor]} for factor in sorted(aliases)
+        ],
+    }
+    rank_ic = diagnostics["rankIc"]
+    rank_rows = rank_ic["rows"]
+    assert rank_ic["horizonSessions"] == FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS
+    assert rank_ic["requestedSignalSessions"] == len(rank_ic["signalDates"]) == 756
+    assert rank_ic["overlapping"] is True
+    assert {row["factor"] for row in rank_rows} == independent
+    assert not aliases.keys() & {row["factor"] for row in rank_rows}
+    assert [row["rank"] for row in rank_rows] == list(range(1, 62))
+    assert all(
+        row["observations"] <= 756 - FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS
+        and row["horizonSessions"] == FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS
+        and row["latestFiniteCount"] <= payload["data"]["latestEligibleSecurityCount"]
+        for row in rank_rows
+    )
+    selected_ic = next(row for row in rank_rows if row["factor"] == payload["selectedFactor"])
+    assert selected_ic["available"] is True
+    assert selected_ic["standardDeviation"] >= 0.0
+
+    redundancy = diagnostics["redundancy"]
+    redundancy_rows = redundancy["rows"]
+    assert redundancy["thresholdAbs"] == pytest.approx(FACTOR_DIAGNOSTICS_REDUNDANCY_THRESHOLD)
+    assert redundancy["diagnosticDate"] == payload["data"]["asOf"]
+    assert {row["factor"] for row in redundancy_rows} == independent
+    assert (
+        sum(row["validPeerCount"] for row in redundancy_rows) == 2 * redundancy["eligiblePairCount"]
+    )
+    assert (
+        sum(row["highCorrPeerCount"] for row in redundancy_rows)
+        == 2 * redundancy["highRedundancyPairCount"]
+    )
+    top_pairs = redundancy["topPairs"]
+    assert len(top_pairs) == 10
+    assert len({(row["leftFactor"], row["rightFactor"]) for row in top_pairs}) == 10
+    assert all(
+        row["leftFactor"] < row["rightFactor"]
+        and row["absCorr"] == pytest.approx(abs(row["signedCorr"]))
+        and row["commonSecurityCount"] >= 3
+        for row in top_pairs
+    )
+
+
+def test_rank_ic_diagnostic_uses_pairwise_ranks_and_exact_21_session_metadata() -> None:
+    dates = pd.bdate_range("2026-01-02", periods=25)
+    columns = ["A", "B", "C", "D"]
+    panel = pd.DataFrame(
+        [[1.0, 2.0, 3.0, 4.0] for _ in dates],
+        index=dates,
+        columns=columns,
+    )
+    future = pd.DataFrame(float("nan"), index=dates, columns=columns)
+    future.loc[dates[:4]] = [float("nan"), 20.0, 30.0, 40.0]
+
+    row = _factor_rank_ic_diagnostic_row(
+        factor="fixture",
+        category="fixture",
+        panel=panel,
+        signal_dates=dates,
+        forward_returns=future,
+        latest_date=dates[-1],
+    )
+
+    assert row["available"] is True
+    assert row["horizonSessions"] == 21
+    assert row["observations"] == 4
+    assert row["mean"] == pytest.approx(1.0)
+    assert row["median"] == pytest.approx(1.0)
+    assert row["standardDeviation"] == pytest.approx(0.0)
+    assert row["positiveRate"] == pytest.approx(1.0)
+    assert row["startDate"] == dates[0].date().isoformat()
+    assert row["endDate"] == dates[3].date().isoformat()
+    assert row["minimumSecurityCount"] == 3
+    assert row["averageSecurityCount"] == pytest.approx(3.0)
+    assert row["maximumSecurityCount"] == 3
+    assert row["latestFiniteCount"] == 4
 
 
 def test_factor_policy_grid_registry_and_accounting_survive_serialization(
@@ -111,6 +228,147 @@ def test_selected_factor_policy_current_target_and_performance_reconcile(
     assert len({row["symbol"] for row in portfolio["weights"]}) == len(portfolio["weights"])
     assert payload["contributionDiagnostics"]["observedReturnsPreserved"] is True
     assert payload["contributionDiagnostics"]["reoptimized"] is False
+
+
+def test_selected_backtest_history_is_sparse_recent_and_exactly_reconciled(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    selected_factor = payload["selectedFactor"]
+    selected_backtest = demo_result.backtests[selected_factor]
+    history = payload["selectedBacktestHoldingHistory"]
+    held = payload["backtestHeldPortfolio"]
+
+    assert not selected_backtest.weights.empty
+    assert not selected_backtest.pre_trade_weights.empty
+    assert len(selected_backtest.cash_weights) == len(selected_backtest.weights)
+    assert all(
+        backtest.weights.empty
+        for factor, backtest in demo_result.backtests.items()
+        if factor != selected_factor
+    )
+    assert set(demo_result.factor_holding_histories) == set(demo_result.factor_scores)
+    assert all(
+        factor_history["weightingPolicyId"] == payload["selectedWeightingPolicy"]
+        and [session["date"] for session in factor_history["sessions"]]
+        == payload["performance"]["dates"][-SELECTED_HOLDING_HISTORY_SESSION_COUNT:]
+        for factor_history in demo_result.factor_holding_histories.values()
+    )
+    assert history["contractVersion"] == 1
+    assert history["factor"] == selected_factor
+    assert history["weightingPolicyId"] == payload["selectedWeightingPolicy"]
+    assert history["weightTiming"] == SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+    assert history["sessionCount"] == SELECTED_HOLDING_HISTORY_SESSION_COUNT
+    assert len(history["sessions"]) == SELECTED_HOLDING_HISTORY_SESSION_COUNT
+    assert [session["date"] for session in history["sessions"]] == payload["performance"]["dates"][
+        -SELECTED_HOLDING_HISTORY_SESSION_COUNT:
+    ]
+    assert history["startDate"] == history["sessions"][0]["date"]
+    assert history["endDate"] == history["sessions"][-1]["date"] == payload["data"]["asOf"]
+    assert all(
+        len(session["weights"]) <= demo_result.config.top_n
+        and sum(row["weight"] for row in session["weights"]) + session["cashWeight"]
+        == pytest.approx(1.0)
+        for session in history["sessions"]
+    )
+    expected_final_weights = [
+        {
+            "rank": row["rank"],
+            "symbol": row["symbol"],
+            "name": row["name"],
+            "weight": row["weight"],
+        }
+        for row in held["weights"]
+    ]
+    final_session = history["sessions"][-1]
+    assert final_session["weights"] == expected_final_weights
+    assert final_session["cashWeight"] == held["cashWeight"]
+    assert final_session["lastSignalDate"] == held["lastSignalDate"]
+    assert final_session["lastExecutionDate"] == held["lastExecutionDate"]
+
+    sidecar_manifest = payload["factorHoldingHistorySidecar"]
+    sidecar = sidecar_manifest["data"]
+    encoded = canonical_json_bytes(sidecar)
+    assert sidecar_manifest["contract"] == FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
+    assert sidecar_manifest["storage"] == "embedded"
+    assert sidecar_manifest["bytes"] == len(encoded)
+    assert sidecar_manifest["sha256"] == hashlib.sha256(encoded).hexdigest()
+    assert sidecar["dates"] == payload["performance"]["dates"][-21:]
+    assert set(sidecar["factors"]) == set(demo_result.factor_scores)
+    assert sidecar["factorCount"] == 64
+    assert sidecar["independentFactorCount"] == 61
+    assert sidecar["diagnosticFactorCount"] == 3
+
+
+def test_factor_holding_history_sidecar_builder_fails_closed_above_public_limit(
+    demo_result: AnalysisResult,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oversized = b"x" * (MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES + 1)
+    monkeypatch.setattr(
+        "momentum_factor_lab.workflow.canonical_json_bytes",
+        lambda _value: oversized,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"limit is {MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:,}",
+    ):
+        _factor_holding_history_sidecar_manifest(demo_result)
+
+
+def test_post_close_history_uses_next_session_start_weights_and_final_ending_weights() -> None:
+    dates = pd.bdate_range(end="2026-07-10", periods=21)
+    weights = pd.DataFrame(0.0, index=dates, columns=["OLD", "NEW"])
+    weights.loc[:, "OLD"] = 0.6
+    weights.loc[:, "NEW"] = 0.4
+    execution_date = pd.Timestamp("2026-07-01")
+    next_date = dates[dates.get_loc(execution_date) + 1]
+    weights.loc[next_date:, "OLD"] = 0.2
+    weights.loc[next_date:, "NEW"] = 0.8
+    ending_weights = pd.Series({"OLD": 0.3, "NEW": 0.7}, dtype=float)
+    statuses = pd.Series("none", index=dates, dtype=object)
+    statuses.loc[execution_date] = "executed"
+    backtest = SimpleNamespace(
+        weights=weights,
+        pre_trade_weights=weights.copy(),
+        cash_weights=pd.Series(0.0, index=dates, dtype=float),
+        ending_weights=ending_weights,
+        ending_cash_weight=0.0,
+        execution_statuses=statuses,
+        signal_dates=pd.Series(
+            {execution_date: pd.Timestamp("2026-06-30")},
+            dtype="datetime64[ns]",
+        ),
+        valuation_available=pd.Series(True, index=dates, dtype=bool),
+    )
+    result = SimpleNamespace(
+        selected_factor="fixture_factor",
+        selected_policy="fixture_policy",
+        backtests={"fixture_factor": backtest},
+        market_data=SimpleNamespace(
+            universe=pd.DataFrame({"symbol": ["OLD", "NEW"], "name": ["Old Name", "New Name"]})
+        ),
+    )
+
+    history = _selected_backtest_holding_history_payload(result)
+    execution_session = next(
+        session for session in history["sessions"] if session["date"] == "2026-07-01"
+    )
+    final_session = history["sessions"][-1]
+
+    assert execution_session["executionStatus"] == "executed"
+    assert execution_session["lastSignalDate"] == "2026-06-30"
+    assert execution_session["lastExecutionDate"] == "2026-07-01"
+    assert {row["symbol"]: row["weight"] for row in execution_session["weights"]} == {
+        "OLD": 0.2,
+        "NEW": 0.8,
+    }
+    assert final_session["date"] == "2026-07-10"
+    assert {row["symbol"]: row["weight"] for row in final_session["weights"]} == {
+        "OLD": 0.3,
+        "NEW": 0.7,
+    }
 
 
 def test_current_transition_uses_cash_inclusive_half_l1_and_one_cost_charge(
@@ -180,6 +438,57 @@ def test_all_performance_curves_share_the_selected_policy_dates(
     assert len(dates) == demo_result.config.evaluation_window_days
     assert set(performance["factorCurves"]) == set(demo_result.factor_scores)
     assert all(len(curve) == len(dates) for curve in performance["factorCurves"].values())
+
+
+def test_python_period_performance_uses_exact_boundaries_and_explicit_comparators(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    performance = payload["performance"]
+    selected = payload["selectedFactor"]
+    comparison_order = ["SPY", "^IXIC", "QQQ"]
+
+    assert performance["contractVersion"] == "python-period-performance-v1"
+    assert performance["benchmarkOrder"] == comparison_order
+    assert list(performance["benchmarkCurves"]) == comparison_order
+    assert performance["benchmarkCurve"] == performance["benchmarkCurves"]["SPY"]
+    assert payload["data"]["chartBenchmark"] == "^IXIC"
+    assert payload["data"]["additionalComparisonBenchmarks"] == ["QQQ"]
+    assert list(payload["data"]["comparisonBenchmarkAvailability"]) == comparison_order
+
+    periods = {period["key"]: period for period in performance["periods"]}
+    assert list(periods) == ["1W", "1M", "3M", "6M", "1Y", "YTD", "FULL"]
+    assert all(
+        set(period["factors"]) == set(demo_result.factor_scores) for period in periods.values()
+    )
+    assert all(list(period["benchmarks"]) == comparison_order for period in periods.values())
+
+    one_week = periods["1W"]
+    point_dates = demo_result.market_data.prices.index[-6:]
+    equity = demo_result.backtests[selected].equity.reindex(point_dates)
+    selected_metrics = one_week["factors"][selected]
+    assert one_week["startDate"] == point_dates[0].date().isoformat()
+    assert one_week["endDate"] == point_dates[-1].date().isoformat()
+    assert one_week["returnObservationCount"] == 5
+    assert selected_metrics["basis"] == "net_of_costs_strategy"
+    assert selected_metrics["returnObservationCount"] <= 5
+    assert selected_metrics["cumulativeReturn"] == pytest.approx(
+        float(equity.iloc[-1] / equity.iloc[0] - 1.0)
+    )
+
+    full = periods["FULL"]
+    assert full["startDate"] == performance["dates"][0]
+    assert full["endDate"] == performance["dates"][-1]
+    assert full["returnObservationCount"] == len(performance["dates"]) - 1
+    for symbol, available in payload["data"]["comparisonBenchmarkAvailability"].items():
+        benchmark_metrics = one_week["benchmarks"][symbol]
+        assert benchmark_metrics["basis"] == "adjusted_close_buy_and_hold"
+        if available:
+            assert benchmark_metrics["available"] is True
+            assert benchmark_metrics["unavailableReason"] is None
+        else:
+            assert benchmark_metrics["available"] is False
+            assert benchmark_metrics["unavailableReason"] == "comparison_price_unavailable"
 
 
 def test_payload_is_compact_enough_for_static_web(demo_result: AnalysisResult) -> None:

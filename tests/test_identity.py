@@ -53,7 +53,12 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
     return RunConfig(**values)
 
 
-def _market(*, price_hash: str = "a" * 64, as_of: str = "2026-07-10") -> MarketData:
+def _market(
+    *,
+    price_hash: str = "a" * 64,
+    comparison_hash: str = "c" * 64,
+    as_of: str = "2026-07-10",
+) -> MarketData:
     dates = pd.DatetimeIndex([pd.Timestamp(as_of)])
     prices = pd.DataFrame({"AAA": [10.0], "SPY": [100.0]}, index=dates)
     candidates = prices[["AAA"]]
@@ -70,12 +75,17 @@ def _market(*, price_hash: str = "a" * 64, as_of: str = "2026-07-10") -> MarketD
         source_label="fixture",
         price_basis="adjusted_close",
         volume_basis="raw_share_volume",
-        input_sha256={"prices": price_hash, "volumes": "b" * 64},
+        input_sha256={
+            "prices": price_hash,
+            "volumes": "b" * 64,
+            "comparisonPrices": comparison_hash,
+        },
         benchmark="SPY",
         requested_through=as_of,
         requested_candidate_count=1,
         provider_returned_candidate_count=1,
         provider="fixture",
+        comparison_prices=prices[["SPY"]],
     )
 
 
@@ -126,6 +136,17 @@ def test_same_as_of_market_content_change_invalidates_result_key(tmp_path: Path)
     )
     assert first["resultKey"] != second["resultKey"]
     assert first["keyParts"]["canonicalJsonVersion"] == CANONICAL_JSON_VERSION
+
+
+def test_same_primary_market_with_changed_comparator_prices_invalidates_result_key(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    first = build_result_identity(config, _market(comparison_hash="c" * 64))
+    second = build_result_identity(config, _market(comparison_hash="d" * 64))
+
+    assert first["keyParts"]["marketSnapshot"]["comparisonSymbols"] == ["SPY"]
+    assert first["resultKey"] != second["resultKey"]
 
 
 def test_market_basis_and_raw_close_proxy_semantics_invalidate_result_key(

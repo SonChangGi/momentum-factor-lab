@@ -165,6 +165,8 @@ def market_snapshot_identity(market: MarketData) -> dict[str, object]:
         "providerReturnedCandidateCount": market.provider_returned_candidate_count,
         "analyzedSecurityCount": len(market.candidate_symbols),
         "candidateSymbolsSha256": canonical_sha256(list(market.candidate_symbols)),
+        "comparisonSymbols": list(market.comparison_symbols),
+        "comparisonPricesSha256": market.input_sha256.get("comparisonPrices"),
     }
 
 

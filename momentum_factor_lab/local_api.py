@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlsplit
 
-from .config import RunConfig
+from .config import MAX_TOP_N, RunConfig
 from .dashboard import dashboard_summary
 from .data import (
     LIVE_SNAPSHOT_HASH_FIELDS,
@@ -275,6 +275,9 @@ def _validate_market(market: MarketData) -> None:
         "universeRecords": canonical_records_sha256(market.universe),
         "priceSources": canonical_records_sha256(price_sources),
         "dataSources": canonical_records_sha256(data_sources),
+        "comparisonPrices": _canonical_matrix_sha256(
+            market.comparison_prices.reindex(index=market.prices.index)
+        ),
     }
     if observed_hashes != hashes:
         raise LocalAPIRequestError(
@@ -527,6 +530,7 @@ class LocalResearchAPI:
                 "version": RESEARCH_INPUTS_VERSION,
                 "canonicalRequestRequired": True,
                 "unknownFieldsRejected": True,
+                "limits": {"topN": {"minimum": 1, "maximum": MAX_TOP_N}},
                 "defaults": ResearchInputs().to_dict(),
             },
             "endpoints": {

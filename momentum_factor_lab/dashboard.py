@@ -4,7 +4,9 @@ import hashlib
 import json
 import math
 import shutil
+from copy import deepcopy
 from dataclasses import fields
+from datetime import date as calendar_date
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -18,7 +20,11 @@ from .config import (
     RunConfig,
     WEIGHTING_POLICIES,
 )
-from .data import LIVE_SNAPSHOT_HASH_FIELDS, canonical_records_sha256
+from .data import (
+    LIVE_SNAPSHOT_HASH_FIELDS,
+    LIVE_SNAPSHOT_HASH_FIELDS_V2,
+    canonical_records_sha256,
+)
 from .identity import (
     CANONICAL_JSON_VERSION,
     RESULT_IDENTITY_VERSION,
@@ -26,14 +32,38 @@ from .identity import (
     canonical_sha256,
 )
 from .factors import factor_definitions_frame
-from .portfolio import capped_weight_values
+from .portfolio import TIE_BREAK_POLICY, capped_weight_values
 from .research_inputs import ResearchInputError, ResearchInputs
-from .workflow import AnalysisResult, JOINT_TIE_BREAK_POLICY, result_payload
+from .workflow import (
+    FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT,
+    FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION,
+    FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY,
+    FACTOR_DIAGNOSTICS_CONTRACT_VERSION,
+    FACTOR_DIAGNOSTICS_MAX_SIGNAL_SESSIONS,
+    FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS,
+    FACTOR_DIAGNOSTICS_RANK_IC_METHOD,
+    FACTOR_DIAGNOSTICS_REDUNDANCY_METHOD,
+    FACTOR_DIAGNOSTICS_REDUNDANCY_THRESHOLD,
+    FACTOR_DIAGNOSTICS_TOP_PAIR_COUNT,
+    MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES,
+    PERFORMANCE_CONTRACT_VERSION,
+    PERFORMANCE_METRIC_KEYS,
+    PERFORMANCE_PERIODS,
+    SELECTED_HOLDING_HISTORY_CONTRACT_VERSION,
+    SELECTED_HOLDING_HISTORY_SESSION_COUNT,
+    SELECTED_HOLDING_HISTORY_WEIGHT_TIMING,
+    AnalysisResult,
+    JOINT_TIE_BREAK_POLICY,
+    result_payload,
+)
 
 
 DEFAULT_SITE_TITLE = "Momentum Factor Lab"
 WEB_ROOT = Path(__file__).with_name("web")
-MAX_DASHBOARD_BYTES = 5_000_000
+# The complete Top-30 detail now includes 64 exact current targets plus the
+# 61-factor diagnostic evidence. Keep a bounded publication ceiling while
+# allowing the measured 5.03 MB canonical payload without dropping evidence.
+MAX_DASHBOARD_BYTES = 5_500_000
 
 _LEGACY_SCHEMA_KEYS = {
     "factorRanking",
@@ -84,6 +114,71 @@ _POLICY_DIAGNOSTIC_METRICS = (
     "max_security_absolute_contribution_share",
     "max_abs_leave_one_security_cagr_delta",
 )
+_FACTOR_PORTFOLIO_FIELDS = frozenset(
+    {
+        "weightingPolicyId",
+        "weightingPolicyVersion",
+        "signalDate",
+        "status",
+        "eligibleSecurityCount",
+        "selectedSecurityCount",
+        "cashWeight",
+        "reasons",
+        "componentStatus",
+        "concentration",
+        "tieBreakPolicy",
+        "weights",
+        "factor",
+        "asOf",
+        "targetType",
+        "executionTiming",
+        "selectionFraction",
+    }
+)
+_FACTOR_PORTFOLIO_WEIGHT_FIELDS = frozenset(
+    {
+        "rank",
+        "symbol",
+        "name",
+        "factorScore",
+        "latestPrice",
+        "eligibilityStatus",
+        "rawPolicyScore",
+        "preCapWeight",
+        "weight",
+        "maxWeight",
+        "capBinding",
+        "rankComponent",
+        "trailingVolatility",
+        "trailingDollarVolume",
+        "scoreComponent",
+        "liquidityComponent",
+    }
+)
+_CONCENTRATION_FIELDS = frozenset(
+    {
+        "investedWeight",
+        "cashWeight",
+        "riskySleeveHhi",
+        "effectiveNames",
+        "top1Weight",
+        "top5Weight",
+        "maxWeight",
+    }
+)
+_AVAILABLE_FACTOR_PORTFOLIO_REASONS = frozenset(
+    {
+        "top_n_boundary_tie_resolved_by_trailing_dollar_volume",
+        "fewer_complete_policy_inputs_than_top_n",
+        "max_weight_capacity_or_missing_policy_inputs",
+    }
+)
+_UNAVAILABLE_FACTOR_PORTFOLIO_COMPONENTS = {
+    "no_complete_signal_inputs": {},
+    "no_finite_trailing_volatility": {"volatility": "unavailable"},
+    "no_finite_trailing_dollar_volume": {"liquidity": "unavailable"},
+    "top_n_boundary_tie_has_no_finite_liquidity_tie_break": {},
+}
 
 
 def _finite_number(value: object) -> bool:
@@ -230,6 +325,8 @@ def _validate_identity(payload: dict[str, Any]) -> None:
         "providerReturnedCandidateCount": data.get("providerReturnedCandidateCount"),
         "analyzedSecurityCount": data.get("analyzedSecurityCount"),
         "candidateSymbolsSha256": canonical_sha256(data.get("analyzedSymbols")),
+        "comparisonSymbols": data.get("comparisonSymbols"),
+        "comparisonPricesSha256": data.get("comparisonPricesSha256"),
     }
     if any(market_snapshot.get(field) != value for field, value in market_fields.items()):
         raise ValueError("dashboard result identity market snapshot differs from data")
@@ -299,11 +396,16 @@ def _validate_data(payload: dict[str, Any]) -> str:
     if mode == "live_market":
         input_hashes = data.get("inputSha256")
         read_contract = data.get("snapshotReadContract")
+        observed_hash_fields = set(input_hashes) if isinstance(input_hashes, dict) else set()
+        supported_hash_fields = {
+            frozenset(LIVE_SNAPSHOT_HASH_FIELDS),
+            frozenset(LIVE_SNAPSHOT_HASH_FIELDS_V2),
+        }
         if (
             data.get("rawCloseAvailable") is not True
             or not isinstance(input_hashes, dict)
-            or set(input_hashes) != set(LIVE_SNAPSHOT_HASH_FIELDS)
-            or any(not _is_sha256(input_hashes.get(field)) for field in LIVE_SNAPSHOT_HASH_FIELDS)
+            or frozenset(observed_hash_fields) not in supported_hash_fields
+            or any(not _is_sha256(input_hashes.get(field)) for field in observed_hash_fields)
             or not isinstance(read_contract, dict)
             or read_contract.get("pandasFloatPrecision") != "round_trip"
         ):
@@ -431,6 +533,444 @@ def _factor_sets(payload: dict[str, Any]) -> tuple[set[str], set[str]]:
             "dashboard factorDefinitions do not satisfy the canonical 64/61/3 registry"
         )
     return independent, aliases
+
+
+def _validated_iso_date(value: object, label: str) -> str:
+    rendered = _required_text(value)
+    try:
+        parsed = calendar_date.fromisoformat(rendered)
+    except ValueError as error:
+        raise ValueError(f"{label} is not an ISO calendar date") from error
+    if parsed.isoformat() != rendered:
+        raise ValueError(f"{label} is not a canonical ISO calendar date")
+    return rendered
+
+
+def _validate_factor_diagnostics(
+    payload: dict[str, Any],
+    *,
+    independent: set[str],
+    aliases: set[str],
+) -> None:
+    diagnostics = payload.get("factorDiagnostics")
+    if (
+        not isinstance(diagnostics, dict)
+        or diagnostics.get("contractVersion") != FACTOR_DIAGNOSTICS_CONTRACT_VERSION
+    ):
+        raise ValueError("dashboard factorDiagnostics contract is missing or unsupported")
+    definitions = payload["factorDefinitions"]
+    definition_by_factor = {str(row["factor"]): row for row in definitions}
+    category_by_factor = {
+        factor: _required_text(definition_by_factor[factor].get("category"))
+        for factor in independent
+    }
+
+    expected_alias_rows = sorted(
+        (
+            {
+                "factor": factor,
+                "canonicalFactor": str(definition_by_factor[factor]["compatibility_alias_of"]),
+            }
+            for factor in aliases
+        ),
+        key=lambda row: row["factor"],
+    )
+    scope = diagnostics.get("scope")
+    if (
+        not isinstance(scope, dict)
+        or scope.get("factorCount") != len(independent) + len(aliases)
+        or scope.get("independentFactorCount") != len(independent)
+        or scope.get("diagnosticAliasCount") != len(aliases)
+        or scope.get("aliasHandling") != "excluded_from_rankings"
+        or scope.get("aliases") != expected_alias_rows
+        or any(row["canonicalFactor"] not in independent for row in expected_alias_rows)
+    ):
+        raise ValueError("dashboard factorDiagnostics scope or alias mapping is inconsistent")
+
+    rank_ic = diagnostics.get("rankIc")
+    signal_dates = rank_ic.get("signalDates") if isinstance(rank_ic, dict) else None
+    requested_sessions = (
+        rank_ic.get("requestedSignalSessions") if isinstance(rank_ic, dict) else None
+    )
+    data_observations = payload["data"].get("observations")
+    if (
+        not isinstance(rank_ic, dict)
+        or rank_ic.get("method") != FACTOR_DIAGNOSTICS_RANK_IC_METHOD
+        or rank_ic.get("priceBasis") != "analysis_adjusted_close"
+        or rank_ic.get("horizonSessions") != FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS
+        or rank_ic.get("maximumSignalSessions") != FACTOR_DIAGNOSTICS_MAX_SIGNAL_SESSIONS
+        or rank_ic.get("overlapping") is not True
+        or not _nonnegative_integer(requested_sessions)
+        or not _nonnegative_integer(data_observations)
+        or int(requested_sessions)
+        != min(FACTOR_DIAGNOSTICS_MAX_SIGNAL_SESSIONS, int(data_observations))
+        or not isinstance(signal_dates, list)
+        or len(signal_dates) != int(requested_sessions)
+        or not signal_dates
+    ):
+        raise ValueError("dashboard factorDiagnostics Rank-IC methodology is inconsistent")
+    validated_signal_dates = [
+        _validated_iso_date(value, "dashboard factorDiagnostics signal date")
+        for value in signal_dates
+    ]
+    if (
+        validated_signal_dates != sorted(set(validated_signal_dates))
+        or rank_ic.get("requestedStartDate") != validated_signal_dates[0]
+        or rank_ic.get("requestedEndDate") != validated_signal_dates[-1]
+        or validated_signal_dates[-1] != payload["data"].get("asOf")
+    ):
+        raise ValueError("dashboard factorDiagnostics Rank-IC signal dates are inconsistent")
+    maximum_observations = max(
+        0,
+        len(validated_signal_dates) - FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS,
+    )
+    latest_forward_signal_date = (
+        validated_signal_dates[-FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS - 1]
+        if maximum_observations
+        else None
+    )
+    rank_rows = rank_ic.get("rows")
+    if (
+        not isinstance(rank_rows, list)
+        or len(rank_rows) != len(independent)
+        or any(not isinstance(row, dict) for row in rank_rows)
+        or {str(row.get("factor")) for row in rank_rows} != independent
+    ):
+        raise ValueError("dashboard factorDiagnostics Rank-IC rows do not cover 61 factors")
+    analyzed_count = int(payload["data"]["analyzedSecurityCount"])
+    latest_eligible_count = int(payload["data"]["latestEligibleSecurityCount"])
+    required_rank_fields = {
+        "rank",
+        "factor",
+        "category",
+        "available",
+        "unavailableReason",
+        "horizonSessions",
+        "observations",
+        "mean",
+        "median",
+        "standardDeviation",
+        "positiveRate",
+        "startDate",
+        "endDate",
+        "minimumSecurityCount",
+        "averageSecurityCount",
+        "maximumSecurityCount",
+        "latestFiniteCount",
+    }
+    for position, row in enumerate(rank_rows, start=1):
+        factor = str(row["factor"])
+        if (
+            not required_rank_fields.issubset(row)
+            or row.get("rank") != position
+            or row.get("category") != category_by_factor[factor]
+            or not isinstance(row.get("available"), bool)
+            or row.get("horizonSessions") != FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS
+            or not _nonnegative_integer(row.get("observations"))
+            or int(row["observations"]) > maximum_observations
+            or not _nonnegative_integer(row.get("latestFiniteCount"))
+            or int(row["latestFiniteCount"]) > latest_eligible_count
+        ):
+            raise ValueError("dashboard factorDiagnostics Rank-IC row is invalid")
+        if row["available"] is True:
+            numeric_fields = ("mean", "median", "standardDeviation", "positiveRate")
+            if (
+                row.get("unavailableReason") is not None
+                or int(row["observations"]) <= 0
+                or any(not _finite_number(row.get(field)) for field in numeric_fields)
+                or not -1.0 <= float(row["mean"]) <= 1.0
+                or not -1.0 <= float(row["median"]) <= 1.0
+                or not 0.0 <= float(row["standardDeviation"]) <= 1.0
+                or not 0.0 <= float(row["positiveRate"]) <= 1.0
+            ):
+                raise ValueError("dashboard available Rank-IC row is inconsistent")
+            start = _validated_iso_date(
+                row.get("startDate"), "dashboard factorDiagnostics Rank-IC start"
+            )
+            end = _validated_iso_date(row.get("endDate"), "dashboard factorDiagnostics Rank-IC end")
+            if (
+                start not in validated_signal_dates
+                or end not in validated_signal_dates
+                or start > end
+                or latest_forward_signal_date is None
+                or end > latest_forward_signal_date
+            ):
+                raise ValueError("dashboard Rank-IC valid date range is inconsistent")
+            minimum = row.get("minimumSecurityCount")
+            average = row.get("averageSecurityCount")
+            maximum = row.get("maximumSecurityCount")
+            if (
+                not _nonnegative_integer(minimum)
+                or not _finite_number(average)
+                or not _nonnegative_integer(maximum)
+                or int(minimum) < 3
+                or not int(minimum) <= float(average) <= int(maximum)
+                or int(maximum) > analyzed_count
+            ):
+                raise ValueError("dashboard Rank-IC security-count statistics are inconsistent")
+        elif (
+            not _required_text(row.get("unavailableReason"))
+            or int(row["observations"]) != 0
+            or any(
+                row.get(field) is not None
+                for field in (
+                    "mean",
+                    "median",
+                    "standardDeviation",
+                    "positiveRate",
+                    "startDate",
+                    "endDate",
+                    "minimumSecurityCount",
+                    "averageSecurityCount",
+                    "maximumSecurityCount",
+                )
+            )
+        ):
+            raise ValueError("dashboard unavailable Rank-IC row is inconsistent")
+    expected_rank_order = sorted(
+        rank_rows,
+        key=lambda row: (
+            0 if row["available"] is True else 1,
+            -float(row["mean"]) if row["available"] is True else 0.0,
+            -int(row["observations"]),
+            str(row["factor"]),
+        ),
+    )
+    available_rank_count = sum(row["available"] is True for row in rank_rows)
+    if (
+        rank_rows != expected_rank_order
+        or rank_ic.get("availableFactorCount") != available_rank_count
+        or rank_ic.get("unavailableFactorCount") != len(independent) - available_rank_count
+        or payload["selectedFactor"] not in {row["factor"] for row in rank_rows}
+    ):
+        raise ValueError("dashboard factorDiagnostics Rank-IC ordering/counts are inconsistent")
+
+    redundancy = diagnostics.get("redundancy")
+    if (
+        not isinstance(redundancy, dict)
+        or redundancy.get("method") != FACTOR_DIAGNOSTICS_REDUNDANCY_METHOD
+        or redundancy.get("diagnosticDate") != payload["data"].get("asOf")
+        or not _finite_number(redundancy.get("thresholdAbs"))
+        or not _close(
+            float(redundancy["thresholdAbs"]),
+            FACTOR_DIAGNOSTICS_REDUNDANCY_THRESHOLD,
+        )
+    ):
+        raise ValueError("dashboard factorDiagnostics redundancy methodology is inconsistent")
+    redundancy_rows = redundancy.get("rows")
+    if (
+        not isinstance(redundancy_rows, list)
+        or len(redundancy_rows) != len(independent)
+        or any(not isinstance(row, dict) for row in redundancy_rows)
+        or {str(row.get("factor")) for row in redundancy_rows} != independent
+    ):
+        raise ValueError("dashboard factorDiagnostics redundancy rows do not cover 61 factors")
+    required_redundancy_fields = {
+        "rank",
+        "factor",
+        "category",
+        "available",
+        "unavailableReason",
+        "nearestFactor",
+        "signedCorr",
+        "absCorr",
+        "validPeerCount",
+        "highCorrPeerCount",
+        "commonSecurityCount",
+        "latestFiniteCount",
+    }
+    latest_counts: dict[str, int] = {}
+    for row in redundancy_rows:
+        factor = str(row["factor"])
+        if (
+            not required_redundancy_fields.issubset(row)
+            or row.get("category") != category_by_factor[factor]
+            or not isinstance(row.get("available"), bool)
+            or not _nonnegative_integer(row.get("latestFiniteCount"))
+            or int(row["latestFiniteCount"]) > latest_eligible_count
+            or not _nonnegative_integer(row.get("validPeerCount"))
+            or int(row["validPeerCount"]) > len(independent) - 1
+            or not _nonnegative_integer(row.get("highCorrPeerCount"))
+            or int(row["highCorrPeerCount"]) > int(row["validPeerCount"])
+            or not _nonnegative_integer(row.get("commonSecurityCount"))
+        ):
+            raise ValueError("dashboard factorDiagnostics redundancy row is invalid")
+        latest_counts[factor] = int(row["latestFiniteCount"])
+    for position, row in enumerate(redundancy_rows, start=1):
+        factor = str(row["factor"])
+        if row.get("rank") != position:
+            raise ValueError("dashboard factorDiagnostics redundancy rank is inconsistent")
+        if row["available"] is True:
+            nearest = _required_text(row.get("nearestFactor"))
+            if (
+                row.get("unavailableReason") is not None
+                or nearest not in independent
+                or nearest == factor
+                or not _finite_number(row.get("signedCorr"))
+                or not _finite_number(row.get("absCorr"))
+                or not -1.0 <= float(row["signedCorr"]) <= 1.0
+                or not 0.0 <= float(row["absCorr"]) <= 1.0
+                or not _close(float(row["absCorr"]), abs(float(row["signedCorr"])))
+                or int(row["validPeerCount"]) <= 0
+                or not 3
+                <= int(row["commonSecurityCount"])
+                <= min(latest_counts[factor], latest_counts[nearest])
+            ):
+                raise ValueError("dashboard available redundancy row is inconsistent")
+        elif (
+            not _required_text(row.get("unavailableReason"))
+            or row.get("nearestFactor") is not None
+            or row.get("signedCorr") is not None
+            or row.get("absCorr") is not None
+            or int(row["validPeerCount"]) != 0
+            or int(row["highCorrPeerCount"]) != 0
+            or int(row["commonSecurityCount"]) != 0
+        ):
+            raise ValueError("dashboard unavailable redundancy row is inconsistent")
+    expected_redundancy_order = sorted(
+        redundancy_rows,
+        key=lambda row: (
+            0 if row["available"] is True else 1,
+            -float(row["absCorr"]) if row["available"] is True else 0.0,
+            str(row["factor"]),
+        ),
+    )
+    available_redundancy_count = sum(row["available"] is True for row in redundancy_rows)
+    eligible_pair_count = redundancy.get("eligiblePairCount")
+    high_pair_count = redundancy.get("highRedundancyPairCount")
+    maximum_pairs = len(independent) * (len(independent) - 1) // 2
+    if (
+        redundancy_rows != expected_redundancy_order
+        or redundancy.get("availableFactorCount") != available_redundancy_count
+        or redundancy.get("unavailableFactorCount") != len(independent) - available_redundancy_count
+        or not _nonnegative_integer(eligible_pair_count)
+        or int(eligible_pair_count) > maximum_pairs
+        or sum(int(row["validPeerCount"]) for row in redundancy_rows)
+        != 2 * int(eligible_pair_count)
+        or not _nonnegative_integer(high_pair_count)
+        or int(high_pair_count) > int(eligible_pair_count)
+        or sum(int(row["highCorrPeerCount"]) for row in redundancy_rows) != 2 * int(high_pair_count)
+        or redundancy.get("highRedundancyFactorCount")
+        != sum(int(row["highCorrPeerCount"]) > 0 for row in redundancy_rows)
+    ):
+        raise ValueError("dashboard factorDiagnostics redundancy counts are inconsistent")
+
+    top_pairs = redundancy.get("topPairs")
+    if (
+        not isinstance(top_pairs, list)
+        or len(top_pairs) != min(FACTOR_DIAGNOSTICS_TOP_PAIR_COUNT, int(eligible_pair_count))
+        or any(not isinstance(row, dict) for row in top_pairs)
+    ):
+        raise ValueError("dashboard factorDiagnostics top redundancy pairs are incomplete")
+    observed_pairs: set[tuple[str, str]] = set()
+    for position, row in enumerate(top_pairs, start=1):
+        left = _required_text(row.get("leftFactor"))
+        right = _required_text(row.get("rightFactor"))
+        pair = (left, right)
+        if (
+            row.get("rank") != position
+            or left not in independent
+            or right not in independent
+            or left >= right
+            or pair in observed_pairs
+            or not _finite_number(row.get("signedCorr"))
+            or not _finite_number(row.get("absCorr"))
+            or not -1.0 <= float(row["signedCorr"]) <= 1.0
+            or not _close(float(row["absCorr"]), abs(float(row["signedCorr"])))
+            or not _nonnegative_integer(row.get("commonSecurityCount"))
+            or not 3
+            <= int(row["commonSecurityCount"])
+            <= min(latest_counts[left], latest_counts[right])
+        ):
+            raise ValueError("dashboard factorDiagnostics top redundancy pair is invalid")
+        observed_pairs.add(pair)
+    expected_pair_order = sorted(
+        top_pairs,
+        key=lambda row: (
+            -float(row["absCorr"]),
+            str(row["leftFactor"]),
+            str(row["rightFactor"]),
+        ),
+    )
+    high_pairs_in_top = sum(
+        float(row["absCorr"]) >= FACTOR_DIAGNOSTICS_REDUNDANCY_THRESHOLD for row in top_pairs
+    )
+    if (
+        top_pairs != expected_pair_order
+        or int(high_pair_count) < high_pairs_in_top
+        or (
+            int(eligible_pair_count) <= FACTOR_DIAGNOSTICS_TOP_PAIR_COUNT
+            and int(high_pair_count) != high_pairs_in_top
+        )
+    ):
+        raise ValueError("dashboard factorDiagnostics top redundancy pair order/count is invalid")
+
+    category_summary = diagnostics.get("categorySummary")
+    expected_categories = set(category_by_factor.values())
+    if (
+        not isinstance(category_summary, list)
+        or len(category_summary) != len(expected_categories)
+        or any(not isinstance(row, dict) for row in category_summary)
+        or {str(row.get("category")) for row in category_summary} != expected_categories
+    ):
+        raise ValueError("dashboard factorDiagnostics category summary is incomplete")
+    rank_by_factor = {str(row["factor"]): row for row in rank_rows}
+    redundancy_by_factor = {str(row["factor"]): row for row in redundancy_rows}
+    for row in category_summary:
+        category = str(row["category"])
+        factors = sorted(
+            factor
+            for factor, observed_category in category_by_factor.items()
+            if observed_category == category
+        )
+        ic_available = [
+            rank_by_factor[factor] for factor in factors if rank_by_factor[factor]["available"]
+        ]
+        redundancy_available = [
+            redundancy_by_factor[factor]
+            for factor in factors
+            if redundancy_by_factor[factor]["available"]
+        ]
+        if (
+            row.get("factorCount") != len(factors)
+            or row.get("availableRankIcFactorCount") != len(ic_available)
+            or row.get("highCorrFactorCount")
+            != sum(int(item["highCorrPeerCount"]) > 0 for item in redundancy_available)
+            or row.get("exampleFactors") != factors[:4]
+        ):
+            raise ValueError("dashboard factorDiagnostics category counts are inconsistent")
+        expected_mean_ic = (
+            sum(float(item["mean"]) for item in ic_available) / len(ic_available)
+            if ic_available
+            else None
+        )
+        expected_positive_rate = (
+            sum(float(item["positiveRate"]) for item in ic_available) / len(ic_available)
+            if ic_available
+            else None
+        )
+        expected_mean_redundancy = (
+            sum(float(item["absCorr"]) for item in redundancy_available) / len(redundancy_available)
+            if redundancy_available
+            else None
+        )
+        _require_optional_close(
+            row.get("averageMeanRankIc"), expected_mean_ic, "category average Rank-IC"
+        )
+        _require_optional_close(
+            row.get("averagePositiveRate"),
+            expected_positive_rate,
+            "category average positive Rank-IC rate",
+        )
+        _require_optional_close(
+            row.get("averageMaxAbsCorr"),
+            expected_mean_redundancy,
+            "category average maximum absolute rank correlation",
+        )
+    if [(-int(row["factorCount"]), str(row["category"])) for row in category_summary] != sorted(
+        (-int(row["factorCount"]), str(row["category"])) for row in category_summary
+    ):
+        raise ValueError("dashboard factorDiagnostics category order is inconsistent")
 
 
 def _guardrail_expectations(row: dict[str, Any], config: dict[str, Any]) -> dict[str, bool]:
@@ -746,6 +1286,233 @@ def _validate_grid_and_selection(
     return selected, independent_rows, independent
 
 
+def _configured_comparison_benchmarks(config: dict[str, Any]) -> list[str]:
+    raw = [
+        config.get("benchmark"),
+        config.get("chart_benchmark"),
+        *(
+            config.get("additional_comparison_benchmarks", [])
+            if isinstance(config.get("additional_comparison_benchmarks"), list)
+            else []
+        ),
+    ]
+    ordered: list[str] = []
+    for value in raw:
+        symbol = str(value or "").strip().upper()
+        if symbol and symbol not in ordered:
+            ordered.append(symbol)
+    return ordered
+
+
+def _validate_period_metric(
+    value: object,
+    *,
+    expected_basis: str,
+    expected_return_count: int,
+) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("dashboard period metric must be an object")
+    required = {
+        "available",
+        "unavailableReason",
+        "basis",
+        "returnObservationCount",
+        "requiredReturnCount",
+        "riskObservationCount",
+        "riskMetricsExact",
+        *PERFORMANCE_METRIC_KEYS,
+    }
+    if not required.issubset(value) or value.get("basis") != expected_basis:
+        raise ValueError("dashboard period metric contract is incomplete")
+    if (
+        not isinstance(value.get("available"), bool)
+        or not isinstance(value.get("riskMetricsExact"), bool)
+        or not _nonnegative_integer(value.get("returnObservationCount"))
+        or not _nonnegative_integer(value.get("requiredReturnCount"))
+        or not _nonnegative_integer(value.get("riskObservationCount"))
+    ):
+        raise ValueError("dashboard period metric availability/counts are invalid")
+    observed = int(value["returnObservationCount"])
+    required_count = int(value["requiredReturnCount"])
+    risk = int(value["riskObservationCount"])
+    if observed > required_count or risk > observed:
+        raise ValueError("dashboard period metric observation counts are inconsistent")
+    if value["available"] is True:
+        if value.get("unavailableReason") is not None or required_count != expected_return_count:
+            raise ValueError("dashboard available period metric boundary is inconsistent")
+        if not _finite_number(value.get("cumulativeReturn")):
+            raise ValueError("dashboard available period cumulative return is invalid")
+        if any(
+            metric_value is not None and not _finite_number(metric_value)
+            for metric_value in (value.get(metric) for metric in PERFORMANCE_METRIC_KEYS)
+        ):
+            raise ValueError("dashboard available period metric contains a non-finite value")
+    else:
+        if not _required_text(value.get("unavailableReason")) or any(
+            value.get(metric) is not None for metric in PERFORMANCE_METRIC_KEYS
+        ):
+            raise ValueError("dashboard unavailable period metric is inconsistent")
+
+
+def _validate_full_period_curve_parity(
+    metrics: dict[str, Any],
+    curve: object,
+    *,
+    label: str,
+    require_common_series: bool,
+) -> None:
+    """Tie an available FULL cumulative return to its exact plotted NAV endpoints."""
+
+    if metrics.get("available") is not True:
+        return
+    common_series_available = not (
+        not isinstance(curve, list)
+        or len(curve) < 2
+        or any(not _finite_number(value) or float(value) <= 0.0 for value in curve)
+    )
+    if not common_series_available and require_common_series:
+        raise ValueError(f"dashboard {label} FULL common evaluation curve is invalid")
+    if not common_series_available:
+        return
+    assert isinstance(curve, list)
+    expected_return = float(curve[-1]) / float(curve[0]) - 1.0
+    _require_close(
+        metrics.get("cumulativeReturn"),
+        expected_return,
+        f"dashboard {label} FULL cumulative return and common evaluation curve",
+    )
+
+
+def _validate_performance(payload: dict[str, Any]) -> None:
+    performance = payload.get("performance")
+    config = payload["config"]
+    data = payload["data"]
+    if not isinstance(performance, dict):
+        raise ValueError("dashboard performance contract is missing")
+    dates = performance.get("dates")
+    factor_curves = performance.get("factorCurves")
+    if (
+        performance.get("contractVersion") != PERFORMANCE_CONTRACT_VERSION
+        or not isinstance(dates, list)
+        or len(dates) < 2
+        or not all(_required_text(date) for date in dates)
+        or dates != sorted(dates)
+        or dates[-1] != data.get("asOf")
+        or not isinstance(factor_curves, dict)
+    ):
+        raise ValueError("dashboard Python performance contract is invalid")
+    factor_definitions = payload.get("factorDefinitions")
+    expected_factors = {
+        str(row["factor"])
+        for row in factor_definitions
+        if isinstance(row, dict) and _required_text(row.get("factor"))
+    }
+    if set(factor_curves) != expected_factors:
+        raise ValueError("dashboard performance factor curve set is inconsistent")
+    for curve in factor_curves.values():
+        if (
+            not isinstance(curve, list)
+            or len(curve) != len(dates)
+            or any(value is not None and not _finite_number(value) for value in curve)
+        ):
+            raise ValueError("dashboard performance factor curve is invalid")
+
+    comparison_order = _configured_comparison_benchmarks(config)
+    if config.get("comparison_benchmarks") != comparison_order:
+        raise ValueError("dashboard configured comparison benchmark order is inconsistent")
+    if data.get("chartBenchmark") != config.get("chart_benchmark") or data.get(
+        "additionalComparisonBenchmarks"
+    ) != config.get("additional_comparison_benchmarks"):
+        raise ValueError("dashboard comparison benchmark metadata is inconsistent")
+    availability = data.get("comparisonBenchmarkAvailability")
+    curves = performance.get("benchmarkCurves")
+    if (
+        performance.get("benchmarkOrder") != comparison_order
+        or not isinstance(availability, dict)
+        or set(availability) != set(comparison_order)
+        or any(not isinstance(value, bool) for value in availability.values())
+        or not isinstance(curves, dict)
+        or set(curves) != set(comparison_order)
+    ):
+        raise ValueError("dashboard comparison benchmark order or curve keys are inconsistent")
+    for symbol in comparison_order:
+        curve = curves[symbol]
+        if availability[symbol]:
+            if (
+                not isinstance(curve, list)
+                or len(curve) != len(dates)
+                or any(value is not None and not _finite_number(value) for value in curve)
+                or curve[-1] is None
+            ):
+                raise ValueError("dashboard available comparison benchmark curve is invalid")
+        elif curve is not None:
+            raise ValueError("dashboard unavailable comparison benchmark curve must be null")
+    primary = str(config.get("benchmark") or "").strip().upper()
+    if performance.get("benchmarkCurve") != curves.get(primary):
+        raise ValueError("dashboard legacy benchmarkCurve differs from benchmarkCurves")
+    if data.get("benchmarkAvailable") is not availability.get(primary, False):
+        raise ValueError("dashboard primary benchmark availability is inconsistent")
+
+    periods = performance.get("periods")
+    expected_periods = list(PERFORMANCE_PERIODS)
+    if not isinstance(periods, list) or [
+        period.get("key") if isinstance(period, dict) else None for period in periods
+    ] != [key for key, _, _ in expected_periods]:
+        raise ValueError("dashboard performance periods are incomplete or out of order")
+    for period, (key, label, fixed_count) in zip(periods, expected_periods, strict=True):
+        assert isinstance(period, dict)
+        return_count = period.get("returnObservationCount")
+        if (
+            period.get("label") != label
+            or not _nonnegative_integer(return_count)
+            or not isinstance(period.get("factors"), dict)
+            or set(period["factors"]) != expected_factors
+            or not isinstance(period.get("benchmarks"), dict)
+            or set(period["benchmarks"]) != set(comparison_order)
+        ):
+            raise ValueError("dashboard performance period contract is inconsistent")
+        count = int(return_count)
+        if fixed_count is not None and count != fixed_count:
+            raise ValueError("dashboard fixed performance period length is inconsistent")
+        if key == "FULL" and (
+            count != len(dates) - 1
+            or period.get("startDate") != dates[0]
+            or period.get("endDate") != dates[-1]
+        ):
+            raise ValueError("dashboard FULL performance period is inconsistent")
+        if period.get("unavailableReason") is None:
+            if not _required_text(period.get("startDate")) or period.get("endDate") != dates[-1]:
+                raise ValueError("dashboard performance period date boundary is invalid")
+        elif not _required_text(period.get("unavailableReason")):
+            raise ValueError("dashboard performance period unavailable reason is invalid")
+        for factor, metrics in period["factors"].items():
+            _validate_period_metric(
+                metrics,
+                expected_basis="net_of_costs_strategy",
+                expected_return_count=count,
+            )
+            if key == "FULL":
+                _validate_full_period_curve_parity(
+                    metrics,
+                    factor_curves[factor],
+                    label=f"factor {factor}",
+                    require_common_series=False,
+                )
+        for symbol, metrics in period["benchmarks"].items():
+            _validate_period_metric(
+                metrics,
+                expected_basis="adjusted_close_buy_and_hold",
+                expected_return_count=count,
+            )
+            if key == "FULL":
+                _validate_full_period_curve_parity(
+                    metrics,
+                    curves[symbol],
+                    label=f"benchmark {symbol}",
+                    require_common_series=True,
+                )
+
+
 def _validate_selection_decision(payload: dict[str, Any], selected: dict[str, Any]) -> None:
     config = payload["config"]
     decision = payload.get("selectionDecision")
@@ -1015,7 +1782,7 @@ def _validate_policy_diagnostics(
 
 def _validate_concentration(portfolio: dict[str, Any], label: str) -> None:
     concentration = portfolio.get("concentration")
-    if not isinstance(concentration, dict):
+    if not isinstance(concentration, dict) or set(concentration) != _CONCENTRATION_FIELDS:
         raise ValueError(f"{label} is missing concentration diagnostics")
     weights = [float(row["weight"]) for row in portfolio["weights"]]
     cash = float(portfolio["cashWeight"])
@@ -1034,6 +1801,273 @@ def _validate_concentration(portfolio: dict[str, Any], label: str) -> None:
     }
     for field, value in expected.items():
         _require_close(concentration.get(field), value, f"{label} concentration.{field}")
+
+
+def _expected_available_component_status(
+    *,
+    policy_id: str,
+    config: dict[str, Any],
+    reasons: list[str],
+) -> dict[str, str]:
+    if policy_id == "equal_weight":
+        expected = {
+            "score": "available",
+            "rank": "not_used",
+            "volatility": "not_used",
+        }
+    elif policy_id == "capped_linear_rank":
+        expected = {
+            "score": "available",
+            "rank": "available",
+            "volatility": "not_used",
+        }
+    elif policy_id == "capped_vol_adjusted_rank":
+        expected = {
+            "score": "available",
+            "rank": "available",
+            "volatility": "trailing_signal_date_only",
+            "volatilityWindow": str(config["volatility_lookback_days"]),
+        }
+    elif policy_id == "score_liquidity_rank":
+        expected = {
+            "score": "available",
+            "rank": "available",
+            "liquidity": "trailing_raw_dollar_volume",
+        }
+    else:  # pragma: no cover - canonical registry validation prevents this branch
+        raise ValueError(f"unsupported weighting policy: {policy_id}")
+    if "top_n_boundary_tie_resolved_by_trailing_dollar_volume" in reasons:
+        expected["selectionTieBreak"] = "trailing_dollar_volume_desc_then_symbol_asc"
+    return expected
+
+
+def _validate_factor_portfolio(
+    portfolio: object,
+    *,
+    factor: str,
+    policy_id: str,
+    as_of: str,
+    config: dict[str, Any],
+    latest_eligible_count: int,
+) -> dict[str, Any]:
+    label = f"factorPortfolios[{factor}]"
+    if not isinstance(portfolio, dict) or set(portfolio) != _FACTOR_PORTFOLIO_FIELDS:
+        raise ValueError(f"dashboard {label} has a non-canonical field set")
+    if (
+        portfolio.get("factor") != factor
+        or portfolio.get("weightingPolicyId") != policy_id
+        or portfolio.get("weightingPolicyVersion") != POLICY_REGISTRY[policy_id]["version"]
+        or portfolio.get("asOf") != as_of
+        or portfolio.get("signalDate") != as_of
+        or portfolio.get("targetType") != "current_research_target"
+        or portfolio.get("executionTiming") != "next_available_session_close_after_signal"
+        or portfolio.get("tieBreakPolicy") != TIE_BREAK_POLICY
+    ):
+        raise ValueError(f"dashboard {label} identity/policy/date contract is inconsistent")
+
+    status = portfolio.get("status")
+    eligible_count = portfolio.get("eligibleSecurityCount")
+    selected_count = portfolio.get("selectedSecurityCount")
+    weights = portfolio.get("weights")
+    cash = portfolio.get("cashWeight")
+    selection_fraction = portfolio.get("selectionFraction")
+    reasons = portfolio.get("reasons")
+    component_status = portfolio.get("componentStatus")
+    if (
+        status not in {"available", "unavailable"}
+        or not _nonnegative_integer(eligible_count)
+        or int(eligible_count) > latest_eligible_count
+        or not _nonnegative_integer(selected_count)
+        or not isinstance(weights, list)
+        or int(selected_count) != len(weights)
+        or int(selected_count) > int(eligible_count)
+        or int(selected_count) > int(config["top_n"])
+        or not _finite_number(cash)
+        or not 0.0 <= float(cash) <= 1.0
+        or not _finite_number(selection_fraction)
+        or not isinstance(reasons, list)
+        or not all(_required_text(reason) for reason in reasons)
+        or len(reasons) != len(set(reasons))
+        or not isinstance(component_status, dict)
+        or not all(
+            _required_text(key) and _required_text(value) for key, value in component_status.items()
+        )
+    ):
+        raise ValueError(f"dashboard {label} status/count fields are inconsistent")
+    _require_close(
+        selection_fraction,
+        len(weights) / int(eligible_count) if int(eligible_count) else 0.0,
+        f"dashboard {label}.selectionFraction",
+    )
+
+    if status == "unavailable":
+        if (
+            weights != []
+            or int(selected_count) != 0
+            or not _close(float(cash), 1.0)
+            or len(reasons) != 1
+            or reasons[0] not in _UNAVAILABLE_FACTOR_PORTFOLIO_COMPONENTS
+            or component_status != _UNAVAILABLE_FACTOR_PORTFOLIO_COMPONENTS[reasons[0]]
+        ):
+            raise ValueError(f"dashboard {label} unavailable allocation is not fail-closed")
+        reason = str(reasons[0])
+        if (
+            (reason == "no_complete_signal_inputs" and int(eligible_count) != 0)
+            or (
+                reason in {"no_finite_trailing_volatility", "no_finite_trailing_dollar_volume"}
+                and int(eligible_count) <= 0
+            )
+            or (
+                reason == "top_n_boundary_tie_has_no_finite_liquidity_tie_break"
+                and int(eligible_count) <= int(config["top_n"])
+            )
+        ):
+            raise ValueError(f"dashboard {label} unavailable reason/count is inconsistent")
+        _validate_concentration(portfolio, label)
+        return portfolio
+
+    if (
+        not weights
+        or int(eligible_count) <= 0
+        or any(reason not in _AVAILABLE_FACTOR_PORTFOLIO_REASONS for reason in reasons)
+        or component_status
+        != _expected_available_component_status(
+            policy_id=policy_id,
+            config=config,
+            reasons=reasons,
+        )
+    ):
+        raise ValueError(f"dashboard {label} available allocation contract is inconsistent")
+    if (len(weights) < int(config["top_n"])) != (
+        "fewer_complete_policy_inputs_than_top_n" in reasons
+    ) or (float(cash) > 1e-12) != ("max_weight_capacity_or_missing_policy_inputs" in reasons):
+        raise ValueError(f"dashboard {label} available reason flags are inconsistent")
+
+    symbols: list[str] = []
+    total = 0.0
+    for expected_rank, row in enumerate(weights, start=1):
+        if (
+            not isinstance(row, dict)
+            or set(row) != _FACTOR_PORTFOLIO_WEIGHT_FIELDS
+            or row.get("rank") != expected_rank
+            or not _required_text(row.get("symbol"))
+            or not _required_text(row.get("name"))
+            or row.get("eligibilityStatus") != "eligible"
+            or not _finite_number(row.get("factorScore"))
+            or not _finite_number(row.get("latestPrice"))
+            or float(row["latestPrice"]) <= 0.0
+            or not _finite_number(row.get("rawPolicyScore"))
+            or float(row["rawPolicyScore"]) <= 0.0
+            or not _finite_number(row.get("preCapWeight"))
+            or float(row["preCapWeight"]) <= 0.0
+            or not _finite_number(row.get("weight"))
+            or not 0.0 < float(row["weight"]) <= float(config["max_weight"]) + 1e-12
+            or not _finite_number(row.get("maxWeight"))
+            or not _close(float(row["maxWeight"]), float(config["max_weight"]))
+            or not isinstance(row.get("capBinding"), bool)
+            or not _finite_number(row.get("rankComponent"))
+            or (
+                row.get("trailingVolatility") is not None
+                and (
+                    not _finite_number(row.get("trailingVolatility"))
+                    or float(row["trailingVolatility"]) <= 0.0
+                )
+            )
+            or (
+                row.get("trailingDollarVolume") is not None
+                and (
+                    not _finite_number(row.get("trailingDollarVolume"))
+                    or float(row["trailingDollarVolume"]) <= 0.0
+                )
+            )
+        ):
+            raise ValueError(f"dashboard {label} contains an invalid holding")
+        if policy_id == "score_liquidity_rank":
+            if (
+                not _finite_number(row.get("scoreComponent"))
+                or not 0.0 < float(row["scoreComponent"]) <= 1.0
+                or not _finite_number(row.get("liquidityComponent"))
+                or not 0.0 < float(row["liquidityComponent"]) <= 1.0
+            ):
+                raise ValueError(f"dashboard {label} score/liquidity components are invalid")
+        elif row.get("scoreComponent") is not None or row.get("liquidityComponent") is not None:
+            raise ValueError(f"dashboard {label} unused score/liquidity components must be null")
+        symbols.append(str(row["symbol"]))
+        total += float(row["weight"])
+    if len(symbols) != len(set(symbols)):
+        raise ValueError(f"dashboard {label} contains duplicate symbols")
+    if not _close(total + float(cash), 1.0):
+        raise ValueError(f"dashboard {label} weights plus cash do not sum to 1")
+    _validate_policy_weight_construction(
+        portfolio,
+        policy_id=policy_id,
+        config=config,
+        label=label,
+    )
+    _validate_concentration(portfolio, label)
+    return portfolio
+
+
+def _validate_factor_portfolios(
+    payload: dict[str, Any],
+    *,
+    factors: set[str],
+    selected: dict[str, Any],
+    as_of: str,
+) -> None:
+    portfolios = payload.get("factorPortfolios")
+    selected_factor = str(selected["factor"])
+    selected_policy = str(selected["policy_id"])
+    if not isinstance(portfolios, dict) or set(portfolios) != factors:
+        raise ValueError("dashboard factorPortfolios do not cover the exact canonical 64 factors")
+    meta = payload.get("meta")
+    if not isinstance(meta, dict) or meta.get("portfolioCount") != len(factors):
+        raise ValueError("dashboard factorPortfolios metadata count is inconsistent")
+    selected_policy_rows = {
+        str(row["factor"]): row
+        for row in payload["factorPolicyRanking"]
+        if row.get("policy_id") == selected_policy
+    }
+    if set(selected_policy_rows) != factors:
+        raise ValueError("dashboard selected-policy static grid is incomplete")
+
+    config = payload["config"]
+    latest_eligible_count = int(payload["data"]["latestEligibleSecurityCount"])
+    for factor in sorted(factors):
+        portfolio = _validate_factor_portfolio(
+            portfolios[factor],
+            factor=factor,
+            policy_id=selected_policy,
+            as_of=as_of,
+            config=config,
+            latest_eligible_count=latest_eligible_count,
+        )
+        row = selected_policy_rows[factor]
+        available = portfolio["status"] == "available"
+        expected_reasons = [] if available else portfolio["reasons"]
+        if (
+            row.get("current_portfolio_available") is not available
+            or row.get("current_portfolio_input_reasons") != expected_reasons
+        ):
+            raise ValueError(f"dashboard factorPortfolios[{factor}] static-grid status differs")
+        numeric_parity = {
+            "current_holding_count": float(portfolio["selectedSecurityCount"]),
+            "current_cash_weight": float(portfolio["cashWeight"]),
+            "current_target_effective_names": float(portfolio["concentration"]["effectiveNames"]),
+            "current_target_hhi": float(portfolio["concentration"]["riskySleeveHhi"]),
+            "current_target_max_weight": float(portfolio["concentration"]["maxWeight"]),
+        }
+        for field, expected in numeric_parity.items():
+            _require_close(
+                row.get(field),
+                expected,
+                f"dashboard factorPortfolios[{factor}] static-grid {field}",
+            )
+
+    if payload.get("currentResearchTarget") != portfolios[selected_factor]:
+        raise ValueError(
+            "dashboard currentResearchTarget differs from the selected factor portfolio"
+        )
 
 
 def _validate_policy_weight_construction(
@@ -1273,6 +2307,490 @@ def _validate_backtest_held_portfolio(
     if not _close(total, 1.0):
         raise ValueError("dashboard backtestHeldPortfolio weights plus cash do not sum to 1")
     return held
+
+
+def _validate_selected_backtest_holding_history(
+    payload: dict[str, Any],
+    *,
+    held: dict[str, Any],
+    as_of: str,
+    selected_factor: str,
+    selected_policy: str,
+) -> None:
+    history = payload.get("selectedBacktestHoldingHistory")
+    expected_fields = {
+        "contractVersion",
+        "factor",
+        "weightingPolicyId",
+        "weightTiming",
+        "startDate",
+        "endDate",
+        "sessionCount",
+        "sessions",
+    }
+    if (
+        not isinstance(history, dict)
+        or set(history) != expected_fields
+        or history.get("contractVersion") != SELECTED_HOLDING_HISTORY_CONTRACT_VERSION
+        or history.get("factor") != selected_factor
+        or history.get("weightingPolicyId") != selected_policy
+        or history.get("weightTiming") != SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+        or history.get("sessionCount") != SELECTED_HOLDING_HISTORY_SESSION_COUNT
+    ):
+        raise ValueError("dashboard selectedBacktestHoldingHistory identity is inconsistent")
+    sessions = history.get("sessions")
+    if (
+        not isinstance(sessions, list)
+        or len(sessions) != SELECTED_HOLDING_HISTORY_SESSION_COUNT
+        or not sessions
+    ):
+        raise ValueError("dashboard selectedBacktestHoldingHistory sessions are incomplete")
+
+    expected_session_fields = {
+        "date",
+        "valuationAvailable",
+        "cashWeight",
+        "executionStatus",
+        "lastSignalDate",
+        "lastExecutionDate",
+        "weights",
+    }
+    expected_weight_fields = {"rank", "symbol", "name", "weight"}
+    allowed_statuses = {
+        "none",
+        "executed",
+        "executed_partial_unpriceable_targets",
+        "blocked_missing_held_quote",
+        "blocked_all_targets_unpriceable",
+    }
+    dates: list[str] = []
+    previous_execution_metadata: tuple[object, object] | None = None
+    for session_index, session in enumerate(sessions):
+        if not isinstance(session, dict) or set(session) != expected_session_fields:
+            raise ValueError("dashboard selected holding history session shape is invalid")
+        date = _required_text(session.get("date"))
+        signal_date = session.get("lastSignalDate")
+        execution_date = session.get("lastExecutionDate")
+        execution_status = session.get("executionStatus")
+        if (
+            not date
+            or date > as_of
+            or not isinstance(session.get("valuationAvailable"), bool)
+            or not _finite_number(session.get("cashWeight"))
+            or not 0.0 <= float(session["cashWeight"]) <= 1.0
+            or execution_status not in allowed_statuses
+            or not (
+                (signal_date is None and execution_date is None)
+                or (
+                    _required_text(signal_date)
+                    and _required_text(execution_date)
+                    and str(signal_date) <= str(execution_date) <= date
+                )
+            )
+        ):
+            raise ValueError("dashboard selected holding history session metadata is invalid")
+        metadata = (signal_date, execution_date)
+        if execution_status in {"executed", "executed_partial_unpriceable_targets"}:
+            if execution_date != date:
+                raise ValueError(
+                    "dashboard selected holding history execution date is inconsistent"
+                )
+        elif session_index > 0 and metadata != previous_execution_metadata:
+            raise ValueError(
+                "dashboard selected holding history execution metadata changed without execution"
+            )
+        previous_execution_metadata = metadata
+
+        weights = session.get("weights")
+        if not isinstance(weights, list) or not weights:
+            raise ValueError("dashboard selected holding history weights are missing")
+        symbols: list[str] = []
+        total = float(session["cashWeight"])
+        ordering: list[tuple[float, str]] = []
+        for expected_rank, row in enumerate(weights, start=1):
+            if (
+                not isinstance(row, dict)
+                or set(row) != expected_weight_fields
+                or row.get("rank") != expected_rank
+                or not _required_text(row.get("symbol"))
+                or not _required_text(row.get("name"))
+                or not _finite_number(row.get("weight"))
+                or not 0.0 < float(row["weight"]) <= 1.0
+            ):
+                raise ValueError("dashboard selected holding history contains an invalid weight")
+            symbol = str(row["symbol"])
+            symbols.append(symbol)
+            total += float(row["weight"])
+            ordering.append((-float(row["weight"]), symbol))
+        if (
+            len(symbols) != len(set(symbols))
+            or ordering != sorted(ordering)
+            or not _close(total, 1.0)
+        ):
+            raise ValueError("dashboard selected holding history allocation is inconsistent")
+        dates.append(date)
+
+    if (
+        len(dates) != len(set(dates))
+        or dates != sorted(dates)
+        or history.get("startDate") != dates[0]
+        or history.get("endDate") != dates[-1]
+        or dates[-1] != as_of
+    ):
+        raise ValueError("dashboard selected holding history date range is inconsistent")
+    performance = payload.get("performance")
+    performance_dates = performance.get("dates") if isinstance(performance, dict) else None
+    if (
+        not isinstance(performance_dates, list)
+        or len(performance_dates) < SELECTED_HOLDING_HISTORY_SESSION_COUNT
+        or dates != performance_dates[-SELECTED_HOLDING_HISTORY_SESSION_COUNT:]
+    ):
+        raise ValueError(
+            "dashboard selected holding history dates differ from canonical performance dates"
+        )
+
+    final_session = sessions[-1]
+    expected_final_weights = [
+        {
+            "rank": row["rank"],
+            "symbol": row["symbol"],
+            "name": row["name"],
+            "weight": row["weight"],
+        }
+        for row in held["weights"]
+    ]
+    if (
+        final_session["weights"] != expected_final_weights
+        or final_session["cashWeight"] != held["cashWeight"]
+        or final_session["valuationAvailable"] is not held["valuationAvailable"]
+        or final_session["lastSignalDate"] != held["lastSignalDate"]
+        or final_session["lastExecutionDate"] != held["lastExecutionDate"]
+    ):
+        raise ValueError(
+            "dashboard selected holding history final session differs from backtestHeldPortfolio"
+        )
+
+
+def _validate_factor_holding_history_sidecar_data(
+    payload: dict[str, Any],
+    data: object,
+    *,
+    selected_history: dict[str, Any],
+) -> dict[str, Any]:
+    expected_fields = {
+        "contract",
+        "contractVersion",
+        "resultKey",
+        "selectedWeightingPolicy",
+        "weightTiming",
+        "startDate",
+        "endDate",
+        "sessionCount",
+        "dates",
+        "factorCount",
+        "independentFactorCount",
+        "diagnosticFactorCount",
+        "factorDefinitionSha256",
+        "policyDefinitionSha256",
+        "symbols",
+        "factors",
+    }
+    definitions = payload.get("factorDefinitions")
+    factor_ids = (
+        {
+            str(row["factor"])
+            for row in definitions
+            if isinstance(row, dict) and _required_text(row.get("factor"))
+        }
+        if isinstance(definitions, list)
+        else set()
+    )
+    independent = (
+        {
+            str(row["factor"])
+            for row in definitions
+            if isinstance(row, dict)
+            and row.get("selection_eligible") is True
+            and row.get("compatibility_alias_of") is None
+        }
+        if isinstance(definitions, list)
+        else set()
+    )
+    diagnostic = factor_ids.difference(independent)
+    performance_dates = payload.get("performance", {}).get("dates", [])
+    dates = performance_dates[-SELECTED_HOLDING_HISTORY_SESSION_COUNT:]
+    if (
+        not isinstance(data, dict)
+        or set(data) != expected_fields
+        or data.get("contract") != FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
+        or data.get("contractVersion") != FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION
+        or data.get("resultKey") != payload.get("resultKey")
+        or data.get("selectedWeightingPolicy") != payload.get("selectedWeightingPolicy")
+        or data.get("weightTiming") != SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+        or data.get("startDate") != dates[0]
+        or data.get("endDate") != dates[-1]
+        or data.get("sessionCount") != SELECTED_HOLDING_HISTORY_SESSION_COUNT
+        or data.get("dates") != dates
+        or data.get("factorCount") != len(factor_ids)
+        or data.get("independentFactorCount") != len(independent)
+        or data.get("diagnosticFactorCount") != len(diagnostic)
+        or data.get("factorDefinitionSha256")
+        != payload.get("meta", {}).get("factorDefinitionSha256")
+        or data.get("policyDefinitionSha256")
+        != payload.get("meta", {}).get("policyDefinitionSha256")
+    ):
+        raise ValueError("dashboard factor holding history sidecar provenance is inconsistent")
+
+    raw_symbols = data.get("symbols")
+    if not isinstance(raw_symbols, list):
+        raise ValueError("dashboard factor holding history symbol dictionary is invalid")
+    symbols: list[str] = []
+    names: list[str] = []
+    for row in raw_symbols:
+        if (
+            not isinstance(row, list)
+            or len(row) != 2
+            or not _required_text(row[0])
+            or not _required_text(row[1])
+        ):
+            raise ValueError("dashboard factor holding history symbol dictionary is invalid")
+        symbols.append(str(row[0]))
+        names.append(str(row[1]))
+    if len(symbols) != len(set(symbols)) or symbols != sorted(symbols):
+        raise ValueError("dashboard factor holding history symbol dictionary is invalid")
+
+    factors = data.get("factors")
+    if not isinstance(factors, dict) or set(factors) != factor_ids:
+        raise ValueError("dashboard factor holding history factor coverage is incomplete")
+    allowed_statuses = {
+        "none",
+        "executed",
+        "executed_partial_unpriceable_targets",
+        "blocked_missing_held_quote",
+        "blocked_all_targets_unpriceable",
+    }
+    selected_factor = str(payload["selectedFactor"])
+    expanded_selected_sessions: list[dict[str, Any]] = []
+    top_n = int(payload["config"]["top_n"])
+    for factor in sorted(factor_ids):
+        factor_history = factors[factor]
+        if (
+            not isinstance(factor_history, dict)
+            or set(factor_history) != {"factor", "weightingPolicyId", "resultKey", "sessions"}
+            or factor_history.get("factor") != factor
+            or factor_history.get("weightingPolicyId") != payload.get("selectedWeightingPolicy")
+            or factor_history.get("resultKey") != payload.get("resultKey")
+        ):
+            raise ValueError("dashboard factor holding history identity is inconsistent")
+        sessions = factor_history.get("sessions")
+        if not isinstance(sessions, list) or len(sessions) != len(dates):
+            raise ValueError("dashboard factor holding history sessions are incomplete")
+        previous_execution_metadata: tuple[object, object] | None = None
+        for date, session in zip(dates, sessions, strict=True):
+            if not isinstance(session, dict) or set(session) != {
+                "valuationAvailable",
+                "cashWeight",
+                "executionStatus",
+                "lastSignalDate",
+                "lastExecutionDate",
+                "weights",
+            }:
+                raise ValueError("dashboard factor holding history session shape is invalid")
+            signal_date = session.get("lastSignalDate")
+            execution_date = session.get("lastExecutionDate")
+            execution_status = session.get("executionStatus")
+            if (
+                not isinstance(session.get("valuationAvailable"), bool)
+                or not _finite_number(session.get("cashWeight"))
+                or not 0.0 <= float(session["cashWeight"]) <= 1.0
+                or execution_status not in allowed_statuses
+                or not (
+                    (signal_date is None and execution_date is None)
+                    or (
+                        _required_text(signal_date)
+                        and _required_text(execution_date)
+                        and str(signal_date) <= str(execution_date) <= str(date)
+                    )
+                )
+            ):
+                raise ValueError("dashboard factor holding history session metadata is invalid")
+            metadata = (signal_date, execution_date)
+            if execution_status in {"executed", "executed_partial_unpriceable_targets"}:
+                if execution_date != date:
+                    raise ValueError(
+                        "dashboard factor holding history execution date is inconsistent"
+                    )
+            elif (
+                previous_execution_metadata is not None and metadata != previous_execution_metadata
+            ):
+                raise ValueError(
+                    "dashboard factor holding history execution metadata changed without execution"
+                )
+            previous_execution_metadata = metadata
+
+            raw_weights = session.get("weights")
+            if not isinstance(raw_weights, list) or len(raw_weights) > top_n:
+                raise ValueError("dashboard factor holding history weights are invalid")
+            observed_indexes: set[int] = set()
+            ordering: list[tuple[float, str]] = []
+            expanded_weights: list[dict[str, Any]] = []
+            total = float(session["cashWeight"])
+            for rank, pair in enumerate(raw_weights, start=1):
+                if (
+                    not isinstance(pair, list)
+                    or len(pair) != 2
+                    or not isinstance(pair[0], int)
+                    or isinstance(pair[0], bool)
+                    or pair[0] < 0
+                    or pair[0] >= len(symbols)
+                    or pair[0] in observed_indexes
+                    or not _finite_number(pair[1])
+                    or not 0.0 < float(pair[1]) <= 1.0
+                ):
+                    raise ValueError("dashboard factor holding history contains an invalid weight")
+                symbol_index = pair[0]
+                weight = float(pair[1])
+                observed_indexes.add(symbol_index)
+                total += weight
+                ordering.append((-weight, symbols[symbol_index]))
+                expanded_weights.append(
+                    {
+                        "rank": rank,
+                        "symbol": symbols[symbol_index],
+                        "name": names[symbol_index],
+                        "weight": pair[1],
+                    }
+                )
+            if ordering != sorted(ordering) or not _close(total, 1.0):
+                raise ValueError("dashboard factor holding history allocation is inconsistent")
+            if factor == selected_factor:
+                expanded_selected_sessions.append(
+                    {
+                        "date": date,
+                        "valuationAvailable": session["valuationAvailable"],
+                        "cashWeight": session["cashWeight"],
+                        "executionStatus": execution_status,
+                        "lastSignalDate": signal_date,
+                        "lastExecutionDate": execution_date,
+                        "weights": expanded_weights,
+                    }
+                )
+
+    if expanded_selected_sessions != selected_history.get("sessions"):
+        raise ValueError(
+            "dashboard factor holding history selected factor differs from canonical history"
+        )
+    return data
+
+
+def _validate_factor_holding_history_sidecar(
+    payload: dict[str, Any],
+    *,
+    selected_history: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = payload.get("factorHoldingHistorySidecar")
+    base_fields = {
+        "contract",
+        "contractVersion",
+        "storage",
+        "path",
+        "sha256",
+        "bytes",
+        "resultKey",
+        "selectedWeightingPolicy",
+        "weightTiming",
+        "startDate",
+        "endDate",
+        "sessionCount",
+        "factorCount",
+        "independentFactorCount",
+        "diagnosticFactorCount",
+    }
+    has_data = isinstance(manifest, dict) and "data" in manifest
+    expected_fields = base_fields | ({"data"} if has_data else set())
+    expected_path = (
+        f"data/{FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY}/{payload.get('resultKey')}.json"
+    )
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != expected_fields
+        or manifest.get("contract") != FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
+        or manifest.get("contractVersion") != FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION
+        or manifest.get("storage") != ("embedded" if has_data else "external")
+        or manifest.get("path") != expected_path
+        or not _is_sha256(manifest.get("sha256"))
+        or not isinstance(manifest.get("bytes"), int)
+        or isinstance(manifest.get("bytes"), bool)
+        or not 1 <= int(manifest["bytes"]) <= MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES
+        or manifest.get("resultKey") != payload.get("resultKey")
+        or manifest.get("selectedWeightingPolicy") != payload.get("selectedWeightingPolicy")
+        or manifest.get("weightTiming") != SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+        or manifest.get("startDate") != selected_history.get("startDate")
+        or manifest.get("endDate") != selected_history.get("endDate")
+        or manifest.get("sessionCount") != SELECTED_HOLDING_HISTORY_SESSION_COUNT
+        or manifest.get("factorCount") != payload.get("meta", {}).get("factorCount")
+        or manifest.get("independentFactorCount")
+        != payload.get("meta", {}).get("independentFactorCount")
+        or manifest.get("diagnosticFactorCount") != payload.get("meta", {}).get("aliasFactorCount")
+    ):
+        raise ValueError("dashboard factor holding history sidecar manifest is inconsistent")
+    if has_data:
+        data = _validate_factor_holding_history_sidecar_data(
+            payload,
+            manifest["data"],
+            selected_history=selected_history,
+        )
+        encoded = canonical_json_bytes(data)
+        if (
+            len(encoded) != manifest["bytes"]
+            or hashlib.sha256(encoded).hexdigest() != manifest["sha256"]
+        ):
+            raise ValueError("dashboard factor holding history sidecar hash/size is inconsistent")
+    return manifest
+
+
+def validate_factor_holding_history_sidecar_bytes(
+    payload: dict[str, Any],
+    encoded: bytes,
+) -> dict[str, Any]:
+    manifest = payload.get("factorHoldingHistorySidecar")
+    if len(encoded) > MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:
+        raise ValueError(
+            "dashboard factor holding history external bytes exceed the "
+            f"{MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:,}-byte limit"
+        )
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("storage") != "external"
+        or len(encoded) != manifest.get("bytes")
+        or hashlib.sha256(encoded).hexdigest() != manifest.get("sha256")
+    ):
+        raise ValueError("dashboard factor holding history external bytes differ from manifest")
+    try:
+        data = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("dashboard factor holding history sidecar is not valid JSON") from error
+    selected_history = payload.get("selectedBacktestHoldingHistory")
+    if not isinstance(selected_history, dict):
+        raise ValueError("dashboard canonical selected holding history is unavailable")
+    return _validate_factor_holding_history_sidecar_data(
+        payload,
+        data,
+        selected_history=selected_history,
+    )
+
+
+def externalize_factor_holding_history_sidecar(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], bytes | None]:
+    public_payload = deepcopy(payload)
+    manifest = public_payload.get("factorHoldingHistorySidecar")
+    if not isinstance(manifest, dict) or "data" not in manifest:
+        return public_payload, None
+    encoded = canonical_json_bytes(manifest.pop("data"))
+    manifest["storage"] = "external"
+    validate_factor_holding_history_sidecar_bytes(public_payload, encoded)
+    return public_payload, encoded
 
 
 def _validate_current_transition(
@@ -1570,8 +3088,12 @@ def _load_payload(source: AnalysisResult | dict[str, Any] | Path) -> dict[str, A
         "selectionMethod",
         "currentResearchTarget",
         "backtestHeldPortfolio",
+        "selectedBacktestHoldingHistory",
+        "factorHoldingHistorySidecar",
         "currentTransition",
+        "factorPortfolios",
         "factorDefinitions",
+        "factorDiagnostics",
         "performance",
         "meta",
     }
@@ -1587,11 +3109,22 @@ def _load_payload(source: AnalysisResult | dict[str, Any] | Path) -> dict[str, A
     _validate_identity(payload)
     _validate_registry(payload)
     _validate_research_inputs(payload)
+    _validate_performance(payload)
     selected, independent_rows, independent = _validate_grid_and_selection(payload)
+    validated_independent, aliases = _factor_sets(payload)
+    if validated_independent != independent:
+        raise ValueError("dashboard factorDiagnostics independent factor scope is inconsistent")
+    _validate_factor_diagnostics(payload, independent=independent, aliases=aliases)
     _validate_selection_decision(payload, selected)
     _validate_policy_diagnostics(payload, independent_rows, independent)
     _validate_portfolio_policy(payload, selected)
     as_of = str(payload["data"]["asOf"])
+    _validate_factor_portfolios(
+        payload,
+        factors=validated_independent.union(aliases),
+        selected=selected,
+        as_of=as_of,
+    )
     target = _validate_current_target(payload, as_of=as_of, selected=selected)
     selected_current_fields = {
         "current_holding_count": target["selectedSecurityCount"],
@@ -1607,6 +3140,17 @@ def _load_payload(source: AnalysisResult | dict[str, Any] | Path) -> dict[str, A
         as_of=as_of,
         selected_factor=str(selected["factor"]),
         selected_policy=str(selected["policy_id"]),
+    )
+    _validate_selected_backtest_holding_history(
+        payload,
+        held=held,
+        as_of=as_of,
+        selected_factor=str(selected["factor"]),
+        selected_policy=str(selected["policy_id"]),
+    )
+    _validate_factor_holding_history_sidecar(
+        payload,
+        selected_history=payload["selectedBacktestHoldingHistory"],
     )
     _validate_current_transition(payload, held=held, target=target, as_of=as_of)
     _validate_contribution_diagnostics(payload, selected)
@@ -1696,6 +3240,15 @@ def write_dashboard_site(
     title: str = DEFAULT_SITE_TITLE,
 ) -> dict[str, str]:
     payload = _load_payload(source)
+    payload, sidecar_bytes = externalize_factor_holding_history_sidecar(payload)
+    if sidecar_bytes is None:
+        raise ValueError("dashboard site source has no embedded factor holding history sidecar")
+    if len(sidecar_bytes) > MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:
+        raise ValueError(
+            "dashboard factor holding history sidecar is "
+            f"{len(sidecar_bytes):,} bytes; limit is "
+            f"{MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES:,}"
+        )
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_DASHBOARD_BYTES:
         raise ValueError(
@@ -1719,10 +3272,13 @@ def write_dashboard_site(
     js_path = assets_dir / "dashboard.js"
     data_path = data_dir / "dashboard.json"
     summary_path = data_dir / "summary.json"
+    sidecar_path = site_dir / str(payload["factorHoldingHistorySidecar"]["path"])
     index_path.write_text(index, encoding="utf-8")
     shutil.copyfile(WEB_ROOT / "styles.css", css_path)
     shutil.copyfile(WEB_ROOT / "dashboard.js", js_path)
     data_path.write_bytes(encoded)
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_bytes(sidecar_bytes)
     summary_path.write_text(
         json.dumps(_summary(payload), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1732,5 +3288,6 @@ def write_dashboard_site(
         "css": str(css_path),
         "js": str(js_path),
         "data": str(data_path),
+        "factorHoldingHistory": str(sidecar_path),
         "summary": str(summary_path),
     }

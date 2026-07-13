@@ -1,919 +1,876 @@
 import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const source = readFileSync("momentum_factor_lab/web/dashboard.js", "utf8");
 const html = readFileSync("momentum_factor_lab/web/index.html", "utf8");
-const publishedManifest = JSON.parse(readFileSync("docs/data/grid/v1/manifest.json", "utf8"));
-const publishedDetail = JSON.parse(readFileSync("docs/data/dashboard.json", "utf8"));
-let mockResponse;
-let lastFetch;
+const previewPayloadPath = process.env.MFL_TEST_PAYLOAD || (
+  existsSync("outputs/final-evidence-preview-20260713/site/data/dashboard.json")
+    ? "outputs/final-evidence-preview-20260713/site/data/dashboard.json"
+    : existsSync("outputs/daily-dashboard-reality-preview/site/data/dashboard.json")
+      ? "outputs/daily-dashboard-reality-preview/site/data/dashboard.json"
+      : "outputs/daily-dashboard/default-detail.json"
+);
+const publishedPayloadPath = "docs/data/dashboard.json";
+const payloadPath = existsSync(previewPayloadPath) ? previewPayloadPath : publishedPayloadPath;
+const payload = JSON.parse(readFileSync(payloadPath, "utf8"));
+
 const context = vm.createContext({
   console,
-  crypto: webcrypto,
-  fetch: async (url, options) => {
-    lastFetch = { url, options };
-    return mockResponse;
-  },
   setTimeout,
   TextDecoder,
   TextEncoder,
   URL,
   URLSearchParams,
+  crypto: webcrypto,
 });
 vm.runInContext(source, context, { filename: "momentum_factor_lab/web/dashboard.js" });
 const api = context.__MFL_WEB_TESTS__;
-assert(api, "web contract test API must be exposed without a DOM");
+assert(api, "web helper API must be exported without requiring a DOM");
+const clonePayload = (value) => JSON.parse(JSON.stringify(value));
 
-for (const entry of publishedManifest.entries) {
-  const detail = JSON.parse(readFileSync(`docs/data/grid/v1/${entry.detail.path}`, "utf8"));
-  const summary = JSON.parse(readFileSync(`docs/data/grid/v1/${entry.summary.path}`, "utf8"));
+assert.equal(payload.schemaVersion, 4);
+assert.equal(payload.data.mode, "live_market");
+assert.equal(payload.data.synthetic, false);
+assert(payload.data.analyzedSecurityCount >= 2700);
+assert.equal(payload.factorPolicyRanking.length, 256);
+assert.equal(payload.gridAccounting.independentFactorCount, 61);
+assert.equal(payload.gridAccounting.diagnosticAliasFactorCount, 3);
+const gridAccounting = api.canonicalGridAccounting(payload);
+assert.equal(gridAccounting.expectedIndependentPairCount, 244);
+assert.equal(gridAccounting.evaluatedIndependentPairCount, 244);
+const independentFactors = new Set(
+  payload.factorDefinitions
+    .filter((row) => !row.compatibility_alias_of)
+    .map((row) => row.factor),
+);
+const independentPairRows = payload.factorPolicyRanking.filter((row) => (
+  independentFactors.has(row.factor)
+));
+const derivedAvailableIndependentPairCount = independentPairRows.filter((row) => (
+  row.comparison_status === "available"
+)).length;
+const derivedExcludedIndependentPairCount = independentPairRows.length
+  - derivedAvailableIndependentPairCount;
+const derivedCommonComparableFactorCount = [...independentFactors].filter((factor) => (
+  independentPairRows.filter((row) => (
+    row.factor === factor && row.comparison_status === "available"
+  )).length === gridAccounting.policyCount
+)).length;
+assert.equal(
+  gridAccounting.availableIndependentPairCount,
+  derivedAvailableIndependentPairCount,
+  "available pair accounting must be derived from this preset's comparison rows",
+);
+assert.equal(
+  gridAccounting.excludedIndependentPairCount,
+  derivedExcludedIndependentPairCount,
+  "excluded pair accounting must be derived from this preset's comparison rows",
+);
+assert.equal(
+  gridAccounting.commonComparableFactorCount,
+  derivedCommonComparableFactorCount,
+  "common-comparable factor count must work for every top-N/date preset",
+);
+assert.equal(gridAccounting.diagnosticAliasPairCount, 12);
+assert.equal(gridAccounting.totalOutputRowCount, 256);
+assert.equal(
+  gridAccounting.availableIndependentPairCount + gridAccounting.excludedIndependentPairCount,
+  gridAccounting.expectedIndependentPairCount,
+  "available and excluded independent pairs must account for the complete 244-pair grid",
+);
+assert.equal(
+  gridAccounting.commonComparableFactorCount * gridAccounting.policyCount,
+  gridAccounting.availableIndependentPairCount,
+  "only common-comparable factors across four policies may receive a relative rank",
+);
+
+const syntheticAccounting = api.canonicalGridAccounting({
+  gridAccounting: {
+    independentFactorCount: 7,
+    policyCount: 3,
+    expectedIndependentPairCount: 21,
+    evaluatedIndependentPairCount: 20,
+    availableIndependentPairCount: 9,
+    excludedIndependentPairCount: 11,
+    commonComparableFactorCount: 3,
+    diagnosticAliasFactorCount: 2,
+    diagnosticAliasPairCount: 6,
+    missingIndependentPairCount: 1,
+  },
+  factorPolicyRanking: Array.from({ length: 26 }, (_, index) => ({ index })),
+});
+assert.equal(syntheticAccounting.expectedIndependentPairCount, 21);
+assert.equal(syntheticAccounting.availableIndependentPairCount, 9);
+assert.equal(syntheticAccounting.excludedIndependentPairCount, 11);
+assert.equal(syntheticAccounting.commonComparableFactorCount, 3);
+assert.equal(syntheticAccounting.diagnosticAliasPairCount, 6);
+assert.equal(syntheticAccounting.totalOutputRowCount, 26, "grid copy must derive from payload values, not hard-coded 256/244 counts");
+
+const terminalNavExcluded = payload.factorPolicyRanking.find((row) => (
+  row.selection_status === "data_excluded"
+  && row.exclusion_reason_codes?.includes("terminal_nav_unavailable")
+));
+assert(terminalNavExcluded, "actual grid must retain terminal-NAV exclusions for diagnostics");
+const terminalStatusText = api.canonicalRankingStatusText(terminalNavExcluded);
+assert.match(terminalStatusText, /데이터 조건 미충족/);
+assert.match(terminalStatusText, /최종 NAV 평가 불가\(선정 제외·진단용\)/);
+assert.doesNotMatch(terminalStatusText, /data_excluded|terminal_nav_unavailable/);
+const aliasExcluded = payload.factorPolicyRanking.find((row) => row.exclusion_reason_codes?.includes("duplicate_alias"));
+assert(aliasExcluded, "actual grid must retain compatibility aliases as separate diagnostics");
+const aliasStatusText = api.canonicalRankingStatusText(aliasExcluded);
+assert.match(aliasStatusText, /독립 팩터와 중복된 호환 alias/);
+assert.doesNotMatch(aliasStatusText, /data_excluded|duplicate_alias/);
+
+const benchmarkCurves = payload.performance.benchmarkCurves;
+assert(benchmarkCurves && typeof benchmarkCurves === "object", "Python payload must expose benchmarkCurves");
+assert.deepEqual(
+  Array.from(payload.performance.benchmarkOrder),
+  ["SPY", "^IXIC", "QQQ"],
+  "benchmarkOrder must preserve SPY, the original Nasdaq comparator, then QQQ",
+);
+assert.deepEqual(
+  Object.keys(benchmarkCurves).sort(),
+  ["QQQ", "SPY", "^IXIC"],
+  "canonical JSON key sorting must not change the benchmark set",
+);
+for (const symbol of ["SPY", "^IXIC", "QQQ"]) {
   assert.equal(
-    await api.validateResult(entry, detail, summary),
-    detail.factorPolicyRanking.find((row) => row.selected),
-    `published preset ${entry.presetId} must pass the complete browser boundary`,
+    benchmarkCurves[symbol].length,
+    payload.performance.dates.length,
+    `${symbol} must share the selected-policy comparison dates`,
+  );
+  assert(!payload.data.analyzedSymbols.includes(symbol), `${symbol} must never enter holdings candidates`);
+}
+
+assert.deepEqual(
+  payload.performance.periods.map((period) => period.key),
+  ["1W", "1M", "3M", "6M", "1Y", "YTD", "FULL"],
+);
+for (const period of payload.performance.periods) {
+  assert.equal(period.endDate, payload.data.asOf);
+  assert(period.factors[payload.selectedFactor], `${period.key} must contain the selected factor`);
+  for (const symbol of ["SPY", "^IXIC", "QQQ"]) {
+    assert(period.benchmarks[symbol], `${period.key} must contain ${symbol}`);
+  }
+}
+const oneMonth = payload.performance.periods.find((period) => period.key === "1M");
+assert.equal(oneMonth.returnObservationCount, 21);
+assert.equal(api.validatePerformance(payload), payload.performance);
+assert.equal(api.validateBacktestHeldPortfolio(payload), payload.backtestHeldPortfolio);
+assert.equal(
+  api.validateSelectedBacktestHoldingHistory(payload, payload.backtestHeldPortfolio),
+  payload.selectedBacktestHoldingHistory,
+);
+assert.equal(
+  api.validateFactorHoldingHistorySidecarManifest(payload),
+  payload.factorHoldingHistorySidecar,
+);
+
+const mismatchedBenchmarkEndpoint = clonePayload(payload);
+mismatchedBenchmarkEndpoint.performance.benchmarkCurves.QQQ[
+  mismatchedBenchmarkEndpoint.performance.benchmarkCurves.QQQ.length - 1
+] *= 0.5;
+assert.throws(
+  () => api.validatePerformance(mismatchedBenchmarkEndpoint),
+  /QQQ FULL 누적 수익률이 그래프 endpoint와 다릅니다/,
+);
+const malformedCurve = clonePayload(payload);
+malformedCurve.performance.factorCurves[payload.selectedFactor][0] = "bad";
+assert.throws(
+  () => api.validatePerformance(malformedCurve),
+  /길이\/유한값\/null gap/,
+);
+const factorCurveWithExplicitGap = clonePayload(payload);
+factorCurveWithExplicitGap.performance.factorCurves[payload.selectedFactor][1] = null;
+assert.equal(api.validatePerformance(factorCurveWithExplicitGap), factorCurveWithExplicitGap.performance);
+
+for (const field of [
+  "backtestHeldPortfolio",
+  "selectedBacktestHoldingHistory",
+  "factorHoldingHistorySidecar",
+]) {
+  const missing = clonePayload(payload);
+  delete missing[field];
+  assert.throws(
+    () => {
+      if (field === "backtestHeldPortfolio") api.validateBacktestHeldPortfolio(missing);
+      else if (field === "selectedBacktestHoldingHistory") {
+        api.validateSelectedBacktestHoldingHistory(missing, missing.backtestHeldPortfolio);
+      } else api.validateFactorHoldingHistorySidecarManifest(missing);
+    },
+    /backtestHeldPortfolio|selectedBacktestHoldingHistory|sidecar manifest/,
+  );
+}
+for (const key of [
+  "cumulativeReturn",
+  "sharpe",
+  "annualizedVolatility",
+  "maxDrawdown",
+  "sortino",
+  "calmar",
+  "cvar5",
+  "winRate",
+]) {
+  assert(Object.hasOwn(oneMonth.factors[payload.selectedFactor], key), `missing Python period metric: ${key}`);
+}
+
+const adapted = api.adaptSchemaV4Payload(payload);
+assert.equal(adapted.schema_version, 1);
+assert.equal(adapted.runs.length, 1);
+const run = adapted.runs[0];
+assert.equal(Object.keys(api.validateFactorPortfolios(payload)).length, 64);
+for (const mutate of [
+  (copy) => { delete copy.factorPortfolios.mom_12m; },
+  (copy) => { copy.factorPortfolios.mom_12m.weightingPolicyId = "equal_weight"; },
+  (copy) => { copy.factorPortfolios.mom_12m.weights[0].weight += 0.01; },
+]) {
+  const copy = JSON.parse(JSON.stringify(payload));
+  mutate(copy);
+  assert.throws(
+    () => api.validateFactorPortfolios(copy),
+    /factorPortfolios|비중\/현금|canonical/,
+    "the browser boundary must fail closed on a mutated factor portfolio",
+  );
+}
+const noncanonicalPortfolioFactor = Object.keys(payload.factorPortfolios).find((factor) => (
+  factor !== payload.selectedFactor
+  && payload.factorPortfolios[factor]?.status === "available"
+  && payload.factorPortfolios[factor]?.weights?.length > 0
+));
+assert(noncanonicalPortfolioFactor, "fixture must expose an available noncanonical factor portfolio");
+const mutatedNoncanonicalConcentration = clonePayload(payload);
+mutatedNoncanonicalConcentration.factorPortfolios[
+  noncanonicalPortfolioFactor
+].concentration.effectiveNames += 1;
+assert.throws(
+  () => api.validateFactorPortfolios(mutatedNoncanonicalConcentration),
+  /factorPortfolios|concentration|집중도/,
+  "every factorPortfolio concentration must be recomputed, not trusted only for the canonical target",
+);
+
+assert.equal(
+  api.validateFactorDiagnostics(payload),
+  payload.factorDiagnostics,
+  "the complete untampered factorDiagnostics contract must pass the browser boundary",
+);
+const firstAvailableRankIc = payload.factorDiagnostics.rankIc.rows.find((row) => row.available === true);
+const firstAvailableRedundancy = payload.factorDiagnostics.redundancy.rows.find(
+  (row) => row.available === true,
+);
+const diagnosticAlias = payload.factorDiagnostics.scope.aliases[0]?.factor;
+assert(firstAvailableRankIc && firstAvailableRedundancy && diagnosticAlias);
+
+const diagnosticMutations = [
+  {
+    label: "Rank-IC mean outside [-1, 1]",
+    mutate(copy) {
+      copy.factorDiagnostics.rankIc.rows.find((row) => row.available === true).mean = 1.01;
+    },
+  },
+  {
+    label: "compatibility alias injected into the independent Rank-IC ranking",
+    mutate(copy) {
+      copy.factorDiagnostics.rankIc.rows[0].factor = diagnosticAlias;
+    },
+  },
+  {
+    label: "redundancy absolute correlation inconsistent with signed correlation",
+    mutate(copy) {
+      const row = copy.factorDiagnostics.redundancy.rows.find((item) => item.available === true);
+      row.absCorr = Math.min(1, Math.abs(row.signedCorr) + 0.05);
+      if (Math.abs(row.absCorr - Math.abs(row.signedCorr)) < 1e-12) row.absCorr -= 0.1;
+    },
+  },
+  {
+    label: "category aggregate no longer equals its factor rows",
+    mutate(copy) {
+      const row = copy.factorDiagnostics.categorySummary.find((item) => (
+        Number.isFinite(Number(item.averageMeanRankIc))
+      ));
+      assert(row, "fixture must expose a finite category Rank-IC aggregate");
+      row.averageMeanRankIc += 0.01;
+    },
+  },
+  {
+    label: "top redundancy pair ordering changed while ranks were relabeled",
+    mutate(copy) {
+      const pairs = copy.factorDiagnostics.redundancy.topPairs;
+      assert(pairs.length >= 2, "fixture must expose at least two top redundancy pairs");
+      [pairs[0], pairs[1]] = [pairs[1], pairs[0]];
+      pairs[0].rank = 1;
+      pairs[1].rank = 2;
+    },
+  },
+];
+for (const { label, mutate } of diagnosticMutations) {
+  const copy = clonePayload(payload);
+  mutate(copy);
+  assert.throws(
+    () => api.validateFactorDiagnostics(copy),
+    /factorDiagnostics|Rank-IC|redundancy|category|pair/i,
+    `browser factorDiagnostics validation must reject: ${label}`,
+  );
+}
+const factorNames = run.factor_options.map((row) => row.factor);
+const latestOneYear = run.factor_period_matrix.find(
+  (row) => row.date === payload.data.asOf && row.window === "1Y",
+);
+assert.equal(
+  api.defaultFactorForRun(run, factorNames, "", latestOneYear?.factors?.[0]),
+  payload.selectedFactor,
+  "the page must open on the canonical Python-selected factor, not an ex-post period leader",
+);
+const manualFactor = factorNames.find((factor) => factor !== payload.selectedFactor);
+assert.equal(
+  api.defaultFactorForRun(run, factorNames, manualFactor, latestOneYear?.factors?.[0]),
+  manualFactor,
+  "date/window changes must preserve an explicit user factor selection",
+);
+assert.equal(run.summary.data_as_of, payload.data.asOf);
+assert.equal(run.summary.candidate_universe_size, payload.data.requestedCandidateCount);
+assert.equal(run.summary.eligible_price_universe_size, payload.data.analyzedSecurityCount);
+const candidateQualityRows = payload.quality.filter((row) => row.role === "candidate");
+const freshCandidateRows = candidateQualityRows.filter((row) => row.last_date === payload.data.asOf);
+assert.equal(run.data_quality_summary.price_quality_rows, candidateQualityRows.length);
+assert.equal(run.data_quality_summary.fresh_price_rows, freshCandidateRows.length);
+assert(
+  Math.abs(
+    run.data_quality_summary.fresh_price_ratio
+    - (freshCandidateRows.length / candidateQualityRows.length)
+  ) < 1e-12,
+  "fresh-price ratio must be computed from candidate quality.last_date, never hard-coded",
+);
+assert.equal(run.data_quality_summary.capacity_status_counts, null);
+assert.match(
+  run.data_quality_summary.capacity_status_note,
+  /미평가.*체결 용량 모델/,
+  "capacity must remain N/A until an actual order-size/impact model exists",
+);
+assert.equal(
+  JSON.stringify(run.data_quality_summary.latest_eligibility_exclusion_counts),
+  JSON.stringify(payload.data.latestEligibilityExclusionCounts),
+);
+const requestedThroughText = api.canonicalRequestedThroughText(payload);
+assert.match(requestedThroughText, /requestedThrough/);
+assert.match(requestedThroughText, /asOf/);
+assert(requestedThroughText.includes(payload.data.requestedThrough));
+assert(requestedThroughText.includes(payload.data.asOf));
+assert(requestedThroughText.includes(payload.data.sourceLabel));
+assert.match(
+  api.canonicalRequestedThroughText({
+    data: {
+      sourceLabel: "fixture",
+      requestedThrough: "2026-07-12",
+      asOf: "2026-07-10",
+    },
+  }),
+  /주말.*직전 미국 거래일 종가/,
+);
+assert.match(
+  api.canonicalRequestedThroughText({
+    data: {
+      sourceLabel: "fixture",
+      requestedThrough: "2026-07-13",
+      asOf: "2026-07-10",
+    },
+  }),
+  /휴장일이거나 아직 완료되지 않은 거래일/,
+);
+const countDefinitions = api.canonicalCountDefinitions(payload);
+for (const [value, definition] of [
+  [payload.data.requestedCandidateCount, /요청\(requested\).*현재 유니버스 후보/],
+  [payload.data.analyzedSecurityCount, /분석\(analyzed\).*가격 분석 가능/],
+  [payload.data.latestEligibleSecurityCount, /최신 적격\(latest eligible\).*현재 편입 필터 모두 통과/],
+]) {
+  assert(countDefinitions.includes(Number(value).toLocaleString("ko-KR")));
+  assert.match(countDefinitions, definition);
+}
+const universeScope = api.canonicalUniverseScopeEvidence(payload);
+const universeSource = payload.sourceHealth.find(
+  (row) => typeof row.point_in_time_universe === "boolean",
+);
+assert(universeSource, "actual provenance must declare point_in_time_universe");
+assert.equal(universeScope.currentListed, true);
+assert.equal(universeScope.pointInTime, false);
+assert.match(universeScope.scope, /현재 상장 종목 중심/);
+assert.match(universeScope.scope, /Point-in-time 유니버스 아님/);
+assert.match(universeScope.evidence, /역사적 구성종목/);
+assert.match(universeScope.evidence, /상장폐지/);
+assert.match(universeScope.evidence, /ticker reuse/i);
+for (const field of ["source", "status", "universe_provenance", "universe_source_mode", "universe_profile"]) {
+  assert(
+    universeScope.evidence.includes(String(universeSource[field])),
+    `rendered universe evidence must consume sourceHealth.${field}`,
+  );
+}
+assert(universeScope.evidence.includes(Number(universeSource.records).toLocaleString("ko-KR")));
+const unknownUniverseScope = api.canonicalUniverseScopeEvidence({ sourceHealth: [], researchScope: {} });
+assert.equal(unknownUniverseScope.currentListed, false);
+assert.equal(unknownUniverseScope.pointInTime, null);
+assert.match(unknownUniverseScope.scope, /시점성 미확인/);
+assert.doesNotMatch(unknownUniverseScope.scope, /현재 상장/);
+assert.equal(
+  run.data_quality_summary.exclusion_counts_may_overlap,
+  payload.data.funnel.exclusionCountsMayOverlap === true,
+);
+assert.equal(run.factor_backtest_series.length, Object.keys(payload.performance.factorCurves).length);
+assert.deepEqual(
+  Array.from(run.comparison_benchmark_series, (series) => series.symbol),
+  ["SPY", "^IXIC", "QQQ"],
+);
+const fullPeriod = payload.performance.periods.find((period) => period.key === "FULL");
+const commonPeriod = api.v4CommonEvaluationPeriod(payload);
+assert(fullPeriod && commonPeriod, "the actual payload must expose an exact FULL common-evaluation window");
+assert.equal(commonPeriod.startDate, fullPeriod.startDate);
+assert.equal(commonPeriod.endDate, fullPeriod.endDate);
+assert.equal(commonPeriod.startIndex, payload.performance.dates.indexOf(fullPeriod.startDate));
+assert.equal(commonPeriod.endIndex, payload.performance.dates.lastIndexOf(fullPeriod.endDate));
+assert.equal(commonPeriod.endIndex - commonPeriod.startIndex, fullPeriod.returnObservationCount);
+assert.deepEqual(run.common_evaluation_period, commonPeriod);
+for (const symbol of ["SPY", "^IXIC", "QQQ"]) {
+  const series = run.comparison_benchmark_series.find((item) => item.symbol === symbol);
+  const points = api.commonEvaluationSeriesPoints(series, commonPeriod);
+  assert.equal(
+    points.length,
+    fullPeriod.returnObservationCount + 1,
+    `${symbol} must preserve every common-evaluation point`,
+  );
+  assert.equal(points[0].date, fullPeriod.startDate, `${symbol} must start at the FULL boundary`);
+  assert.equal(points.at(-1).date, fullPeriod.endDate, `${symbol} must end at the FULL boundary`);
+  assert.equal(points[0].normalized, 1, `${symbol} must use the common FULL base`);
+  const chartReturn = points.at(-1).normalized - 1;
+  const tableReturn = fullPeriod.benchmarks[symbol].cumulativeReturn;
+  assert(
+    Math.abs(chartReturn - tableReturn) < 1e-12,
+    `${symbol} chart endpoint ${chartReturn} must equal the FULL table ${tableReturn}`,
+  );
+}
+assert(
+  fullPeriod.benchmarks.QQQ.cumulativeReturn > 1,
+  "the actual-payload regression must retain QQQ's greater-than-100% FULL return",
+);
+const shiftedCommonPeriod = {
+  startDate: "2026-01-05",
+  endDate: "2026-01-07",
+  returnObservationCount: 2,
+};
+const shiftedPoints = api.commonEvaluationSeriesPoints({
+  dates: ["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07"],
+  equity: [2, 3, 4, 6],
+}, shiftedCommonPeriod);
+assert.deepEqual(
+  Array.from(shiftedPoints, (point) => point.normalized),
+  [1, 4 / 3, 2],
+  "common evaluation normalization must use the exact period start index, not curve index zero",
+);
+const segmentedGap = api.commonEvaluationSeriesSegments({
+  dates: ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09"],
+  equity: [3, 4, null, 5, 6],
+}, {
+  startDate: "2026-01-05",
+  endDate: "2026-01-09",
+  returnObservationCount: 4,
+});
+assert.equal(segmentedGap.available, true);
+assert.equal(segmentedGap.missingCount, 1);
+assert.deepEqual(Array.from(segmentedGap.missingDates), ["2026-01-07"]);
+assert.equal(segmentedGap.segments.length, 2, "an internal gap must split, never connect, the line");
+assert.deepEqual(
+  Array.from(segmentedGap.segments, (segment) => Array.from(segment, (point) => point.date)),
+  [["2026-01-05", "2026-01-06"], ["2026-01-08", "2026-01-09"]],
+);
+assert.equal(segmentedGap.points.at(-1).normalized, 2, "segmented endpoints must retain the exact FULL return");
+for (const [label, invalidNav] of [
+  ["null", null],
+  ["undefined", undefined],
+  ["zero", 0],
+  ["negative", -0.01],
+  ["numeric string", "4"],
+]) {
+  assert.deepEqual(
+    Array.from(api.commonEvaluationSeriesPoints({
+      dates: ["2026-01-05", "2026-01-06", "2026-01-07"],
+      equity: [3, invalidNav, 6],
+    }, shiftedCommonPeriod)),
+    [],
+    `FULL common evaluation must fail closed on a raw ${label} NAV`,
+  );
+  assert.deepEqual(
+    Array.from(api.seriesPointsThroughDate({
+      dates: ["2026-01-05", "2026-01-06", "2026-01-07"],
+      equity: [3, invalidNav, 6],
+      drawdown: [0, null, 0],
+    }, "2026-01-07", 3)),
+    [],
+    `generic chart extraction must fail closed on a raw ${label} NAV`,
+  );
+}
+const terminallyUnavailableFactor = Object.entries(payload.performance.factorCurves)
+  .find(([, curve]) => curve.at(-1) === null);
+assert(terminallyUnavailableFactor, "actual payload fixture must retain a terminally unavailable diagnostic factor");
+const unavailableFactorSeries = run.factor_backtest_series.find(
+  (series) => series.factor === terminallyUnavailableFactor[0],
+);
+assert.deepEqual(
+  Array.from(api.commonEvaluationSeriesPoints(unavailableFactorSeries, commonPeriod)),
+  [],
+  "a diagnostic factor with terminally unavailable NAV must not render as a false -100% loss",
+);
+assert(run.factor_period_matrix.length >= 300, "restored date/window exploration matrix must be populated");
+assert(run.factor_leaders.length >= 300, "restored 30-session leader views must be populated");
+assert(run.factor_weight_snapshots.length > 0, "restored factor weight and ensemble views need Python snapshots");
+for (const snapshot of run.factor_score_snapshots) {
+  const portfolio = payload.factorPortfolios[snapshot.factor];
+  assert(portfolio, `missing source factorPortfolio for ${snapshot.factor}`);
+  assert.equal(snapshot.score_scope, "schema_v4_current_python_portfolio_top_constituents");
+  assert.equal(snapshot.snapshot_complete, false);
+  assert.equal(snapshot.rows.length, portfolio.weights.length);
+  assert.equal(snapshot.raw_available_count, snapshot.rows.length);
+  assert.equal(snapshot.stored_row_count, snapshot.rows.length);
+  assert.equal(snapshot.upstream_final_eligible_count, portfolio.eligibleSecurityCount);
+  assert(
+    snapshot.raw_available_count <= snapshot.upstream_final_eligible_count,
+    "stored current constituents must not masquerade as the full eligible score universe",
+  );
+}
+assert.equal(
+  api.storedScenarioRowLimit(run, payload.selectedFactor),
+  payload.factorPortfolios[payload.selectedFactor].weights.length,
+  "top-N controls must stop at the number of actually stored rows",
+);
+
+const sourceHealthText = api.formatSourceHealth(run.data_quality_summary.source_health, {
+  requestedCandidateCount: payload.data.requestedCandidateCount,
+  providerReturnedCandidateCount: payload.data.providerReturnedCandidateCount,
+  latestEligibleSecurityCount: payload.data.latestEligibleSecurityCount,
+});
+assert.match(sourceHealthText, /전체 결과: 공급자 사용 가능/);
+assert.match(sourceHealthText, /Yahoo chart 보강/);
+assert.match(sourceHealthText, /Nasdaq 최신일 보강/);
+assert.match(sourceHealthText, /실패/);
+assert.match(sourceHealthText, /최종 사용 가능 여부는 앞의 전체 결과/);
+
+const selectedPolicyRows = payload.factorPolicyRanking.filter(
+  (row) => (row.policy_id || row.weightingPolicyId) === payload.selectedWeightingPolicy,
+);
+const eligibleFactors = new Set(
+  selectedPolicyRows.filter((row) => row.selection_eligible === true).map((row) => row.factor),
+);
+assert(eligibleFactors.size > 0, "selected policy must expose eligible exploration candidates");
+for (const matrix of run.factor_period_matrix) {
+  assert(
+    matrix.factors.every((factor) => eligibleFactors.has(factor)),
+    "period-best exploration must exclude guardrail-ineligible factors",
+  );
+}
+const gapRow = selectedPolicyRows.find((row) => row.factor === "gap_resistant");
+if (gapRow) {
+  assert.equal(gapRow.selection_eligible, false, "the extreme-event factor fixture must be excluded");
+  assert(
+    run.factor_backtest_series.some((series) => series.factor === "gap_resistant"),
+    "excluded factors must remain available as diagnostic curves",
+  );
+  assert(
+    run.factor_options.some((option) => option.factor === "gap_resistant" && option.selection_eligible === false),
+    "the selector must label excluded diagnostic factors",
+  );
+  assert(
+    run.factor_leaders.every((leader) => leader.best_factor !== "gap_resistant"),
+    "gap_resistant must not become a default period-best candidate",
   );
 }
 
-const htmlIds = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
-assert.equal(
-  new Set(htmlIds).size,
-  htmlIds.length,
-  "the dashboard HTML must not contain duplicate element ids",
+assert.equal(run.current_research_target.factor, payload.selectedFactor);
+assert.equal(run.current_research_target.weights.length, payload.currentResearchTarget.weights.length);
+assert.equal(Object.keys(run.factor_current_research_targets).length, 64);
+for (const [factor, portfolio] of Object.entries(payload.factorPortfolios)) {
+  const adaptedTarget = run.factor_current_research_targets[factor];
+  assert(adaptedTarget, `missing adapted current target for ${factor}`);
+  assert.equal(adaptedTarget.factor, factor);
+  assert.equal(adaptedTarget.weightingPolicyId, payload.selectedWeightingPolicy);
+  assert.equal(adaptedTarget.signalDate, payload.data.asOf);
+  assert.equal(adaptedTarget.weights.length, portfolio.weights.length);
+  assert.equal(adaptedTarget.cashWeight, portfolio.cashWeight);
+}
+assert(run.holdings.every((row) => row.factor === payload.selectedFactor));
+assert(
+  run.holdings.every((row) => row.history_source !== undefined),
+  "run.holdings must contain only actual history/fallback rows, never current target clones",
 );
-const staticSelectorIds = [...source.matchAll(/\$\("#([^"]+)"\)/g)]
-  .map((match) => match[1].split(/[ .:[>+~]/, 1)[0]);
-assert.deepEqual(
-  [...new Set(staticSelectorIds)].filter((id) => !htmlIds.includes(id)),
-  [],
-  "every static dashboard.js id selector must resolve in the source HTML",
-);
-assert.deepEqual(
-  Array.from(api.INPUT_FIELDS, (field) => field.id).filter((id) => !htmlIds.includes(id)),
-  [],
-  "every canonical public research input must have a web control",
-);
-assert.equal(
-  api.canonicalString({
-    zero: 0.0,
-    negativeZero: -0.0,
-    one: 1.0,
-    tiny: 1e-7,
-    fixed: 1e-6,
-    large: 1e30,
-    unicode: "한글",
-  }),
-  '{"fixed":0.000001,"large":1e+30,"negativeZero":0,"one":1,"tiny":1e-7,"unicode":"한글","zero":0}',
-  "the browser canonical encoder must match the Python RFC 8785 edge-number fixture",
-);
-assert.deepEqual(
-  JSON.parse(JSON.stringify(api.researchInputsFromNormalizedInputs(
-    publishedDetail.resultIdentity.keyParts.normalizedInputs,
-  ))),
-  publishedDetail.researchInputs,
-  "the browser public-input mapping must exactly match the canonical Python artifact",
-);
+if (payload.selectedBacktestHoldingHistory) {
+  assert.equal(run.backtest_holding_sessions.length, 21);
+  assert.equal(run.backtest_holding_history.sourceKind, "selected_backtest_holding_history");
+} else {
+  assert.equal(run.backtest_holding_sessions.length, 1);
+  assert.equal(run.backtest_holding_history.sourceKind, "legacy_backtest_held_fallback");
+}
 
-const normalizedInputs = (topN) => ({
-  absolute_guardrail_version: "absolute-factor-policy-v1",
-  end_date: "2024-05-31",
-  evaluation_window_days: 756,
-  joint_selection_version: "joint-factor-policy-v1",
-  liquidity_lookback_days: 63,
-  live: true,
-  max_extreme_daily_return: 0.8,
-  max_price_missing_ratio: 0.05,
-  max_volume_missing_ratio: 0.1,
-  max_weight: 0.1,
-  min_avg_dollar_volume: 5_000_000,
-  min_avg_volume: 100_000,
-  min_daily_risk_observations: 504,
-  min_evaluation_observations: 504,
-  min_history_days: 252,
-  min_liquidity_observations: 42,
-  min_price: 5,
-  rebalance_frequency: "ME",
-  slippage_bps: 5,
-  top_n: topN,
-  transaction_cost_bps: 5,
-  selection_min_sharpe: 0,
-  selection_max_drawdown: 0.6,
-  selection_max_annualized_cost_drag: 0.02,
-  selection_min_effective_names: 10,
-  selection_max_target_hhi: 0.15,
-  selection_max_target_weight: 0.15,
-  selection_max_abs_security_day_contribution: 0.25,
-  selection_max_security_absolute_contribution_share: 0.35,
-  selection_max_leave_one_security_cagr_delta: 0.25,
-  selection_extreme_event_action: "exclude",
-  selection_extreme_event_penalty_points: 20,
+const historyFixture = JSON.parse(JSON.stringify(payload));
+const fixtureDates = payload.performance.dates.slice(-21);
+const symbolNames = new Map();
+historyFixture.selectedBacktestHoldingHistory.sessions.forEach((session) => {
+  session.weights.forEach((row) => symbolNames.set(row.symbol, row.name));
 });
-const fixtureAnalyzedSymbols = Array.from(
-  { length: 2_861 },
-  (_value, index) => `SYM${String(index + 1).padStart(4, "0")}`,
-);
-const priceSources = fixtureAnalyzedSymbols.map((symbol) => ({
-  symbol,
-  price_source: "actual-provider-fixture",
+const sidecarSymbols = [...symbolNames.entries()].sort(([left], [right]) => left.localeCompare(right));
+const sidecarSymbolIndexes = new Map(sidecarSymbols.map(([symbol], index) => [symbol, index]));
+const compactSessions = historyFixture.selectedBacktestHoldingHistory.sessions.map((session) => ({
+  valuationAvailable: session.valuationAvailable,
+  cashWeight: session.cashWeight,
+  executionStatus: session.executionStatus,
+  lastSignalDate: session.lastSignalDate,
+  lastExecutionDate: session.lastExecutionDate,
+  weights: session.weights.map((row) => [sidecarSymbolIndexes.get(row.symbol), row.weight]),
 }));
-const sourceHealth = [{ source: "actual-provider-fixture", status: "ok" }];
-const fixtureInputSha256 = {
-  prices: "6".repeat(64),
-  volumes: "7".repeat(64),
-  dollarVolumes: "8".repeat(64),
-  rawCloses: "9".repeat(64),
-  requestedSymbols: "a".repeat(64),
-  returnedSymbols: "b".repeat(64),
-  universeRecords: "e".repeat(64),
-  priceSources: createHash("sha256").update(api.canonicalString(priceSources)).digest("hex"),
-  dataSources: createHash("sha256").update(api.canonicalString(sourceHealth)).digest("hex"),
-};
-const fixtureCandidateSymbolsSha256 = createHash("sha256")
-  .update(api.canonicalString(fixtureAnalyzedSymbols))
-  .digest("hex");
-
-const makeEntry = (digit, topN) => {
-  const inputs = normalizedInputs(topN);
-  const keyParts = {
-    identityVersion: "momentum-result-identity-v1",
-    canonicalJsonVersion: "rfc8785-jcs-v1",
-    normalizedInputs: inputs,
-    marketSnapshot: {
-      sourceMode: "live_market",
-      sourceLabel: "actual-provider-fixture",
-      provider: "actual-provider-fixture",
-      priceBasis: "provider_adjusted_close",
-      volumeBasis: "raw_close_x_raw_volume",
-      rawCloseProxySymbolCount: 0,
-      requestedThrough: "2024-05-31",
-      dataAsOf: "2024-05-31",
-      inputSha256: fixtureInputSha256,
-      requestedCandidateCount: 2_865,
-      providerReturnedCandidateCount: 2_861,
-      analyzedSecurityCount: 2_861,
-      candidateSymbolsSha256: fixtureCandidateSymbolsSha256,
-      snapshotTag: digit,
-    },
-  };
-  const canonicalKeyPartsJson = api.canonicalString(keyParts);
-  const resultKey = createHash("sha256").update(canonicalKeyPartsJson).digest("hex");
-  const identity = {
-    identityVersion: "momentum-result-identity-v1",
-    resultKey,
-    keyParts,
-    canonicalKeyPartsJson,
-  };
-  return {
-    normalizedInputs: inputs,
-    resultKey,
-    identity,
-    detail: { path: `results/${resultKey}.json`, sha256: "a".repeat(64), bytes: 100 },
-    summary: { path: `summaries/${resultKey}.json`, sha256: "b".repeat(64), bytes: 50 },
-  };
-};
-
-const first = makeEntry("1", 20);
-const second = makeEntry("2", 30);
-first.presetId = "latest-top20";
-second.presetId = "latest-top30";
-const manifest = {
-  schemaVersion: 1,
-  contract: "momentum-static-result-grid",
-  gridVersion: "v1",
-  bounded: true,
-  maxEntries: 64,
-  entryCount: 2,
-  defaultResultKey: first.resultKey,
-  entries: [first, second],
-};
-
-assert.equal(api.validateManifest(manifest), manifest);
-assert.equal(api.resolveExactEntry(manifest, normalizedInputs(20)).resultKey, first.resultKey);
-assert.equal(api.resolveExactEntry(manifest, normalizedInputs(21)), null, "static resolver must not choose a nearest tuple");
-assert.deepEqual(
-  [...api.rowReasonCodes({
-    guardrail_breaches: ["maximum_drawdown_magnitude"],
-    exclusion_reasons: [{ code: "must_not_stringify_object" }],
-    exclusion_reason_codes: ["duplicate_alias"],
-  })],
-  ["maximum_drawdown_magnitude", "duplicate_alias"],
-  "structured exclusion reasons must render stable codes instead of [object Object]",
-);
-
-const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
-mockResponse = {
-  ok: true,
-  arrayBuffer: async () => manifestBytes.buffer,
-};
-assert.deepEqual(
-  JSON.parse(JSON.stringify(await api.fetchJson("https://example.test/manifest.json", "manifest"))),
-  manifest,
-  "manifest bootstrap must parse without an artifact reference",
-);
-const verifiedBytes = new TextEncoder().encode('{"ok":true}');
-mockResponse = {
-  ok: true,
-  arrayBuffer: async () => verifiedBytes.buffer,
-};
-assert.deepEqual(
-  JSON.parse(JSON.stringify(await api.fetchJson("https://example.test/detail.json", "detail", {
-    bytes: verifiedBytes.byteLength,
-    sha256: createHash("sha256").update(verifiedBytes).digest("hex"),
-  }))),
-  { ok: true },
-  "referenced artifacts must pass raw byte and SHA-256 verification before JSON parse",
-);
-
-const roundTripSearch = api.searchForRequest(
-  second.resultKey,
-  second.normalizedInputs,
-  second.presetId,
-);
-const roundTrip = api.requestFromSearch(manifest, roundTripSearch);
-assert.equal(roundTrip.error, null);
-assert.equal(roundTrip.entry.resultKey, second.resultKey, "exact URL state must round-trip to the same static entry");
-assert.equal(api.canonicalString(roundTrip.requestedInputs), api.canonicalString(second.normalizedInputs));
-
-const rotatedFirst = makeEntry("3", 20);
-const rotatedSecond = makeEntry("4", 30);
-rotatedFirst.presetId = first.presetId;
-rotatedSecond.presetId = second.presetId;
-const rotatedManifest = {
-  ...manifest,
-  defaultResultKey: rotatedFirst.resultKey,
-  entries: [rotatedFirst, rotatedSecond],
-};
-const rotatedStaticRequest = api.requestFromSearch(rotatedManifest, roundTripSearch);
-assert.equal(rotatedStaticRequest.recoveredFromRotatedResult, true);
-assert.equal(
-  rotatedStaticRequest.baseEntry.resultKey,
-  rotatedSecond.resultKey,
-  "a shared static URL must recover through its stable preset after result-key rotation",
-);
-assert.equal(rotatedStaticRequest.entry.resultKey, rotatedSecond.resultKey);
-
-const unsupportedBeforeRotation = new URLSearchParams(api.searchForRequest(
-  first.resultKey,
-  { ...first.normalizedInputs, top_n: 21 },
-  first.presetId,
-));
-const rotatedApiRequest = api.requestFromSearch(
-  rotatedManifest,
-  `?${unsupportedBeforeRotation.toString()}`,
-);
-assert.equal(rotatedApiRequest.recoveredFromRotatedResult, true);
-assert.equal(rotatedApiRequest.baseEntry.resultKey, rotatedFirst.resultKey);
-assert.equal(rotatedApiRequest.requestedInputs.top_n, 21);
-assert.equal(rotatedApiRequest.entry, null);
-assert.match(rotatedApiRequest.error, /Python backend\/API/);
-
-const legacyRotatedRequest = api.requestFromSearch(
-  rotatedManifest,
-  api.searchForRequest(first.resultKey, { ...first.normalizedInputs, top_n: 21 }),
-);
-assert.equal(legacyRotatedRequest.baseEntry.resultKey, rotatedFirst.resultKey);
-assert.equal(legacyRotatedRequest.requestedInputs.top_n, 21);
-
-const unsupportedParams = new URLSearchParams(api.searchForRequest(first.resultKey, first.normalizedInputs));
-unsupportedParams.set("top_n", "21");
-const unsupported = api.requestFromSearch(manifest, `?${unsupportedParams.toString()}`);
-assert.equal(unsupported.entry, null);
-assert.match(unsupported.error, /Python backend\/API/);
-const historicalUnsupportedInputs = {
-  ...first.normalizedInputs,
-  end_date: "2024-04-30",
-  top_n: 21,
-};
-const preparedLocalRequest = api.localApiRequestFromStaticState(manifest, historicalUnsupportedInputs);
-assert.equal(preparedLocalRequest.baseEntry.resultKey, manifest.defaultResultKey);
-assert.equal(preparedLocalRequest.requestedInputs.end_date, first.normalizedInputs.end_date);
-assert.equal(preparedLocalRequest.requestedInputs.top_n, 21);
-const apiReloadSearch = api.searchForRequest(
-  preparedLocalRequest.baseEntry.resultKey,
-  preparedLocalRequest.requestedInputs,
-);
-assert.equal(new URLSearchParams(apiReloadSearch).get("result"), manifest.defaultResultKey);
-
-const localApiInputs = api.researchInputsFromNormalizedInputs(normalizedInputs(21));
-assert.equal(localApiInputs.version, "research-inputs-v1");
-assert.equal(localApiInputs.topN, 21);
-assert.equal(localApiInputs.evaluationYears, 3);
-assert.equal(localApiInputs.selectionMaxAbsSecurityDayContribution, 0.25);
-assert.equal(localApiInputs.selectionExtremeEventAction, "exclude");
-const localApiResponseBytes = new TextEncoder().encode('{"accepted":true}');
-mockResponse = {
-  ok: true,
-  status: 202,
-  arrayBuffer: async () => localApiResponseBytes.buffer,
-};
-assert.deepEqual(
-  JSON.parse(JSON.stringify((await api.fetchLocalApiJson("/api/runs", {
-    method: "POST",
-    body: localApiInputs,
-  })).body)),
-  { accepted: true },
-);
-assert.equal(lastFetch.url, "http://127.0.0.1:8765/api/runs");
-assert.equal(lastFetch.options.method, "POST");
-assert.deepEqual(JSON.parse(lastFetch.options.body), JSON.parse(JSON.stringify(localApiInputs)));
-
-const policies = [
-  "equal_weight",
-  "capped_linear_rank",
-  "capped_vol_adjusted_rank",
-  "score_liquidity_rank",
-];
-const fixtureResearchInputs = {
-  version: "research-inputs-v1",
-  rebalanceFrequency: "ME",
-  evaluationYears: 3,
-  evaluationWindowDays: 756,
-  topN: 20,
-  maxWeight: 0.1,
-  transactionCostBps: 5,
-  slippageBps: 5,
-  minHistoryDays: 252,
-  minPrice: 5,
-  minAvgDollarVolume: 5_000_000,
-  minAvgVolume: 100_000,
-  liquidityLookbackDays: 63,
-  minLiquidityObservations: 42,
-  maxPriceMissingRatio: 0.05,
-  maxVolumeMissingRatio: 0.1,
-  maxExtremeDailyReturn: 0.8,
-  selectionMinSharpe: 0,
-  selectionMaxDrawdown: 0.6,
-  selectionMaxAnnualizedCostDrag: 0.02,
-  selectionMinEffectiveNames: 10,
-  selectionMaxTargetHhi: 0.15,
-  selectionMaxTargetWeight: 0.15,
-  selectionMaxAbsSecurityDayContribution: 0.25,
-  selectionMaxSecurityAbsoluteContributionShare: 0.35,
-  selectionMaxLeaveOneSecurityCagrDelta: 0.25,
-  selectionExtremeEventAction: "exclude",
-  selectionExtremeEventPenaltyPoints: 20,
-};
-const fixtureGuardrailProfile = {
-  id: "absolute-factor-policy-v1",
-  version: 1,
-  policyNeutral: true,
-  rules: [
-    {
-      id: "minimum_sharpe",
-      metric: "sharpe",
-      operator: ">=",
-      threshold: fixtureResearchInputs.selectionMinSharpe,
-      unit: "ratio",
-    },
-    {
-      id: "maximum_drawdown_magnitude",
-      metric: "max_drawdown",
-      operator: ">=",
-      threshold: -fixtureResearchInputs.selectionMaxDrawdown,
-      unit: "fraction",
-    },
-    {
-      id: "maximum_annualized_cost_drag",
-      metric: "annualized_cost_drag",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxAnnualizedCostDrag,
-      unit: "fraction_per_year",
-    },
-    {
-      id: "minimum_historical_target_effective_names",
-      metric: "min_target_effective_names",
-      operator: ">=",
-      threshold: fixtureResearchInputs.selectionMinEffectiveNames,
-      unit: "names",
-    },
-    {
-      id: "minimum_current_target_effective_names",
-      metric: "current_target_effective_names",
-      operator: ">=",
-      threshold: fixtureResearchInputs.selectionMinEffectiveNames,
-      unit: "names",
-    },
-    {
-      id: "maximum_historical_target_hhi",
-      metric: "max_target_hhi",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxTargetHhi,
-      unit: "fraction",
-    },
-    {
-      id: "maximum_current_target_hhi",
-      metric: "current_target_hhi",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxTargetHhi,
-      unit: "fraction",
-    },
-    {
-      id: "maximum_historical_target_weight",
-      metric: "max_target_weight",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxTargetWeight,
-      unit: "fraction",
-    },
-    {
-      id: "maximum_current_target_weight",
-      metric: "current_target_max_weight",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxTargetWeight,
-      unit: "fraction",
-    },
-    {
-      id: "maximum_security_day_contribution",
-      metric: "max_abs_security_day_contribution",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxAbsSecurityDayContribution,
-      unit: "portfolio_return_fraction",
-    },
-    {
-      id: "maximum_security_absolute_contribution_share",
-      metric: "max_security_absolute_contribution_share",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxSecurityAbsoluteContributionShare,
-      unit: "fraction",
-    },
-    {
-      id: "maximum_leave_one_security_cagr_delta",
-      metric: "max_abs_leave_one_security_cagr_delta",
-      operator: "<=",
-      threshold: fixtureResearchInputs.selectionMaxLeaveOneSecurityCagrDelta,
-      unit: "cagr_fraction",
-    },
-  ],
-  requiredContracts: {
-    completePolicyInputs: true,
-    completeExecutionCoverage: true,
-    currentTargetAvailable: true,
-    contributionDiagnosticsComplete: true,
-  },
-  extremeEventAction: fixtureResearchInputs.selectionExtremeEventAction,
-  extremeEventPenaltyPoints: fixtureResearchInputs.selectionExtremeEventPenaltyPoints,
-};
-const independentFactors = [
-  "factor_alpha",
-  ...Array.from({ length: 60 }, (_value, index) => `factor_${String(index + 1).padStart(2, "0")}`),
-];
-const aliasFactors = ["alias_one", "alias_two", "alias_three"];
-const factorPolicyRanking = [
-  ...independentFactors.flatMap((factor) => policies.map((policy_id) => {
-    const selected = factor === "factor_alpha" && policy_id === "score_liquidity_rank";
-    return {
-      factor,
-      policy_id,
-      comparison_status: "available",
-      selected,
-      absolute_guardrail_pass: true,
-      selection_eligible: true,
-      selection_status: "eligible",
-      selection_score: selected ? 91.2 : 50,
-      min_target_effective_names: 10,
-      current_target_effective_names: 10,
-      max_target_hhi: 0.1,
-      current_target_hhi: 0.1,
-      max_target_weight: 0.01,
-      current_target_max_weight: 0.01,
-      guardrail_historical_effective_names: true,
-      guardrail_current_effective_names: true,
-      guardrail_historical_target_hhi: true,
-      guardrail_current_target_hhi: true,
-      guardrail_historical_target_weight: true,
-      guardrail_current_target_weight: true,
-      exclusion_reason_codes: [],
-      exclusion_reasons: [],
-    };
-  })),
-  ...aliasFactors.flatMap((factor) => policies.map((policy_id) => ({
+const diagnosticFactor = "gap_resistant";
+const factorIds = payload.factorDefinitions.map((row) => row.factor).sort();
+const independentFactorCount = payload.factorDefinitions.filter((row) => (
+  row.selection_eligible === true && row.compatibility_alias_of === null
+)).length;
+const sidecarData = {
+  contract: "momentum-factor-holding-history-sidecar",
+  contractVersion: 1,
+  resultKey: payload.resultKey,
+  selectedWeightingPolicy: payload.selectedWeightingPolicy,
+  weightTiming: "last_complete_close_after_execution_processing",
+  startDate: fixtureDates[0],
+  endDate: fixtureDates.at(-1),
+  sessionCount: fixtureDates.length,
+  dates: fixtureDates,
+  factorCount: factorIds.length,
+  independentFactorCount,
+  diagnosticFactorCount: factorIds.length - independentFactorCount,
+  factorDefinitionSha256: payload.meta.factorDefinitionSha256,
+  policyDefinitionSha256: payload.meta.policyDefinitionSha256,
+  symbols: sidecarSymbols,
+  factors: Object.fromEntries(factorIds.map((factor) => [
     factor,
-    policy_id,
-    comparison_status: "duplicate_alias",
-    selected: false,
-    absolute_guardrail_pass: false,
-    selection_eligible: false,
-    selection_status: "data_excluded",
-    selection_score: null,
-    min_target_effective_names: 10,
-    current_target_effective_names: 10,
-    max_target_hhi: 0.1,
-    current_target_hhi: 0.1,
-    max_target_weight: 0.01,
-    current_target_max_weight: 0.01,
-    guardrail_historical_effective_names: true,
-    guardrail_current_effective_names: true,
-    guardrail_historical_target_hhi: true,
-    guardrail_current_target_hhi: true,
-    guardrail_historical_target_weight: true,
-    guardrail_current_target_weight: true,
-    exclusion_reason_codes: ["duplicate_alias"],
-    exclusion_reasons: [{ code: "duplicate_alias", detail: "compatibility alias" }],
-  }))),
-];
-
-const payload = {
-  schemaVersion: 4,
-  resultKey: first.resultKey,
-  resultIdentity: first.identity,
-  generatedAtUtc: "2026-07-11T00:00:00Z",
-  selectedFactor: "factor_alpha",
-  selectedWeightingPolicy: "score_liquidity_rank",
-  selectedReason: "Python selected this joint factor-policy pair.",
-  selectionDecision: {
-    method: "joint_factor_policy",
-    guardrailProfile: fixtureGuardrailProfile,
-  },
-  gridAccounting: {
-    version: 1,
-    independentFactorCount: 61,
-    policyCount: 4,
-    expectedIndependentPairCount: 244,
-    evaluatedIndependentPairCount: 244,
-    availableIndependentPairCount: 244,
-    excludedIndependentPairCount: 0,
-    missingIndependentPairCount: 0,
-    commonComparableFactorCount: 61,
-    diagnosticAliasFactorCount: 3,
-    diagnosticAliasPairCount: 12,
-    exclusionReasonCounts: {},
-  },
-  factorPolicyRanking,
-  policyDiagnostics: [],
-  weightingPolicyRegistry: {
-    registryVersion: "weighting-policy-registry-v2",
-    policies: Object.fromEntries(policies.map((policyId) => [policyId, {
-        version: "1",
-        implementationId: `${policyId}_v1`,
-        label: policyId,
-        formula: "python-owned",
-      }])),
-  },
-  currentResearchTarget: {
-    factor: "factor_alpha",
-    weightingPolicyId: "score_liquidity_rank",
-    weightingPolicyVersion: "1",
-    asOf: "2024-05-31",
-    signalDate: "2024-05-31",
-    selectedSecurityCount: 10,
-    eligibleSecurityCount: 10,
-    cashWeight: 0.9,
-    weights: Array.from({ length: 10 }, (_value, index) => ({
-      rank: index + 1,
-      symbol: `AAA${index + 1}`,
-      factorScore: 1 - index / 100,
-      maxWeight: 0.1,
-      weight: 0.01,
-    })),
-    concentration: {
-      investedWeight: 0.1,
-      cashWeight: 0.9,
-      riskySleeveHhi: 0.1,
-      effectiveNames: 10,
-      top1Weight: 0.01,
-      top5Weight: 0.05,
-      maxWeight: 0.01,
+    {
+      factor,
+      weightingPolicyId: payload.selectedWeightingPolicy,
+      resultKey: payload.resultKey,
+      sessions: compactSessions,
     },
-  },
-  currentTransition: { oneWayTurnover: 0.1, modeledCostFraction: 0.0001 },
-  selectionMethod: { name: "joint_factor_policy_absolute_guardrails" },
-  performance: { weightingPolicyId: "score_liquidity_rank", factorCurves: {} },
-  factorDefinitions: [],
-  researchInputs: fixtureResearchInputs,
-  researchScope: {},
-  config: {
-    max_weight: 0.1,
-    top_n: 20,
-    selection_min_effective_names: 10,
-    selection_max_target_hhi: 0.15,
-    selection_max_target_weight: 0.15,
-  },
-  meta: { policyFactorRunCount: 256 },
-  priceSources,
-  sourceHealth,
-  data: {
-    mode: "live_market",
-    synthetic: false,
-    sourceLabel: "actual-provider-fixture",
-    provider: "actual-provider-fixture",
-    priceBasis: "provider_adjusted_close",
-    volumeBasis: "raw_close_x_raw_volume",
-    rawCloseProxySymbolCount: 0,
-    requestedThrough: "2024-05-31",
-    asOf: "2024-05-31",
-    requestedCandidateCount: 2_865,
-    providerReturnedCandidateCount: 2_861,
-    analyzedSecurityCount: 2_861,
-    analyzedSymbols: fixtureAnalyzedSymbols,
-    inputSha256: fixtureInputSha256,
-  },
+  ])),
 };
-const summary = {
-  schemaVersion: 4,
-  resultKey: first.resultKey,
-  resultIdentity: first.identity,
-  dataAsOf: "2024-05-31",
-  dataMode: "live_market",
-  synthetic: false,
-  analyzedSecurityCount: 2_861,
-  selectedFactor: "factor_alpha",
-  selectedWeightingPolicy: "score_liquidity_rank",
-  currentResearchTarget: payload.currentResearchTarget,
-  portfolioSize: 10,
-  cashWeight: 0.9,
-  maxWeight: 0.1,
-  weights: payload.currentResearchTarget.weights,
-  concentration: payload.currentResearchTarget.concentration,
+const sidecarBytes = new TextEncoder().encode(api.canonicalString(sidecarData));
+const sidecarDigest = createHash("sha256").update(sidecarBytes).digest("hex");
+historyFixture.factorHoldingHistorySidecar = {
+  contract: sidecarData.contract,
+  contractVersion: 1,
+  storage: "embedded",
+  path: `data/factor-holding-history/${payload.resultKey}.json`,
+  bytes: sidecarBytes.byteLength,
+  sha256: sidecarDigest,
+  resultKey: payload.resultKey,
+  selectedWeightingPolicy: payload.selectedWeightingPolicy,
+  weightTiming: sidecarData.weightTiming,
+  startDate: sidecarData.startDate,
+  endDate: sidecarData.endDate,
+  sessionCount: sidecarData.sessionCount,
+  factorCount: sidecarData.factorCount,
+  independentFactorCount: sidecarData.independentFactorCount,
+  diagnosticFactorCount: sidecarData.diagnosticFactorCount,
+  data: sidecarData,
 };
-
-const cachedApiResult = await api.resolveLocalApiResult(
-  { statusCode: 200, body: payload },
-  0,
+historyFixture.__factorHoldingHistorySidecarData = await api.loadV4FactorHoldingHistorySidecar(
+  historyFixture,
 );
+assert.deepEqual(
+  Object.keys(historyFixture.selectedBacktestHoldingHistory).sort(),
+  [
+    "contractVersion",
+    "factor",
+    "weightingPolicyId",
+    "weightTiming",
+    "startDate",
+    "endDate",
+    "sessionCount",
+    "sessions",
+  ].sort(),
+  "synthetic history top-level fields must match the exact backend contract",
+);
+for (const session of historyFixture.selectedBacktestHoldingHistory.sessions) {
+  assert.deepEqual(
+    Object.keys(session).sort(),
+    [
+      "date",
+      "valuationAvailable",
+      "cashWeight",
+      "executionStatus",
+      "lastSignalDate",
+      "lastExecutionDate",
+      "weights",
+    ].sort(),
+    "synthetic history session fields must match the exact backend contract",
+  );
+  assert(["none", "executed", "executed_partial_unpriceable_targets", "blocked_missing_held_quote", "blocked_all_targets_unpriceable"].includes(session.executionStatus));
+  for (const weight of session.weights) {
+    assert.deepEqual(
+      Object.keys(weight).sort(),
+      ["rank", "symbol", "name", "weight"].sort(),
+      "synthetic history weight fields must match the exact backend contract",
+    );
+  }
+}
+const historyRun = api.adaptSchemaV4Payload(historyFixture).runs[0];
+assert.equal(historyRun.backtest_holding_sessions.length, 21);
+assert.equal(historyRun.backtest_holding_history.contractVersion, 1);
+assert.equal(historyRun.backtest_holding_history.sessionCount, 21);
+assert.equal(historyRun.backtest_holding_history.weightTiming, "last_complete_close_after_execution_processing");
+assert(historyRun.backtest_holding_sessions.every((session) => session.valuationAvailable === true));
+assert(historyRun.backtest_holding_sessions.every((session) => (
+  [
+    "none",
+    "executed",
+    "executed_partial_unpriceable_targets",
+    "blocked_missing_held_quote",
+    "blocked_all_targets_unpriceable",
+  ].includes(session.executionStatus)
+)));
+assert(historyRun.backtest_holding_sessions.some((session) => session.executionStatus === "executed"));
+assert.equal(new Set(historyRun.holdings.map((row) => row.date)).size, 21);
+const selectedHistory = api.selectedDailyWeightRows(
+  historyRun,
+  payload.data.asOf,
+  "1Y",
+  payload.selectedFactor,
+);
+assert.equal(selectedHistory.dateCount, 21);
+assert.equal(selectedHistory.targetRows.length, payload.currentResearchTarget.weights.length);
+const otherFactorHistory = api.selectedDailyWeightRows(
+  historyRun,
+  payload.data.asOf,
+  "1Y",
+  "gap_resistant",
+);
+assert.equal(otherFactorHistory.sourceKind, "factor_backtest_holding_history_sidecar");
+assert.equal(otherFactorHistory.dateCount, 21);
+assert(otherFactorHistory.rows.length > 0);
+assert.equal(otherFactorHistory.targetRows.length, payload.factorPortfolios.gap_resistant.weights.length);
+assert.equal(otherFactorHistory.target.status, "available");
+assert.equal(otherFactorHistory.target.cashWeight, payload.factorPortfolios.gap_resistant.cashWeight);
+assert.equal(otherFactorHistory.target.factor, "gap_resistant");
+assert.notDeepEqual(
+  Array.from(otherFactorHistory.targetRows, (row) => [row.symbol, row.targetWeight]),
+  Array.from(selectedHistory.targetRows, (row) => [row.symbol, row.targetWeight]),
+  "a noncanonical factor must use its exact factorPortfolio, not a canonical target clone",
+);
+const noSidecarPayload = JSON.parse(JSON.stringify(payload));
+delete noSidecarPayload.factorHoldingHistorySidecar;
+delete noSidecarPayload.__factorHoldingHistorySidecarData;
+const noSidecarRun = api.adaptSchemaV4Payload(noSidecarPayload).runs[0];
+const noSidecarDiagnostic = api.selectedDailyWeightRows(
+  noSidecarRun,
+  payload.data.asOf,
+  "1Y",
+  diagnosticFactor,
+);
+assert.equal(noSidecarDiagnostic.sourceKind, "factor_history_unavailable");
+assert.equal(noSidecarDiagnostic.rows.length, 0, "a new payload must not reuse stale sidecar state");
+assert.equal(noSidecarDiagnostic.target.factor, diagnosticFactor);
 assert.equal(
-  cachedApiResult.resultKey,
-  payload.resultKey,
-  "a cached local API POST must return the canonical result without polling",
+  noSidecarDiagnostic.target.cashWeight,
+  payload.factorPortfolios[diagnosticFactor].cashWeight,
+  "current factor target must remain independently available when history is absent",
 );
-assert.equal(cachedApiResult.selectedWeightingPolicy, payload.selectedWeightingPolicy);
-const completedStatusBytes = new TextEncoder().encode(JSON.stringify({
-  resultKey: first.resultKey,
-  status: "complete",
-  statusUrl: `/api/runs/${first.resultKey}`,
-  result: payload,
+
+const externalPayload = JSON.parse(JSON.stringify(historyFixture));
+externalPayload.factorHoldingHistorySidecar.storage = "external";
+delete externalPayload.factorHoldingHistorySidecar.data;
+delete externalPayload.__factorHoldingHistorySidecarData;
+const loadedSidecar = await api.loadV4FactorHoldingHistorySidecar(externalPayload, async (path) => ({
+  ok: path === externalPayload.factorHoldingHistorySidecar.path,
+  arrayBuffer: async () => sidecarBytes.buffer,
 }));
-mockResponse = {
-  ok: true,
-  status: 200,
-  arrayBuffer: async () => completedStatusBytes.buffer,
-};
-const polledApiResult = await api.resolveLocalApiResult({
-    statusCode: 202,
-    body: { resultKey: first.resultKey, statusUrl: `/api/runs/${first.resultKey}` },
-  }, 0);
-assert.equal(
-  polledApiResult.resultKey,
-  payload.resultKey,
-  "a queued local API POST must poll its status URL until the canonical result completes",
-);
-assert.equal(polledApiResult.selectedWeightingPolicy, payload.selectedWeightingPolicy);
-
-assert.equal(
-  await api.validateResult(first, payload, summary),
-  payload.factorPolicyRanking.find((row) => row.selected),
+assert.equal(loadedSidecar.resultKey, payload.resultKey);
+await assert.rejects(
+  api.loadV4FactorHoldingHistorySidecar(
+    { ...externalPayload, factorHoldingHistorySidecar: { ...externalPayload.factorHoldingHistorySidecar, bytes: sidecarBytes.byteLength + 1 } },
+    async () => ({ ok: true, arrayBuffer: async () => sidecarBytes.buffer }),
+  ),
+  /크기/,
 );
 await assert.rejects(
-  () => api.validateResult(first, payload, {
-    ...summary,
-    resultIdentity: { ...summary.resultIdentity, resultKey: second.resultKey },
-  }),
-  /summary resultKey/,
-  "summary/detail identity mismatch must fail closed",
+  api.loadV4FactorHoldingHistorySidecar(
+    { ...externalPayload, factorHoldingHistorySidecar: { ...externalPayload.factorHoldingHistorySidecar, sha256: "0".repeat(64) } },
+    async () => ({ ok: true, arrayBuffer: async () => sidecarBytes.buffer }),
+  ),
+  /SHA-256/,
 );
 await assert.rejects(
-  () => api.validateResult(first, payload, { ...summary, weights: [], cashWeight: 1 }),
-  /weights가 다릅니다/,
-  "summary/detail allocation mismatch must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    currentResearchTarget: {
-      ...payload.currentResearchTarget,
-      cashWeight: 1.25,
-      weights: payload.currentResearchTarget.weights.map((row, index) => (
-        index === 0 ? { ...row, weight: -0.25 } : row
-      )),
-    },
-  }, summary),
-  /보유 행이 잘못되었습니다/,
-  "invalid Python-owned allocation must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    gridAccounting: { ...payload.gridAccounting, exclusionReasonCounts: { impossible: 1 } },
-  }, summary),
-  /exclusionReasonCounts/,
-  "grid exclusion reason accounting must reconcile to exact row reasons",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    factorPolicyRanking: payload.factorPolicyRanking.map((row) => (
-      row.selected ? { ...row, min_target_effective_names: 9 } : row
-    )),
-  }, summary),
-  /guardrail_historical_effective_names/,
-  "the browser must recompute historical worst-case concentration guardrails",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    factorPolicyRanking: payload.factorPolicyRanking.map((row) => (
-      !row.selected && row.factor === "factor_01" && row.policy_id === "equal_weight"
-        ? { ...row, current_target_hhi: 0.2 }
-        : row
-    )),
-  }, summary),
-  /guardrail_current_target_hhi/,
-  "a mutated concentration metric on a nonselected row must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    factorPolicyRanking: payload.factorPolicyRanking.map((row) => (
-      row.selected ? { ...row, absolute_guardrail_pass: false } : row
-    )),
-  }, summary),
-  /pass\/eligible\/selected/,
-  "the selected row must explicitly pass and remain eligible and selected",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    selectionDecision: {
-      ...payload.selectionDecision,
-      guardrailProfile: {
-        ...fixtureGuardrailProfile,
-        rules: fixtureGuardrailProfile.rules.slice(1),
-      },
-    },
-  }, summary),
-  /guardrailProfile/,
-  "removing a guardrail rule must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    selectionDecision: {
-      ...payload.selectionDecision,
-      guardrailProfile: {
-        ...fixtureGuardrailProfile,
-        rules: [
-          ...fixtureGuardrailProfile.rules,
-          {
-            id: "unexpected_rule",
-            metric: "median_target_hhi",
-            operator: "<=",
-            threshold: 0.15,
-            unit: "fraction",
-          },
-        ],
-      },
-    },
-  }, summary),
-  /guardrailProfile/,
-  "adding a guardrail rule must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    selectionDecision: {
-      ...payload.selectionDecision,
-      guardrailProfile: {
-        ...fixtureGuardrailProfile,
-        rules: fixtureGuardrailProfile.rules.map((rule) => (
-          rule.id === "minimum_sharpe" ? { ...rule, threshold: 0.01 } : rule
-        )),
-      },
-    },
-  }, summary),
-  /guardrailProfile/,
-  "a guardrail threshold not bound to researchInputs must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    selectionDecision: {
-      ...payload.selectionDecision,
-      guardrailProfile: {
-        ...fixtureGuardrailProfile,
-        requiredContracts: {
-          ...fixtureGuardrailProfile.requiredContracts,
-          completeExecutionCoverage: false,
-        },
-      },
-    },
-  }, summary),
-  /guardrailProfile/,
-  "mutating a required guardrail contract must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    selectionDecision: {
-      ...payload.selectionDecision,
-      guardrailProfile: {
-        ...fixtureGuardrailProfile,
-        extremeEventAction: "warn",
-      },
-    },
-  }, summary),
-  /guardrailProfile/,
-  "the extreme-event action must remain bound to researchInputs",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    selectionDecision: {
-      ...payload.selectionDecision,
-      guardrailProfile: {
-        ...fixtureGuardrailProfile,
-        extremeEventPenaltyPoints: 19,
-      },
-    },
-  }, summary),
-  /guardrailProfile/,
-  "the extreme-event penalty must remain bound to researchInputs",
-);
-await assert.rejects(
-  () => api.validateResult(first, { ...payload, priceSources: [] }, summary),
-  /priceSources가 비어/,
-  "an actual-market result without per-symbol price provenance must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, { ...payload, sourceHealth: [] }, summary),
-  /sourceHealth가 비어/,
-  "an actual-market result without acquisition health provenance must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    priceSources: payload.priceSources.map((row, index) => (
-      index === 0 ? { ...row, price_source: "silently-mutated-provider" } : row
-    )),
-  }, summary),
-  /priceSources RFC 8785 JCS SHA-256/,
-  "editing a valid priceSources row without updating its bound hash must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    sourceHealth: payload.sourceHealth.map((row, index) => (
-      index === 0 ? { ...row, status: "silently-mutated-status" } : row
-    )),
-  }, summary),
-  /sourceHealth RFC 8785 JCS SHA-256/,
-  "editing a valid sourceHealth row without updating its bound hash must fail closed",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    data: { ...payload.data, priceBasis: "silently-mutated-price-contract" },
-  }, summary),
-  /marketSnapshot이 detail data와 다릅니다/,
-  "market basis semantics must remain bound to result identity",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    data: {
-      ...payload.data,
-      inputSha256: { ...payload.data.inputSha256, unexpected: "f".repeat(64) },
-    },
-  }, summary),
-  /provenance 입력 해시/,
-  "the browser must reject extra live input-hash keys",
-);
-await assert.rejects(
-  () => api.validateResult(first, {
-    ...payload,
-    data: {
-      ...payload.data,
-      analyzedSymbols: [
-        payload.data.analyzedSymbols[1],
-        payload.data.analyzedSymbols[0],
-        ...payload.data.analyzedSymbols.slice(2),
-      ],
-    },
-  }, summary),
-  /marketSnapshot이 detail data와 다릅니다/,
-  "ordered analyzed symbols must match candidateSymbolsSha256",
+  api.loadV4FactorHoldingHistorySidecar(externalPayload, async () => ({ ok: false })),
+  /불러오지 못했습니다/,
 );
 
-assert.match(source, /data\/grid\/v1\/manifest\.json/);
-assert.match(source, /history\.pushState/);
-assert.match(source, /popstate/);
-assert.match(source, /factorPolicyRanking/);
-assert.match(source, /currentResearchTarget/);
-assert.match(source, /weightingPolicyRegistry/);
-assert.match(source, /renderRiskDiagnostics/);
-assert.match(source, /contributionDiagnostics/);
-assert.match(source, /guardrail_breaches/);
-assert.match(source, /maxExactSingleSessionSecurityContribution/);
-assert.match(source, /topLeaveOneSecurity/);
-assert.match(source, /isSelectedPair/);
-assert.match(source, /row\.max_abs_security_day_contribution/);
-assert.match(source, /선택 조합에서만 상세 이벤트 제공/);
-assert.match(source, /crypto\.subtle\.digest/);
-assert.match(source, /byte count가 manifest와 다릅니다/);
-assert.match(source, /POST/);
-assert.match(source, /\/api\/runs/);
-assert.match(source, /queued/);
-assert.match(source, /running/);
-assert.match(source, /gridAccounting\.exclusionReasonCounts/);
-assert.doesNotMatch(source, /weightingPolicyComparison|factorRanking|score_size_liquidity|modelPortfolio/);
-assert.doesNotMatch(source, /calculateComposite|calculateWeights|constructTargetAllocation/);
+function mutatedExternalSidecar(mutate) {
+  const data = JSON.parse(JSON.stringify(sidecarData));
+  mutate(data);
+  const bytes = new TextEncoder().encode(api.canonicalString(data));
+  const copy = JSON.parse(JSON.stringify(externalPayload));
+  copy.factorHoldingHistorySidecar.bytes = bytes.byteLength;
+  copy.factorHoldingHistorySidecar.sha256 = createHash("sha256").update(bytes).digest("hex");
+  return { payload: copy, bytes };
+}
 
-console.log("PASS static web manifest, URL, v4 identity, and Python-owned result contract checks");
+const missingFactor = mutatedExternalSidecar((data) => {
+  delete data.factors[Object.keys(data.factors)[0]];
+});
+await assert.rejects(
+  api.loadV4FactorHoldingHistorySidecar(
+    missingFactor.payload,
+    async () => ({ ok: true, arrayBuffer: async () => missingFactor.bytes.buffer }),
+  ),
+  /64개 팩터/,
+);
+
+const invalidAllocation = mutatedExternalSidecar((data) => {
+  const factor = Object.keys(data.factors)[0];
+  data.factors[factor].sessions[0].cashWeight = 0.99;
+});
+await assert.rejects(
+  api.loadV4FactorHoldingHistorySidecar(
+    invalidAllocation.payload,
+    async () => ({ ok: true, arrayBuffer: async () => invalidAllocation.bytes.buffer }),
+  ),
+  /배분\/정렬/,
+);
+
+const noncanonicalSession = mutatedExternalSidecar((data) => {
+  const factor = Object.keys(data.factors)[0];
+  data.factors[factor].sessions[0].unexpected = true;
+});
+await assert.rejects(
+  api.loadV4FactorHoldingHistorySidecar(
+    noncanonicalSession.payload,
+    async () => ({ ok: true, arrayBuffer: async () => noncanonicalSession.bytes.buffer }),
+  ),
+  /metadata/,
+);
+
+const tickMarks = api.dateTickMarks(payload.performance.dates);
+assert(tickMarks.length >= 6 && tickMarks.length <= 12, "the x-axis must expose 6-12 clean date categories");
+assert.equal(new Set(tickMarks.map((tick) => tick.label)).size, tickMarks.length, "x-axis labels must not duplicate at the final date");
+const yTicks = api.niceReturnTicks(-0.18, 1.63);
+assert(yTicks.length >= 4 && yTicks.length <= 7, "the y-axis must use 4-7 clean percentage ticks");
+assert(yTicks.includes(0), "the cumulative-return axis must include zero");
+assert(Math.abs(api.v4CurveReturn([1, 1.05, 1.1], 2, 2) - 0.1) < 1e-12);
+
+const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+assert.equal(new Set(ids).size, ids.length, "HTML ids must remain unique");
+for (const id of [
+  "performance-metrics-table",
+  "backtest-chart",
+  "factor-return-chart",
+  "window-comparison-chart",
+  "leader-trend-chart",
+  "weight-chart",
+  "ensemble-weight-chart",
+  "joint-ranking-chart",
+  "canonical-component-chart",
+]) {
+  assert(ids.includes(id), `missing chart/table host: ${id}`);
+}
+
+console.log("PASS schema-v4 diagnostics/portfolio/performance/holding tamper checks, benchmark parity, axes, and restored UI contracts");

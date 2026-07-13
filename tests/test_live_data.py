@@ -17,6 +17,7 @@ from momentum_factor_lab.live_data import (
     _apply_nasdaq_latest_repair,
     _apply_stooq_fallback,
     _apply_yahoo_chart_fallback,
+    _comparator_symbols,
     _download_nasdaq_symbol,
     _download_finance_datareader_symbol,
     _download_stooq_symbol,
@@ -24,6 +25,7 @@ from momentum_factor_lab.live_data import (
     _eligible_filter,
     _finance_datareader_cache_path,
     _nasdaq_cache_path,
+    _requested_symbols,
     _stooq_cache_path,
     _stooq_symbol,
     _yahoo_chart_cache_path,
@@ -43,6 +45,39 @@ def _candidate_frame(symbols):
             "is_etf": [False] * len(symbols),
         }
     )
+
+
+def test_default_comparators_are_ordered_deduplicated_and_never_candidates() -> None:
+    config = RunConfig(
+        live=True,
+        chart_benchmark=" ^ixic ",
+        additional_comparison_benchmarks=(" qqq ", "SPY", "^IXIC", "QQQ"),
+    )
+    candidate = _candidate_frame(["QQQ", "AAPL", "GOOD"])
+    dates = pd.bdate_range("2024-01-01", periods=260)
+    prices = pd.DataFrame(
+        {
+            "SPY": np.linspace(400, 430, len(dates)),
+            "^IXIC": np.linspace(15_000, 17_000, len(dates)),
+            "QQQ": np.linspace(300, 345, len(dates)),
+            "AAPL": np.linspace(175, 220, len(dates)),
+            "GOOD": np.linspace(20, 30, len(dates)),
+        },
+        index=dates,
+    )
+    volumes = pd.DataFrame(1_000_000.0, index=dates, columns=prices.columns)
+
+    filtered, _, eligible, _ = _eligible_filter(prices, volumes, candidate, config)
+
+    assert _comparator_symbols(config) == ["SPY", "^IXIC", "QQQ"]
+    capped, subset = _requested_symbols(
+        RunConfig(live=True, max_price_symbols=2),
+        _candidate_frame(["AAPL", "GOOD"]),
+    )
+    assert capped == ["SPY", "^IXIC", "QQQ"]
+    assert subset is True
+    assert list(filtered.columns) == ["SPY", "^IXIC", "QQQ", "AAPL", "GOOD"]
+    assert list(eligible["symbol"]) == ["AAPL", "GOOD"]
 
 
 def test_eligible_filter_excludes_uninvestable_symbols():

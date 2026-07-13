@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import RunConfig
+from .config import MAX_TOP_N, RunConfig
 from .data import (
     MarketData,
     load_market_data,
@@ -96,7 +96,17 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
     dates.add_argument("--end-date")
     dates.add_argument("--benchmark", default="SPY")
     dates.add_argument("--chart-benchmark", default="^IXIC")
-    dates.add_argument("--top-n", type=int, default=20)
+    dates.add_argument(
+        "--additional-comparison-benchmarks",
+        default="QQQ",
+        help="Comma-separated additional adjusted-price comparators; default: QQQ",
+    )
+    dates.add_argument(
+        "--top-n",
+        type=int,
+        default=20,
+        help=f"Number of holdings per factor, from 1 through {MAX_TOP_N}",
+    )
     dates.add_argument("--max-weight", type=float, default=0.10)
     dates.add_argument("--rebalance-frequency", choices=["W", "ME", "QE"], default="ME")
     dates.add_argument("--transaction-cost-bps", type=float, default=5.0)
@@ -148,7 +158,7 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
     policy.add_argument(
         "--selection-max-abs-security-day-contribution",
         type=float,
-        default=0.25,
+        default=0.10,
     )
     policy.add_argument(
         "--selection-max-security-absolute-contribution-share",
@@ -345,6 +355,9 @@ def _config(args: argparse.Namespace) -> RunConfig:
         demo_missing_ratio=args.demo_missing_ratio,
         benchmark=args.benchmark,
         chart_benchmark=args.chart_benchmark,
+        additional_comparison_benchmarks=tuple(
+            normalize_symbols(args.additional_comparison_benchmarks)
+        ),
         rebalance_frequency=args.rebalance_frequency,
         top_n=args.top_n,
         max_weight=args.max_weight,

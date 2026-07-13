@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from momentum_factor_lab.config import MAX_TOP_N
 from momentum_factor_lab.cli import (
     ScheduledGridPreset,
     _compact_summary,
@@ -37,6 +38,7 @@ def test_run_requires_exactly_one_live_local_or_demo_source() -> None:
     live = parser.parse_args(["run", "--live"])
     assert live.live is True
     assert _config(live).data_mode == "live_market"
+    assert _config(live).selection_max_abs_security_day_contribution == pytest.approx(0.10)
 
     sparse_demo = parser.parse_args(["run", "--demo", "--demo-missing-ratio", "0.001"])
     assert sparse_demo.demo is True
@@ -58,6 +60,21 @@ def test_run_requires_exactly_one_live_local_or_demo_source() -> None:
     assert local.volume_basis == "split_adjusted"
 
 
+def test_run_cli_maps_top_n_into_the_canonical_bounded_config() -> None:
+    parser = build_parser()
+    maximum = _config(parser.parse_args(["run", "--demo", "--top-n", str(MAX_TOP_N)]))
+    maximum.validate()
+
+    too_large = _config(parser.parse_args(["run", "--demo", "--top-n", str(MAX_TOP_N + 1)]))
+    with pytest.raises(ValueError, match=rf"top_n must be between 1 and {MAX_TOP_N}"):
+        too_large.validate()
+
+    top_n_action = next(
+        action for action in _command_parser("run")._actions if "--top-n" in action.option_strings
+    )
+    assert str(MAX_TOP_N) in str(top_n_action.help)
+
+
 def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
     run = _command_parser("run")
     options = {option for action in run._actions for option in action.option_strings}
@@ -66,6 +83,7 @@ def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
         "--prices",
         "--demo",
         "--chart-benchmark",
+        "--additional-comparison-benchmarks",
         "--min-avg-volume",
         "--stale-after-days",
         "--data-quality-lookback-days",
@@ -157,6 +175,8 @@ def test_cli_values_map_to_run_config_without_hidden_overrides() -> None:
             "AAPL,MSFT,AAPL",
             "--chart-benchmark",
             "^GSPC",
+            "--additional-comparison-benchmarks",
+            " qqq,QQQ,dia,SPY,^GSPC ",
             "--min-avg-volume",
             "100000",
             "--stale-after-days",
@@ -219,6 +239,8 @@ def test_cli_values_map_to_run_config_without_hidden_overrides() -> None:
     assert config.live is True
     assert config.universe == ["AAPL", "MSFT"]
     assert config.chart_benchmark == "^GSPC"
+    assert config.additional_comparison_benchmarks == ("QQQ", "DIA")
+    assert config.comparison_benchmarks == ("SPY", "^GSPC", "QQQ", "DIA")
     assert config.min_avg_volume == pytest.approx(100_000.0)
     assert config.stale_after_days == 3
     assert config.min_valuation_coverage == pytest.approx(0.95)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -479,6 +480,7 @@ def run_factor_backtest(
     trailing_volatility: pd.DataFrame | None = None,
     trailing_dollar_volume: pd.DataFrame | None = None,
     retain_weight_history: bool = True,
+    weight_history_tail_sessions: int | None = None,
 ) -> BacktestResult:
     """Backtest a date-t close signal with next-session-close execution.
 
@@ -496,6 +498,16 @@ def run_factor_backtest(
     unavailable intraday execution return is never approximated.
     """
 
+    if weight_history_tail_sessions is not None:
+        if (
+            not retain_weight_history
+            or not isinstance(weight_history_tail_sessions, int)
+            or isinstance(weight_history_tail_sessions, bool)
+            or weight_history_tail_sessions < 1
+        ):
+            raise ValueError(
+                "weight_history_tail_sessions requires retained history and a positive integer"
+            )
     if not prices.index.equals(scores.index):
         raise ValueError("prices and scores must share the exact same date index")
     if (
@@ -584,9 +596,21 @@ def run_factor_backtest(
     last_signal_date: pd.Timestamp | None = None
     daily_cash_return = _cash_daily_return(config.annual_cash_return)
     cost_rate = config.total_cost_bps / 10_000.0
-    weight_rows: list[np.ndarray] = []
-    pretrade_rows: list[np.ndarray] = []
-    cash_values: list[float] = []
+    weight_rows: list[np.ndarray] | deque[np.ndarray] = (
+        deque(maxlen=weight_history_tail_sessions)
+        if weight_history_tail_sessions is not None
+        else []
+    )
+    pretrade_rows: list[np.ndarray] | deque[np.ndarray] = (
+        deque(maxlen=weight_history_tail_sessions)
+        if weight_history_tail_sessions is not None
+        else []
+    )
+    cash_values: list[float] | deque[float] = (
+        deque(maxlen=weight_history_tail_sessions)
+        if weight_history_tail_sessions is not None
+        else []
+    )
     return_values: list[float] = []
     turnover_values: list[float] = []
     cost_values: list[float] = []
@@ -836,20 +860,23 @@ def run_factor_backtest(
 
     returns = pd.Series(return_values, index=dates, name=factor_name, dtype=float)
     equity = (1.0 + returns).cumprod(skipna=True).rename(factor_name)
+    retained_dates = (
+        dates[-len(weight_rows) :] if retain_weight_history and len(weight_rows) else dates[:0]
+    )
     weights = (
-        pd.DataFrame(weight_rows, index=dates, columns=columns)
+        pd.DataFrame(weight_rows, index=retained_dates, columns=columns)
         if retain_weight_history
         else pd.DataFrame(columns=columns, dtype=float)
     )
     pretrade = (
-        pd.DataFrame(pretrade_rows, index=dates, columns=columns)
+        pd.DataFrame(pretrade_rows, index=retained_dates, columns=columns)
         if retain_weight_history
         else pd.DataFrame(columns=columns, dtype=float)
     )
     turnover = pd.Series(turnover_values, index=dates, name="turnover", dtype=float)
     costs = pd.Series(cost_values, index=dates, name="cost", dtype=float)
     cash_weights = (
-        pd.Series(cash_values, index=dates, name="cash_weight", dtype=float)
+        pd.Series(cash_values, index=retained_dates, name="cash_weight", dtype=float)
         if retain_weight_history
         else pd.Series(name="cash_weight", dtype=float)
     )

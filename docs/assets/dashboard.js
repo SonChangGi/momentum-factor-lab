@@ -1,444 +1,1134 @@
-(() => {
-  "use strict";
+const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml';
+const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
 
-  const MANIFEST_URL = "data/grid/v1/manifest.json";
-  const MANIFEST_SCHEMA_VERSION = 1;
-  const MANIFEST_CONTRACT = "momentum-static-result-grid";
-  const MANIFEST_GRID_VERSION = "v1";
-  const RESULT_SCHEMA_VERSION = 4;
-  const RESULT_IDENTITY_VERSION = "momentum-result-identity-v1";
-  const CANONICAL_JSON_VERSION = "rfc8785-jcs-v1";
-  const RESEARCH_INPUTS_VERSION = "research-inputs-v1";
-  const ABSOLUTE_GUARDRAIL_VERSION = "absolute-factor-policy-v1";
-  const LOCAL_API_BASE_URL = "http://127.0.0.1:8765";
-  const LOCAL_API_POLL_INTERVAL_MS = 1000;
-  const EXPECTED_INDEPENDENT_FACTOR_COUNT = 61;
-  const EXPECTED_POLICY_COUNT = 4;
-  const EXPECTED_INDEPENDENT_PAIR_COUNT = 244;
-  const EXPECTED_ALIAS_FACTOR_COUNT = 3;
-  const EXPECTED_ALIAS_PAIR_COUNT = 12;
-  const LIVE_INPUT_HASH_FIELDS = [
-    "prices",
-    "volumes",
-    "dollarVolumes",
-    "rawCloses",
-    "requestedSymbols",
-    "returnedSymbols",
-    "universeRecords",
-    "priceSources",
-    "dataSources",
-  ];
-  const PRESET_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-  const LOCAL_API_REQUIRED = (
-    "이 입력 조합은 정적 grid에 사전 계산되지 않았습니다. "
-    + "임의 조건은 로컬 Python backend/API로 새로 분석해야 합니다."
-  );
+const MANIFEST_URL = 'data/grid/v1/manifest.json';
+const MANIFEST_SCHEMA_VERSION = 1;
+const MANIFEST_CONTRACT = 'momentum-static-result-grid';
+const MANIFEST_GRID_VERSION = 'v1';
+const RESULT_SCHEMA_VERSION = 4;
+const RESULT_IDENTITY_VERSION = 'momentum-result-identity-v1';
+const CANONICAL_JSON_VERSION = 'rfc8785-jcs-v1';
+const RESEARCH_INPUTS_VERSION = 'research-inputs-v1';
+const ABSOLUTE_GUARDRAIL_VERSION = 'absolute-factor-policy-v1';
+const LOCAL_API_BASE_URL = 'http://127.0.0.1:8765';
+const LOCAL_API_POLL_INTERVAL_MS = 1000;
+const EXPECTED_INDEPENDENT_FACTOR_COUNT = 61;
+const EXPECTED_POLICY_COUNT = 4;
+const EXPECTED_INDEPENDENT_PAIR_COUNT = 244;
+const EXPECTED_ALIAS_FACTOR_COUNT = 3;
+const EXPECTED_ALIAS_PAIR_COUNT = 12;
+const PERFORMANCE_CONTRACT_VERSION = 'python-period-performance-v1';
+const PERFORMANCE_PERIOD_CONTRACT = Object.freeze([
+  Object.freeze({ key: '1W', label: '최근 1주', returnCount: 5 }),
+  Object.freeze({ key: '1M', label: '최근 1개월', returnCount: 21 }),
+  Object.freeze({ key: '3M', label: '최근 3개월', returnCount: 63 }),
+  Object.freeze({ key: '6M', label: '최근 6개월', returnCount: 126 }),
+  Object.freeze({ key: '1Y', label: '최근 1년', returnCount: 252 }),
+  Object.freeze({ key: 'YTD', label: '연초 이후', returnCount: null }),
+  Object.freeze({ key: 'FULL', label: '전체 공통 평가기간', returnCount: null }),
+]);
+const PERFORMANCE_METRIC_KEYS = Object.freeze([
+  'cumulativeReturn',
+  'sharpe',
+  'annualizedVolatility',
+  'maxDrawdown',
+  'sortino',
+  'calmar',
+  'cvar5',
+  'winRate',
+]);
+const SELECTED_HOLDING_HISTORY_CONTRACT_VERSION = 1;
+const SELECTED_HOLDING_HISTORY_SESSION_COUNT = 21;
+const SELECTED_HOLDING_HISTORY_WEIGHT_TIMING = 'last_complete_close_after_execution_processing';
+const FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT = 'momentum-factor-holding-history-sidecar';
+const FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION = 1;
+const FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY = 'factor-holding-history';
+const MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES = 5_000_000;
+const HOLDING_EXECUTION_STATUSES = Object.freeze([
+  'none',
+  'executed',
+  'executed_partial_unpriceable_targets',
+  'blocked_missing_held_quote',
+  'blocked_all_targets_unpriceable',
+]);
+const LIVE_INPUT_HASH_FIELDS_V2 = Object.freeze([
+  'prices',
+  'volumes',
+  'dollarVolumes',
+  'rawCloses',
+  'requestedSymbols',
+  'returnedSymbols',
+  'universeRecords',
+  'priceSources',
+  'dataSources',
+]);
+const LIVE_INPUT_HASH_FIELDS = Object.freeze([...LIVE_INPUT_HASH_FIELDS_V2, 'comparisonPrices']);
+const PRESET_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LOCAL_API_REQUIRED = [
+  '이 입력 조합은 정적 grid에 사전 계산되지 않았습니다.',
+  '임의 조건은 127.0.0.1:8765 loopback Python API로 새로 분석해야 합니다.',
+].join(' ');
 
-  const INPUT_FIELDS = [
-    { key: "rebalance_frequency", id: "input-rebalance-frequency", kind: "string" },
-    { key: "evaluation_window_days", id: "input-evaluation-window-days", kind: "integer" },
-    { key: "top_n", id: "input-top-n", kind: "integer" },
-    { key: "max_weight", id: "input-max-weight", kind: "percent" },
-    { key: "transaction_cost_bps", id: "input-transaction-cost", kind: "number" },
-    { key: "slippage_bps", id: "input-slippage", kind: "number" },
-    { key: "min_price", id: "input-min-price", kind: "number" },
-    { key: "min_history_days", id: "input-min-history", kind: "integer" },
-    { key: "min_avg_dollar_volume", id: "input-min-dollar-volume", kind: "number" },
-    { key: "min_avg_volume", id: "input-min-volume", kind: "number" },
-    { key: "liquidity_lookback_days", id: "input-liquidity-lookback", kind: "integer" },
-    { key: "min_liquidity_observations", id: "input-liquidity-observations", kind: "integer" },
-    { key: "max_price_missing_ratio", id: "input-price-missing", kind: "percent" },
-    { key: "max_volume_missing_ratio", id: "input-volume-missing", kind: "percent" },
-    { key: "max_extreme_daily_return", id: "input-extreme-return", kind: "percent" },
-    { key: "selection_min_sharpe", id: "input-selection-min-sharpe", kind: "number" },
-    { key: "selection_max_drawdown", id: "input-selection-max-drawdown", kind: "percent" },
-    { key: "selection_max_annualized_cost_drag", id: "input-selection-max-cost-drag", kind: "percent" },
-    { key: "selection_min_effective_names", id: "input-selection-min-effective-names", kind: "number" },
-    { key: "selection_max_target_hhi", id: "input-selection-max-target-hhi", kind: "percent" },
-    { key: "selection_max_target_weight", id: "input-selection-max-target-weight", kind: "percent" },
-    { key: "selection_max_abs_security_day_contribution", id: "input-selection-max-day-contribution", kind: "percent" },
-    { key: "selection_max_security_absolute_contribution_share", id: "input-selection-max-contribution-share", kind: "percent" },
-    { key: "selection_max_leave_one_security_cagr_delta", id: "input-selection-max-leave-one-delta", kind: "percent" },
-    { key: "selection_extreme_event_action", id: "input-selection-extreme-action", kind: "string" },
-    { key: "selection_extreme_event_penalty_points", id: "input-selection-penalty-points", kind: "number" },
-  ];
+const INPUT_FIELDS = Object.freeze([
+  { key: 'rebalance_frequency', id: 'input-rebalance-frequency', kind: 'string' },
+  { key: 'evaluation_window_days', id: 'input-evaluation-window-days', kind: 'integer' },
+  { key: 'top_n', id: 'input-top-n', kind: 'integer' },
+  { key: 'max_weight', id: 'input-max-weight', kind: 'percent' },
+  { key: 'transaction_cost_bps', id: 'input-transaction-cost', kind: 'number' },
+  { key: 'slippage_bps', id: 'input-slippage', kind: 'number' },
+  { key: 'min_price', id: 'input-min-price', kind: 'number' },
+  { key: 'min_history_days', id: 'input-min-history', kind: 'integer' },
+  { key: 'min_avg_dollar_volume', id: 'input-min-dollar-volume', kind: 'number' },
+  { key: 'min_avg_volume', id: 'input-min-volume', kind: 'number' },
+  { key: 'liquidity_lookback_days', id: 'input-liquidity-lookback', kind: 'integer' },
+  { key: 'min_liquidity_observations', id: 'input-liquidity-observations', kind: 'integer' },
+  { key: 'max_price_missing_ratio', id: 'input-price-missing', kind: 'percent' },
+  { key: 'max_volume_missing_ratio', id: 'input-volume-missing', kind: 'percent' },
+  { key: 'max_extreme_daily_return', id: 'input-extreme-return', kind: 'percent' },
+  { key: 'selection_min_sharpe', id: 'input-selection-min-sharpe', kind: 'number' },
+  { key: 'selection_max_drawdown', id: 'input-selection-max-drawdown', kind: 'percent' },
+  { key: 'selection_max_annualized_cost_drag', id: 'input-selection-max-cost-drag', kind: 'percent' },
+  { key: 'selection_min_effective_names', id: 'input-selection-min-effective-names', kind: 'number' },
+  { key: 'selection_max_target_hhi', id: 'input-selection-max-target-hhi', kind: 'percent' },
+  { key: 'selection_max_target_weight', id: 'input-selection-max-target-weight', kind: 'percent' },
+  { key: 'selection_max_abs_security_day_contribution', id: 'input-selection-max-day-contribution', kind: 'percent' },
+  { key: 'selection_max_security_absolute_contribution_share', id: 'input-selection-max-contribution-share', kind: 'percent' },
+  { key: 'selection_max_leave_one_security_cagr_delta', id: 'input-selection-max-leave-one-delta', kind: 'percent' },
+  { key: 'selection_extreme_event_action', id: 'input-selection-extreme-action', kind: 'string' },
+  { key: 'selection_extreme_event_penalty_points', id: 'input-selection-penalty-points', kind: 'number' },
+]);
 
-  const RESEARCH_INPUT_PARITY = {
-    rebalanceFrequency: "rebalance_frequency",
-    evaluationWindowDays: "evaluation_window_days",
-    topN: "top_n",
-    maxWeight: "max_weight",
-    transactionCostBps: "transaction_cost_bps",
-    slippageBps: "slippage_bps",
-    minHistoryDays: "min_history_days",
-    minPrice: "min_price",
-    minAvgDollarVolume: "min_avg_dollar_volume",
-    minAvgVolume: "min_avg_volume",
-    liquidityLookbackDays: "liquidity_lookback_days",
-    minLiquidityObservations: "min_liquidity_observations",
-    maxPriceMissingRatio: "max_price_missing_ratio",
-    maxVolumeMissingRatio: "max_volume_missing_ratio",
-    maxExtremeDailyReturn: "max_extreme_daily_return",
-    selectionMinSharpe: "selection_min_sharpe",
-    selectionMaxDrawdown: "selection_max_drawdown",
-    selectionMaxAnnualizedCostDrag: "selection_max_annualized_cost_drag",
-    selectionMinEffectiveNames: "selection_min_effective_names",
-    selectionMaxTargetHhi: "selection_max_target_hhi",
-    selectionMaxTargetWeight: "selection_max_target_weight",
-    selectionMaxAbsSecurityDayContribution: "selection_max_abs_security_day_contribution",
-    selectionMaxSecurityAbsoluteContributionShare: "selection_max_security_absolute_contribution_share",
-    selectionMaxLeaveOneSecurityCagrDelta: "selection_max_leave_one_security_cagr_delta",
-    selectionExtremeEventAction: "selection_extreme_event_action",
-    selectionExtremeEventPenaltyPoints: "selection_extreme_event_penalty_points",
-  };
+const RESEARCH_INPUT_PARITY = Object.freeze({
+  rebalanceFrequency: 'rebalance_frequency',
+  evaluationWindowDays: 'evaluation_window_days',
+  topN: 'top_n',
+  maxWeight: 'max_weight',
+  transactionCostBps: 'transaction_cost_bps',
+  slippageBps: 'slippage_bps',
+  minHistoryDays: 'min_history_days',
+  minPrice: 'min_price',
+  minAvgDollarVolume: 'min_avg_dollar_volume',
+  minAvgVolume: 'min_avg_volume',
+  liquidityLookbackDays: 'liquidity_lookback_days',
+  minLiquidityObservations: 'min_liquidity_observations',
+  maxPriceMissingRatio: 'max_price_missing_ratio',
+  maxVolumeMissingRatio: 'max_volume_missing_ratio',
+  maxExtremeDailyReturn: 'max_extreme_daily_return',
+  selectionMinSharpe: 'selection_min_sharpe',
+  selectionMaxDrawdown: 'selection_max_drawdown',
+  selectionMaxAnnualizedCostDrag: 'selection_max_annualized_cost_drag',
+  selectionMinEffectiveNames: 'selection_min_effective_names',
+  selectionMaxTargetHhi: 'selection_max_target_hhi',
+  selectionMaxTargetWeight: 'selection_max_target_weight',
+  selectionMaxAbsSecurityDayContribution: 'selection_max_abs_security_day_contribution',
+  selectionMaxSecurityAbsoluteContributionShare: 'selection_max_security_absolute_contribution_share',
+  selectionMaxLeaveOneSecurityCagrDelta: 'selection_max_leave_one_security_cagr_delta',
+  selectionExtremeEventAction: 'selection_extreme_event_action',
+  selectionExtremeEventPenaltyPoints: 'selection_extreme_event_penalty_points',
+});
 
-  const COMPONENT_LABELS = {
-    sortino: "Sortino",
-    calmar: "Calmar",
-    max_drawdown: "MDD",
-    cagr: "CAGR",
-    sharpe: "Sharpe",
-    stability: "기간 안정성",
-  };
+const THEME_STORAGE_KEY = 'momentum-factor-theme';
 
-  const state = {
-    manifest: null,
-    manifestUrl: null,
-    entry: null,
-    payload: null,
-    summary: null,
-    detailPairKey: null,
-    category: "all",
-    search: "",
-    loadToken: 0,
-    controlsBound: false,
-    resultSource: null,
-  };
+/*
+ * Chart semantics map to CSS palette tokens instead of inline colors so the
+ * same meaning survives both the original light theme and its dark variant.
+ * Policy identity uses four approved roots; status and benchmark classes add
+ * open fills, stroke patterns, and direct labels instead of relying on hue.
+ */
+const CHART_PALETTE_CLASS_MAP = Object.freeze({
+  bars: Object.freeze({
+    focal: 'chart-bar-focal',
+    best: 'chart-bar-best',
+    context: 'chart-bar-context',
+    support: 'chart-bar-support',
+    neutralOpen: 'chart-bar-neutral-open',
+    component: 'chart-bar-component',
+  }),
+  benchmarks: Object.freeze({
+    SPY: 'benchmark-spy',
+    '^IXIC': 'benchmark-ixic',
+    QQQ: 'benchmark-qqq',
+    default: 'benchmark',
+  }),
+  policies: Object.freeze({
+    equal_weight: 'policy-equal-weight',
+    capped_linear_rank: 'policy-capped-linear-rank',
+    capped_vol_adjusted_rank: 'policy-capped-vol-adjusted-rank',
+    score_liquidity_rank: 'policy-score-liquidity-rank',
+  }),
+  statuses: Object.freeze({
+    eligible: 'status-eligible',
+    data_excluded: 'status-data-excluded',
+    extreme_event_excluded: 'status-extreme-event-excluded',
+    default: 'status-unavailable',
+  }),
+});
 
-  const hasDom = typeof document !== "undefined";
-  const $ = (selector) => document.querySelector(selector);
-  const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-  const cloneJson = (value) => JSON.parse(JSON.stringify(value));
-  const escapeHtml = (value) => String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-  const finite = (value) => value !== null
-    && value !== undefined
-    && value !== ""
-    && typeof value !== "boolean"
-    && Number.isFinite(Number(value));
-  const integer = (value) => finite(value) && Number.isInteger(Number(value));
-  const validSha256 = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-  const fmtNumber = (value, digits = 2) => finite(value)
-    ? Number(value).toLocaleString("ko-KR", { maximumFractionDigits: digits })
-    : "—";
-  const fmtCount = (value) => integer(value) ? Number(value).toLocaleString("ko-KR") : "—";
-  const fmtPercent = (value, digits = 1) => finite(value)
-    ? `${(Number(value) * 100).toLocaleString("ko-KR", {
-      minimumFractionDigits: digits,
-      maximumFractionDigits: digits,
-    })}%`
-    : "—";
-  const fmtMoney = (value) => finite(value)
-    ? Number(value).toLocaleString("ko-KR", {
-      notation: Math.abs(Number(value)) >= 1e6 ? "compact" : "standard",
-      maximumFractionDigits: 1,
-    })
-    : "—";
-  const signClass = (value) => finite(value) && Number(value) < 0 ? "negative" : "positive";
-
-  function canonicalValue(value) {
-    if (Array.isArray(value)) return value.map(canonicalValue);
-    if (!isRecord(value)) return value;
-    return Object.keys(value).sort().reduce((result, key) => {
-      result[key] = canonicalValue(value[key]);
-      return result;
-    }, {});
+function storedTheme() {
+  try {
+    return window.localStorage?.getItem(THEME_STORAGE_KEY);
+  } catch (error) {
+    return null;
   }
+}
 
-  function canonicalString(value) {
-    return JSON.stringify(canonicalValue(value));
+function saveTheme(theme) {
+  try {
+    window.localStorage?.setItem(THEME_STORAGE_KEY, theme);
+  } catch (error) {
+    // Theme persistence is optional; the page still works without localStorage.
   }
+}
 
-  function sameJson(left, right) {
-    return canonicalString(left) === canonicalString(right);
+function themeRoot() {
+  return document.documentElement || document.querySelector?.('html') || null;
+}
+
+function currentTheme() {
+  const root = themeRoot();
+  return root?.dataset?.theme || root?.getAttribute?.('data-theme') || 'light';
+}
+
+function applyTheme(theme) {
+  const normalized = theme === 'dark' ? 'dark' : 'light';
+  const root = themeRoot();
+  if (root?.dataset) {
+    root.dataset.theme = normalized;
+  } else if (root?.setAttribute) {
+    root.setAttribute('data-theme', normalized);
   }
+  const button = document.querySelector('#theme-toggle');
+  if (!button) return;
+  const isDark = normalized === 'dark';
+  button.setAttribute('aria-pressed', String(isDark));
+  button.setAttribute('aria-label', isDark ? '라이트 모드로 전환' : '다크 모드로 전환');
+  const label = typeof button.querySelector === 'function' ? button.querySelector('.theme-toggle-text') : null;
+  if (label) label.textContent = isDark ? '라이트 모드' : '다크 모드';
+}
 
-  function requireCondition(condition, message) {
-    if (!condition) throw new Error(message);
+function bindThemeToggle() {
+  applyTheme(storedTheme() || 'light');
+  const button = document.querySelector('#theme-toggle');
+  if (!button || typeof button.addEventListener !== 'function') return;
+  button.addEventListener('click', () => {
+    const nextTheme = currentTheme() === 'dark' ? 'light' : 'dark';
+    applyTheme(nextTheme);
+    saveTheme(nextTheme);
+  });
+}
+
+const FACTOR_METHOD_OVERRIDES = {
+  "mom_12_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-273] - 1",
+    "description": "Traditional 12-1 cross-sectional total return momentum.",
+    "validation": "Manual shifted-return and no-lookahead tests."
+  },
+  "mom_9_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-210] - 1",
+    "description": "Nine-month skipped return momentum.",
+    "validation": "Manual shifted-return and no-lookahead tests."
+  },
+  "mom_6_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-147] - 1",
+    "description": "Traditional 6-1 cross-sectional total return momentum.",
+    "validation": "Manual shifted-return and no-lookahead tests."
+  },
+  "mom_12_2": {
+    "category": "traditional",
+    "formula": "P[t-42] / P[t-294] - 1",
+    "description": "Twelve-month momentum with a two-month skip to reduce reversal contamination.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_3_1": {
+    "category": "traditional",
+    "formula": "P[t-21] / P[t-84] - 1",
+    "description": "Traditional 3-1 skipped return momentum.",
+    "validation": "Independent shifted-return and no-lookahead tests."
+  },
+  "mom_10d": {
+    "category": "recent",
+    "formula": "P[t] / P[t-10] - 1",
+    "description": "Ten-trading-day short-horizon momentum with high-turnover warning.",
+    "validation": "Literal golden-vector simple-return tests and turnover warning audit."
+  },
+  "mom_6m_unskipped": {
+    "category": "recent",
+    "formula": "P[t] / P[t-126] - 1",
+    "description": "Six-month recent momentum without a skip window.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_3m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-63] - 1",
+    "description": "Three-month recent momentum without skip month.",
+    "validation": "Simple-return fixture tests."
+  },
+  "mom_2m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-42] - 1",
+    "description": "Two-month short-horizon momentum for fast leadership changes.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_2_1": {
+    "category": "recent",
+    "formula": "P[t-21] / P[t-63] - 1",
+    "description": "Two-month momentum that skips the most recent month.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "mom_6m": {
+    "category": "recent",
+    "formula": "P[t-10] / P[t-136] - 1",
+    "description": "Six-month momentum ending ten trading days before the signal date to avoid very recent reversal noise.",
+    "validation": "Independent shifted-return and no-lookahead tests; intentionally distinct from mom_6m_unskipped."
+  },
+  "mom_12m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-252] - 1",
+    "description": "Twelve-month simple momentum without skip month.",
+    "validation": "Independent simple-return and no-lookahead tests."
+  },
+  "mom_1m": {
+    "category": "recent",
+    "formula": "P[t] / P[t-21] - 1",
+    "description": "One-month short-horizon momentum.",
+    "validation": "Simple-return fixture tests."
+  },
+  "multi_horizon": {
+    "category": "composite",
+    "formula": "0.15*1m + 0.25*3m(skip5) + 0.30*6m(skip10) + 0.30*12m(skip21)",
+    "description": "Weighted 1/3/6/12-month multi-horizon momentum composite.",
+    "validation": "Component helper tests plus output audit."
+  },
+  "vol_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) / annualized_vol_63d",
+    "description": "Six-month momentum scaled by recent annualized volatility.",
+    "validation": "Division-by-zero and finite coverage audit."
+  },
+  "risk_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "annualized_mean_return_126d / annualized_vol_126d",
+    "description": "Rolling Sharpe-like annualized return divided by volatility.",
+    "validation": "Rolling mean/vol helper tests."
+  },
+  "downside_risk_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) / annualized_downside_vol_126d",
+    "description": "Momentum scaled by downside volatility only.",
+    "validation": "Downside fixture tests and finite audit."
+  },
+  "dual_momentum": {
+    "category": "trend",
+    "formula": "6m relative momentum penalized when price < MA200",
+    "description": "Relative momentum penalized when absolute trend is below the 200-day average.",
+    "validation": "Trend penalty and no-lookahead audit."
+  },
+  "ma_trend": {
+    "category": "trend",
+    "formula": "P/MA200 - 1 + 0.5*(MA50/MA200 - 1)",
+    "description": "Trend persistence from price/MA200 and MA50/MA200 structure.",
+    "validation": "Moving-average fixture tests."
+  },
+  "time_series_trend": {
+    "category": "trend",
+    "formula": "I(P>MA20)+I(MA20>MA100)+I(MA100>MA200)",
+    "description": "Discrete time-series trend stack across short/intermediate/long averages.",
+    "validation": "Bounded 0..3 output audit."
+  },
+  "drawdown_aware": {
+    "category": "drawdown",
+    "formula": "6m(skip10) + P/rolling_high_126 - 1",
+    "description": "Six-month momentum penalized by recent drawdown from rolling high.",
+    "validation": "Drawdown sign and no-lookahead audit."
+  },
+  "high_52w": {
+    "category": "drawdown",
+    "formula": "P / rolling_high_252 - 1",
+    "description": "Closeness to 52-week high; less negative is stronger.",
+    "validation": "Manual rolling-high fixture tests."
+  },
+  "high_26w": {
+    "category": "drawdown",
+    "formula": "P / rolling_high_126 - 1",
+    "description": "Closeness to a 26-week high for intermediate breakout confirmation.",
+    "validation": "Independent rolling-high golden tests."
+  },
+  "breakout_63d": {
+    "category": "breakout",
+    "formula": "P/rolling_high_63 - 1 + 0.5*1m",
+    "description": "Recent breakout pressure with one-month confirmation.",
+    "validation": "Rolling-high plus 1m fixture tests."
+  },
+  "breakout_126d": {
+    "category": "breakout",
+    "formula": "P/rolling_high_126 - 1 + 0.5*3m",
+    "description": "Intermediate breakout pressure with three-month confirmation.",
+    "validation": "Independent rolling-high golden tests."
+  },
+  "reversal_adjusted": {
+    "category": "reversal",
+    "formula": "12-1 momentum - 0.35*1m momentum",
+    "description": "12-1 momentum adjusted for short-term reversal risk.",
+    "validation": "Component helper tests plus no-lookahead audit."
+  },
+  "acceleration": {
+    "category": "acceleration",
+    "formula": "3m momentum - 0.5*6-1 momentum",
+    "description": "Momentum acceleration toward recent leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "short_acceleration": {
+    "category": "acceleration",
+    "formula": "1m momentum - 0.5*3m momentum",
+    "description": "Short-horizon acceleration signal for very recent leadership surges.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "decay_adjusted": {
+    "category": "acceleration",
+    "formula": "6m(skip10) - 0.25*abs(1m momentum)",
+    "description": "Six-month momentum penalized when very recent moves look overextended.",
+    "validation": "Independent raw-shift golden tests."
+  },
+  "consistency": {
+    "category": "quality",
+    "formula": "6m(skip10) * rolling_positive_return_ratio_126d",
+    "description": "Rewards momentum earned consistently across days.",
+    "validation": "Positive-ratio fixture tests."
+  },
+  "persistent_12_1": {
+    "category": "quality",
+    "formula": "12m(skip21) * positive_daily_return_ratio_252d(skip21)",
+    "description": "Long-horizon skipped momentum scaled by the share of positive daily returns in the skipped formation window.",
+    "validation": "Positive-ratio and no-lookahead tests."
+  },
+  "low_vol_momentum": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) - annualized_vol_63d",
+    "description": "Momentum penalized by high recent volatility.",
+    "validation": "Low-vol ranking fixture tests."
+  },
+  "stability_adjusted": {
+    "category": "risk_adjusted",
+    "formula": "6m(skip10) / (1 + annualized_vol_126d)",
+    "description": "Six-month momentum damped by one-year realized volatility from price returns.",
+    "validation": "Independent volatility golden tests."
+  },
+  "relative_strength_6m": {
+    "category": "cross_sectional",
+    "formula": "cross-sectional percentile_rank(6m(skip10))",
+    "description": "Six-month relative-strength percentile within the eligible universe.",
+    "validation": "Cross-sectional rank audit."
+  },
+  "trend_quality": {
+    "category": "quality",
+    "formula": "P/MA126 - 1 + rolling_mean_return_126/rolling_vol_126",
+    "description": "Combines trend slope with smoothness of returns.",
+    "validation": "Rolling helper and finite audit."
+  },
+  "gap_resistant": {
+    "category": "robust",
+    "formula": "compound clipped daily returns over 126d",
+    "description": "Momentum using clipped daily returns to reduce single-gap dominance.",
+    "validation": "Clipped-return fixture tests."
+  },
+  "winsorized_skip": {
+    "category": "robust",
+    "formula": "compound clipped daily returns over 126d after 10d skip",
+    "description": "Skipped six-month momentum using winsorized daily returns to reduce gap dominance.",
+    "validation": "Independent clipped-return golden tests."
+  },
+  "price_efficiency": {
+    "category": "quality",
+    "formula": "6m(skip10) * |P/P[t-126]-1| / sum_126(|daily_return|)",
+    "description": "Rewards six-month momentum that traveled a direct, low-chop price path.",
+    "validation": "Path-efficiency fixture tests and division-by-zero audit."
+  },
+  "range_position": {
+    "category": "range",
+    "formula": "6m(skip10) + (P-low_126)/(high_126-low_126) - 0.5",
+    "description": "Combines six-month momentum with where price sits inside its trailing range.",
+    "validation": "Rolling-range fixture tests and flat-range audit."
+  },
+  "range_position_252d": {
+    "category": "range",
+    "formula": "12m(skip21) + (P-low_252)/(high_252-low_252) - 0.5",
+    "description": "Combines long-horizon skipped momentum with position inside a 52-week range.",
+    "validation": "Independent rolling-range golden tests."
+  },
+  "median_return_3m": {
+    "category": "robust",
+    "formula": "median(daily_return, 63d) * 63",
+    "description": "Three-month median daily return momentum to reduce outlier sensitivity.",
+    "validation": "Median-return golden-vector and outlier-gap tests."
+  },
+  "median_return_6m": {
+    "category": "robust",
+    "formula": "median(daily_return, 126d) * 126",
+    "description": "Six-month median daily return momentum to reduce outlier sensitivity.",
+    "validation": "Median-return golden-vector and no-lookahead tests."
+  },
+  "winsorized_3m": {
+    "category": "robust",
+    "formula": "compound clipped [-8%, +8%] daily returns over 63d",
+    "description": "Three-month winsorized compounded momentum.",
+    "validation": "Winsorized golden-vector and outlier-gap tests."
+  },
+  "winsorized_12m": {
+    "category": "robust",
+    "formula": "compound clipped [-8%, +8%] daily returns over 252d",
+    "description": "Twelve-month winsorized compounded momentum.",
+    "validation": "Winsorized no-lookahead and edge-case tests."
+  },
+  "vol_adjusted_3m": {
+    "category": "risk_adjusted",
+    "formula": "3m simple momentum / annualized_vol_63d",
+    "description": "Three-month momentum scaled by recent annualized volatility.",
+    "validation": "Division-by-zero and finite coverage audit."
+  },
+  "vol_adjusted_12m": {
+    "category": "risk_adjusted",
+    "formula": "12-1 momentum / annualized_vol_126d",
+    "description": "Twelve-minus-one momentum scaled by intermediate volatility.",
+    "validation": "Division-by-zero and no-lookahead audit."
+  },
+  "downside_adjusted_12m": {
+    "category": "risk_adjusted",
+    "formula": "12-1 momentum / annualized_downside_vol_252d",
+    "description": "Twelve-minus-one momentum scaled by downside volatility.",
+    "validation": "Downside risk edge-case tests."
+  },
+  "ma_slope_50": {
+    "category": "trend",
+    "formula": "MA50[t] / MA50[t-21] - 1",
+    "description": "One-month slope of the 50-day moving average.",
+    "validation": "Moving-average slope fixture tests."
+  },
+  "price_vs_ma200": {
+    "category": "trend",
+    "formula": "P / MA200 - 1",
+    "description": "Distance of price above/below the 200-day moving average.",
+    "validation": "Moving-average fixture tests."
+  },
+  "ma_stack_quality": {
+    "category": "trend",
+    "formula": "I(P>MA20)+I(MA20>MA50)+I(MA50>MA100)+I(MA100>MA200)",
+    "description": "Four-step moving-average stack quality score.",
+    "validation": "Bounded 0..4 output and no-lookahead audit."
+  },
+  "breakout_20d": {
+    "category": "breakout",
+    "formula": "P/rolling_high_20 - 1 + 0.5*10d",
+    "description": "Short breakout proximity with ten-day confirmation.",
+    "validation": "Rolling-high golden-vector tests."
+  },
+  "accel_1m_vs_3m": {
+    "category": "acceleration",
+    "formula": "1m momentum - 3m momentum",
+    "description": "Acceleration from three-month to one-month leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "accel_3m_vs_6m": {
+    "category": "acceleration",
+    "formula": "3m momentum - 6m momentum",
+    "description": "Acceleration from six-month to three-month leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "accel_6m_vs_12m": {
+    "category": "acceleration",
+    "formula": "6m momentum - 12m momentum",
+    "description": "Acceleration from twelve-month to six-month leadership.",
+    "validation": "Manual acceleration fixture tests."
+  },
+  "ulcer_adjusted": {
+    "category": "drawdown",
+    "formula": "6m(skip10) / sqrt(mean(drawdown_126^2, 126d))",
+    "description": "Momentum scaled by Ulcer-style drawdown severity.",
+    "validation": "Drawdown denominator and finite audit."
+  },
+  "smooth_return_6m": {
+    "category": "quality",
+    "formula": "6m simple momentum - rolling_std_daily_return_126d",
+    "description": "Six-month return momentum penalized by daily return roughness.",
+    "validation": "Smoothness edge-case tests."
+  },
+  "residual_12_1": {
+    "category": "cross_sectional",
+    "formula": "sum_252(return shifted21) - beta_252_to_equal_weight_market * sum_252(market_return shifted21)",
+    "description": "Twelve-minus-one beta-neutral residual momentum versus the equal-weight candidate-universe proxy.",
+    "validation": "Rolling beta residual formula, rank-distinctness, and no-lookahead tests."
+  },
+  "excess_ir_6m": {
+    "category": "cross_sectional",
+    "formula": "annualized_mean(excess_return_126d) / annualized_tracking_error_126d",
+    "description": "Six-month information-ratio style momentum versus the equal-weight candidate universe.",
+    "validation": "Tracking-error denominator and no-lookahead tests."
+  },
+  "up_down_capture_6m": {
+    "category": "asymmetry",
+    "formula": "mean(return | market_up,126d) - abs(mean(return | market_down,126d))",
+    "description": "Rewards stocks that participate on up-market days without giving back as much on down-market days.",
+    "validation": "Market-up/down conditioning and finite-coverage tests."
+  },
+  "tail_resilient_6m": {
+    "category": "tail_risk",
+    "formula": "6m(skip10) + q05(daily_return,126d)",
+    "description": "Six-month skipped momentum penalized by poor left-tail daily returns.",
+    "validation": "Rolling quantile edge-case and no-lookahead tests."
+  },
+  "jump_excluded_6m": {
+    "category": "robust",
+    "formula": "sum_126(daily_return shifted10) - max_126(daily_return shifted10)",
+    "description": "Formation-window momentum that removes the single largest daily jump to reduce one-day gap dominance.",
+    "validation": "Independent shifted-return and outlier-resistance tests."
+  },
+  "high_persistence_6m": {
+    "category": "quality",
+    "formula": "mean_63(I(P >= 0.98*rolling_high_126))",
+    "description": "Fraction of recent days spent near a six-month high, capturing persistent leadership rather than one-day proximity.",
+    "validation": "Rolling-high persistence and no-lookahead tests."
   }
+};
 
-  function validateIdentity(identity, resultKey, label, options = {}) {
-    requireCondition(isRecord(identity), `${label} resultIdentity가 없습니다.`);
-    requireCondition(identity.identityVersion === RESULT_IDENTITY_VERSION, `${label} identityVersion이 지원되지 않습니다.`);
-    requireCondition(identity.keyParts?.identityVersion === RESULT_IDENTITY_VERSION, `${label} keyParts identityVersion이 지원되지 않습니다.`);
-    requireCondition(identity.keyParts?.canonicalJsonVersion === CANONICAL_JSON_VERSION, `${label} canonical JSON version이 지원되지 않습니다.`);
-    requireCondition(identity.resultKey === resultKey && validSha256(identity.resultKey), `${label} resultKey가 일치하지 않습니다.`);
-    requireCondition(isRecord(identity.keyParts), `${label} keyParts가 없습니다.`);
-    requireCondition(isRecord(identity.keyParts.normalizedInputs), `${label} normalizedInputs가 없습니다.`);
-    const canonicalTransport = identity.canonicalKeyPartsJson;
-    if (options.requireCanonicalTransport !== false) {
-      requireCondition(typeof canonicalTransport === "string" && canonicalTransport, `${label} canonicalKeyPartsJson이 없습니다.`);
-    }
-    if (canonicalTransport === undefined && options.requireCanonicalTransport === false) return;
-    let canonicalKeyParts;
-    try {
-      canonicalKeyParts = JSON.parse(canonicalTransport);
-    } catch (_error) {
-      throw new Error(`${label} canonicalKeyPartsJson이 유효한 JSON이 아닙니다.`);
-    }
-    requireCondition(sameJson(canonicalKeyParts, identity.keyParts), `${label} canonicalKeyPartsJson이 keyParts와 다릅니다.`);
-    requireCondition(canonicalString(identity.keyParts) === canonicalTransport, `${label} canonicalKeyPartsJson이 RFC 8785 JCS encoding이 아닙니다.`);
-  }
+const DASHBOARD_INPUT_DEFAULTS = {
+  window: '1Y',
+  lookbackMonths: 12,
+  topN: 20,
+  maxWeightPercent: 50,
+  rebalanceFrequency: 'ME',
+  transactionCostBps: 5,
+  slippageBps: 5,
+};
 
-  function validateManifest(manifest) {
-    requireCondition(isRecord(manifest), "정적 grid manifest가 JSON 객체가 아닙니다.");
-    requireCondition(manifest.schemaVersion === MANIFEST_SCHEMA_VERSION, "지원하지 않는 manifest schema입니다.");
-    requireCondition(manifest.contract === MANIFEST_CONTRACT, "manifest contract가 일치하지 않습니다.");
-    requireCondition(manifest.gridVersion === MANIFEST_GRID_VERSION, "manifest gridVersion이 일치하지 않습니다.");
-    requireCondition(manifest.bounded === true, "정적 grid가 bounded 계약을 선언하지 않았습니다.");
-    requireCondition(integer(manifest.maxEntries) && Number(manifest.maxEntries) >= 1 && Number(manifest.maxEntries) <= 64, "manifest maxEntries가 잘못되었습니다.");
-    requireCondition(Array.isArray(manifest.entries) && manifest.entries.length > 0, "manifest entry가 없습니다.");
-    requireCondition(manifest.entryCount === manifest.entries.length && manifest.entries.length <= manifest.maxEntries, "manifest entry 수가 일관되지 않습니다.");
-    requireCondition(validSha256(manifest.defaultResultKey), "manifest defaultResultKey가 잘못되었습니다.");
+const state = {
+  data: null,
+  activeRunIndex: 0,
+  hasUserSelectedFactor: false,
+  v4Payload: null,
+  manifest: null,
+  manifestUrl: null,
+  entry: null,
+  baseEntry: null,
+  summary: null,
+  loadToken: 0,
+  browserControlsBound: false,
+  dashboardControlsBound: false,
+  resultSource: null,
+};
 
-    const resultKeys = new Set();
-    const inputTuples = new Set();
-    const presetIds = new Set();
-    let declaredPresetCount = 0;
-    manifest.entries.forEach((entry, index) => {
-      const label = `manifest.entries[${index}]`;
-      requireCondition(isRecord(entry) && validSha256(entry.resultKey), `${label} resultKey가 잘못되었습니다.`);
-      requireCondition(!resultKeys.has(entry.resultKey), "manifest에 중복 resultKey가 있습니다.");
-      resultKeys.add(entry.resultKey);
-      requireCondition(isRecord(entry.normalizedInputs), `${label} normalizedInputs가 없습니다.`);
-      validateIdentity(entry.identity, entry.resultKey, label);
-      requireCondition(sameJson(entry.normalizedInputs, entry.identity.keyParts.normalizedInputs), `${label} normalizedInputs가 identity와 다릅니다.`);
-      const inputTuple = canonicalString(entry.normalizedInputs);
-      requireCondition(!inputTuples.has(inputTuple), "manifest에 중복 입력 tuple이 있습니다.");
-      inputTuples.add(inputTuple);
-      if (Object.prototype.hasOwnProperty.call(entry, "presetId")) {
-        requireCondition(
-          typeof entry.presetId === "string" && PRESET_ID_PATTERN.test(entry.presetId),
-          `${label} presetId가 잘못되었습니다.`,
-        );
-        requireCondition(!presetIds.has(entry.presetId), "manifest에 중복 presetId가 있습니다.");
-        presetIds.add(entry.presetId);
-        declaredPresetCount += 1;
-      }
-      requireCondition(entry.detail?.path === `results/${entry.resultKey}.json`, `${label} detail path가 잘못되었습니다.`);
-      requireCondition(entry.summary?.path === `summaries/${entry.resultKey}.json`, `${label} summary path가 잘못되었습니다.`);
-      requireCondition(validSha256(entry.detail.sha256) && integer(entry.detail.bytes) && Number(entry.detail.bytes) > 0, `${label} detail reference가 잘못되었습니다.`);
-      requireCondition(validSha256(entry.summary.sha256) && integer(entry.summary.bytes) && Number(entry.summary.bytes) > 0, `${label} summary reference가 잘못되었습니다.`);
-    });
-    requireCondition(
-      declaredPresetCount === 0 || declaredPresetCount === manifest.entries.length,
-      "manifest presetId는 모든 entry에 있거나 모두 없어야 합니다.",
-    );
-    requireCondition(resultKeys.has(manifest.defaultResultKey), "manifest 기본 entry가 없습니다.");
-    return manifest;
-  }
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const cloneJson = (value) => JSON.parse(JSON.stringify(value));
+const finite = (value) => value !== null
+  && value !== undefined
+  && value !== ''
+  && typeof value !== 'boolean'
+  && Number.isFinite(Number(value));
+const integer = (value) => finite(value) && Number.isInteger(Number(value));
+const validSha256 = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 
-  function resolveExactEntry(manifest, normalizedInputs) {
-    const requested = canonicalString(normalizedInputs);
-    return manifest.entries.find((entry) => canonicalString(entry.normalizedInputs) === requested) || null;
-  }
-
-  function parseInputValue(field, raw) {
-    const text = String(raw ?? "").trim();
-    if (field.kind === "string") {
-      if (!text) throw new Error(`${field.key}가 비어 있습니다.`);
-      return text;
-    }
-    if (!text || !Number.isFinite(Number(text))) throw new Error(`${field.key}가 유효한 숫자가 아닙니다.`);
-    const value = Number(text);
-    if (field.kind === "integer" && !Number.isInteger(value)) throw new Error(`${field.key}는 정수여야 합니다.`);
-    return field.kind === "percent" ? value / 100 : value;
-  }
-
-  function serializeInputValue(field, value) {
-    if (field.kind === "percent") return String(Number(value) * 100);
-    return String(value);
-  }
-
-  function entryByResultKey(manifest, resultKey) {
-    return manifest.entries.find((entry) => entry.resultKey === resultKey) || null;
-  }
-
-  function entryByPresetId(manifest, presetId) {
-    return manifest.entries.find((entry) => entry.presetId === presetId) || null;
-  }
-
-  function applyResearchInputDependencies(normalizedInputs) {
-    if (integer(normalizedInputs.evaluation_window_days)) {
-      const minimumObservations = Math.max(252, Number(normalizedInputs.evaluation_window_days) - 252);
-      normalizedInputs.min_evaluation_observations = minimumObservations;
-      normalizedInputs.min_daily_risk_observations = minimumObservations;
-    }
-    return normalizedInputs;
-  }
-
-  function researchInputsFromNormalizedInputs(normalizedInputs) {
-    const result = { version: RESEARCH_INPUTS_VERSION };
-    Object.entries(RESEARCH_INPUT_PARITY).forEach(([publicKey, normalizedKey]) => {
-      requireCondition(
-        Object.prototype.hasOwnProperty.call(normalizedInputs, normalizedKey),
-        `로컬 API 입력에 ${normalizedKey}가 없습니다.`,
-      );
-      result[publicKey] = normalizedInputs[normalizedKey];
-    });
-    requireCondition(
-      integer(normalizedInputs.evaluation_window_days)
-        && Number(normalizedInputs.evaluation_window_days) % 252 === 0,
-      "evaluation_window_days는 252의 정수배여야 합니다.",
-    );
-    result.evaluationYears = Number(normalizedInputs.evaluation_window_days) / 252;
-    result.evaluationWindowDays = Number(normalizedInputs.evaluation_window_days);
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!isRecord(value)) return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = canonicalValue(value[key]);
     return result;
-  }
+  }, {});
+}
 
-  function localApiRequestFromStaticState(manifest, requestedInputs) {
-    const baseEntry = entryByResultKey(manifest, manifest.defaultResultKey);
-    requireCondition(baseEntry, "manifest 기본 최신 entry가 없습니다.");
-    const normalizedInputs = cloneJson(baseEntry.normalizedInputs);
-    INPUT_FIELDS.forEach((field) => {
+function canonicalString(value) {
+  return JSON.stringify(canonicalValue(value));
+}
+
+function sameJson(left, right) {
+  return canonicalString(left) === canonicalString(right);
+}
+
+function requireCondition(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function closeNumber(left, right, tolerance = 1e-9) {
+  if (!finite(left) || !finite(right)) return false;
+  const scale = Math.max(1, Math.abs(Number(left)), Math.abs(Number(right)));
+  return Math.abs(Number(left) - Number(right)) <= tolerance * scale;
+}
+
+const strictJsonNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+const nonnegativeInteger = (value) => (
+  strictJsonNumber(value) && Number.isInteger(value) && value >= 0
+);
+const requiredText = (value) => typeof value === 'string' && value.trim().length > 0;
+
+function exactRecordKeys(value, expectedKeys) {
+  return isRecord(value)
+    && sameJson(Object.keys(value).sort(), [...expectedKeys].sort());
+}
+
+function compareWeightSymbolOrder(left, right) {
+  const weightDifference = Number(right.weight) - Number(left.weight);
+  return weightDifference || String(left.symbol).localeCompare(String(right.symbol));
+}
+
+function validateIdentity(identity, resultKey, label, options = {}) {
+  requireCondition(isRecord(identity), `${label} resultIdentity가 없습니다.`);
+  requireCondition(
+    identity.identityVersion === RESULT_IDENTITY_VERSION,
+    `${label} identityVersion이 지원되지 않습니다.`,
+  );
+  requireCondition(
+    identity.keyParts?.identityVersion === RESULT_IDENTITY_VERSION,
+    `${label} keyParts identityVersion이 지원되지 않습니다.`,
+  );
+  requireCondition(
+    identity.keyParts?.canonicalJsonVersion === CANONICAL_JSON_VERSION,
+    `${label} canonical JSON version이 지원되지 않습니다.`,
+  );
+  requireCondition(
+    identity.resultKey === resultKey && validSha256(identity.resultKey),
+    `${label} resultKey가 일치하지 않습니다.`,
+  );
+  requireCondition(isRecord(identity.keyParts), `${label} keyParts가 없습니다.`);
+  requireCondition(
+    isRecord(identity.keyParts.normalizedInputs),
+    `${label} normalizedInputs가 없습니다.`,
+  );
+  const canonicalTransport = identity.canonicalKeyPartsJson;
+  if (options.requireCanonicalTransport !== false) {
+    requireCondition(
+      typeof canonicalTransport === 'string' && canonicalTransport,
+      `${label} canonicalKeyPartsJson이 없습니다.`,
+    );
+  }
+  if (canonicalTransport === undefined && options.requireCanonicalTransport === false) return;
+  let canonicalKeyParts;
+  try {
+    canonicalKeyParts = JSON.parse(canonicalTransport);
+  } catch (_error) {
+    throw new Error(`${label} canonicalKeyPartsJson이 유효한 JSON이 아닙니다.`);
+  }
+  requireCondition(
+    sameJson(canonicalKeyParts, identity.keyParts),
+    `${label} canonicalKeyPartsJson이 keyParts와 다릅니다.`,
+  );
+  requireCondition(
+    canonicalString(identity.keyParts) === canonicalTransport,
+    `${label} canonicalKeyPartsJson이 RFC 8785 JCS encoding이 아닙니다.`,
+  );
+}
+
+function validateManifest(manifest) {
+  requireCondition(isRecord(manifest), '정적 grid manifest가 JSON 객체가 아닙니다.');
+  requireCondition(
+    manifest.schemaVersion === MANIFEST_SCHEMA_VERSION,
+    '지원하지 않는 manifest schema입니다.',
+  );
+  requireCondition(manifest.contract === MANIFEST_CONTRACT, 'manifest contract가 일치하지 않습니다.');
+  requireCondition(
+    manifest.gridVersion === MANIFEST_GRID_VERSION,
+    'manifest gridVersion이 일치하지 않습니다.',
+  );
+  requireCondition(manifest.bounded === true, '정적 grid가 bounded 계약을 선언하지 않았습니다.');
+  requireCondition(
+    integer(manifest.maxEntries)
+      && Number(manifest.maxEntries) >= 1
+      && Number(manifest.maxEntries) <= 64,
+    'manifest maxEntries가 잘못되었습니다.',
+  );
+  requireCondition(
+    Array.isArray(manifest.entries) && manifest.entries.length > 0,
+    'manifest entry가 없습니다.',
+  );
+  requireCondition(
+    manifest.entryCount === manifest.entries.length
+      && manifest.entries.length <= manifest.maxEntries,
+    'manifest entry 수가 일관되지 않습니다.',
+  );
+  requireCondition(validSha256(manifest.defaultResultKey), 'manifest defaultResultKey가 잘못되었습니다.');
+
+  const resultKeys = new Set();
+  const inputTuples = new Set();
+  const presetIds = new Set();
+  let declaredPresetCount = 0;
+  manifest.entries.forEach((entry, index) => {
+    const label = `manifest.entries[${index}]`;
+    requireCondition(
+      isRecord(entry) && validSha256(entry.resultKey),
+      `${label} resultKey가 잘못되었습니다.`,
+    );
+    requireCondition(!resultKeys.has(entry.resultKey), 'manifest에 중복 resultKey가 있습니다.');
+    resultKeys.add(entry.resultKey);
+    requireCondition(isRecord(entry.normalizedInputs), `${label} normalizedInputs가 없습니다.`);
+    validateIdentity(entry.identity, entry.resultKey, label);
+    requireCondition(
+      sameJson(entry.normalizedInputs, entry.identity.keyParts.normalizedInputs),
+      `${label} normalizedInputs가 identity와 다릅니다.`,
+    );
+    const inputTuple = canonicalString(entry.normalizedInputs);
+    requireCondition(!inputTuples.has(inputTuple), 'manifest에 중복 입력 tuple이 있습니다.');
+    inputTuples.add(inputTuple);
+    if (Object.prototype.hasOwnProperty.call(entry, 'presetId')) {
       requireCondition(
-        Object.prototype.hasOwnProperty.call(requestedInputs, field.key),
-        `요청 URL에 공개 입력 ${field.key}가 없습니다.`,
+        typeof entry.presetId === 'string' && PRESET_ID_PATTERN.test(entry.presetId),
+        `${label} presetId가 잘못되었습니다.`,
       );
-      normalizedInputs[field.key] = requestedInputs[field.key];
-    });
-    applyResearchInputDependencies(normalizedInputs);
-    return { baseEntry, requestedInputs: normalizedInputs };
-  }
+      requireCondition(!presetIds.has(entry.presetId), 'manifest에 중복 presetId가 있습니다.');
+      presetIds.add(entry.presetId);
+      declaredPresetCount += 1;
+    }
+    requireCondition(
+      entry.detail?.path === `results/${entry.resultKey}.json`,
+      `${label} detail path가 잘못되었습니다.`,
+    );
+    requireCondition(
+      entry.summary?.path === `summaries/${entry.resultKey}.json`,
+      `${label} summary path가 잘못되었습니다.`,
+    );
+    requireCondition(
+      validSha256(entry.detail?.sha256)
+        && integer(entry.detail?.bytes)
+        && Number(entry.detail.bytes) > 0,
+      `${label} detail reference가 잘못되었습니다.`,
+    );
+    requireCondition(
+      validSha256(entry.summary?.sha256)
+        && integer(entry.summary?.bytes)
+        && Number(entry.summary.bytes) > 0,
+      `${label} summary reference가 잘못되었습니다.`,
+    );
+  });
+  requireCondition(
+    declaredPresetCount === 0 || declaredPresetCount === manifest.entries.length,
+    'manifest presetId는 모든 entry에 있거나 모두 없어야 합니다.',
+  );
+  requireCondition(resultKeys.has(manifest.defaultResultKey), 'manifest 기본 entry가 없습니다.');
+  return manifest;
+}
 
-  function requestFromSearch(manifest, search) {
-    const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
-    const requestedResultKey = params.get("result") || manifest.defaultResultKey;
-    const requestedPresetId = params.get("preset");
-    if (!validSha256(requestedResultKey)) {
-      return { baseEntry: null, requestedInputs: null, entry: null, error: `resultKey가 잘못되었습니다. ${LOCAL_API_REQUIRED}` };
-    }
-    if (requestedPresetId !== null && !PRESET_ID_PATTERN.test(requestedPresetId)) {
-      return { baseEntry: null, requestedInputs: null, entry: null, error: `presetId가 잘못되었습니다. ${LOCAL_API_REQUIRED}` };
-    }
-    let baseEntry = entryByResultKey(manifest, requestedResultKey);
-    let recoveredFromRotatedResult = false;
-    if (!baseEntry && requestedPresetId !== null) {
-      baseEntry = entryByPresetId(manifest, requestedPresetId);
-      recoveredFromRotatedResult = baseEntry !== null;
-    }
-    if (!baseEntry) {
-      baseEntry = entryByResultKey(manifest, manifest.defaultResultKey);
-      recoveredFromRotatedResult = baseEntry !== null;
-    }
-    if (!baseEntry) return { baseEntry: null, requestedInputs: null, entry: null, error: LOCAL_API_REQUIRED };
-    const requestedInputs = cloneJson(baseEntry.normalizedInputs);
-    try {
-      INPUT_FIELDS.forEach((field) => {
-        if (params.has(field.key)) requestedInputs[field.key] = parseInputValue(field, params.get(field.key));
-      });
-      if (params.has("evaluationYears")) {
-        const evaluationYears = Number(params.get("evaluationYears"));
-        if (!Number.isInteger(evaluationYears) || evaluationYears < 1 || evaluationYears > 10) {
-          throw new Error("evaluationYears는 1–10 정수여야 합니다.");
-        }
-        const impliedWindow = evaluationYears * 252;
-        if (params.has("evaluation_window_days") && Number(requestedInputs.evaluation_window_days) !== impliedWindow) {
-          throw new Error("evaluationYears와 evaluation_window_days가 다릅니다.");
-        }
-        requestedInputs.evaluation_window_days = impliedWindow;
+function resolveExactEntry(manifest, normalizedInputs) {
+  const requested = canonicalString(normalizedInputs);
+  return manifest.entries.find((entry) => canonicalString(entry.normalizedInputs) === requested) || null;
+}
+
+function entryByResultKey(manifest, resultKey) {
+  return manifest.entries.find((entry) => entry.resultKey === resultKey) || null;
+}
+
+function entryByPresetId(manifest, presetId) {
+  return manifest.entries.find((entry) => entry.presetId === presetId) || null;
+}
+
+function parseInputValue(field, raw) {
+  const text = String(raw ?? '').trim();
+  if (field.kind === 'string') {
+    if (!text) throw new Error(`${field.key}가 비어 있습니다.`);
+    return text;
+  }
+  if (!text || !Number.isFinite(Number(text))) {
+    throw new Error(`${field.key}가 유효한 숫자가 아닙니다.`);
+  }
+  const value = Number(text);
+  if (field.kind === 'integer' && !Number.isInteger(value)) {
+    throw new Error(`${field.key}는 정수여야 합니다.`);
+  }
+  return field.kind === 'percent' ? value / 100 : value;
+}
+
+function serializeInputValue(field, value) {
+  if (field.kind === 'percent') return String(Number(value) * 100);
+  return String(value);
+}
+
+function applyResearchInputDependencies(normalizedInputs) {
+  if (integer(normalizedInputs.evaluation_window_days)) {
+    const minimumObservations = Math.max(252, Number(normalizedInputs.evaluation_window_days) - 252);
+    normalizedInputs.min_evaluation_observations = minimumObservations;
+    normalizedInputs.min_daily_risk_observations = minimumObservations;
+  }
+  return normalizedInputs;
+}
+
+function researchInputsFromNormalizedInputs(normalizedInputs) {
+  const result = { version: RESEARCH_INPUTS_VERSION };
+  Object.entries(RESEARCH_INPUT_PARITY).forEach(([publicKey, normalizedKey]) => {
+    requireCondition(
+      Object.prototype.hasOwnProperty.call(normalizedInputs, normalizedKey),
+      `로컬 API 입력에 ${normalizedKey}가 없습니다.`,
+    );
+    result[publicKey] = normalizedInputs[normalizedKey];
+  });
+  requireCondition(
+    integer(normalizedInputs.evaluation_window_days)
+      && Number(normalizedInputs.evaluation_window_days) % 252 === 0,
+    'evaluation_window_days는 252의 정수배여야 합니다.',
+  );
+  result.evaluationYears = Number(normalizedInputs.evaluation_window_days) / 252;
+  result.evaluationWindowDays = Number(normalizedInputs.evaluation_window_days);
+  return result;
+}
+
+function localApiRequestFromStaticState(manifest, requestedInputs) {
+  const baseEntry = entryByResultKey(manifest, manifest.defaultResultKey);
+  requireCondition(baseEntry, 'manifest 기본 최신 entry가 없습니다.');
+  const normalizedInputs = cloneJson(baseEntry.normalizedInputs);
+  INPUT_FIELDS.forEach((field) => {
+    requireCondition(
+      Object.prototype.hasOwnProperty.call(requestedInputs, field.key),
+      `요청 URL에 공개 입력 ${field.key}가 없습니다.`,
+    );
+    normalizedInputs[field.key] = requestedInputs[field.key];
+  });
+  applyResearchInputDependencies(normalizedInputs);
+  return { baseEntry, requestedInputs: normalizedInputs };
+}
+
+function requestFromSearch(manifest, search) {
+  const params = new URLSearchParams(String(search || '').replace(/^\?/, ''));
+  const requestedResultKey = params.get('result') || manifest.defaultResultKey;
+  const requestedPresetId = params.get('preset');
+  if (!validSha256(requestedResultKey)) {
+    return {
+      baseEntry: null,
+      requestedInputs: null,
+      entry: null,
+      error: `resultKey가 잘못되었습니다. ${LOCAL_API_REQUIRED}`,
+    };
+  }
+  if (requestedPresetId !== null && !PRESET_ID_PATTERN.test(requestedPresetId)) {
+    return {
+      baseEntry: null,
+      requestedInputs: null,
+      entry: null,
+      error: `presetId가 잘못되었습니다. ${LOCAL_API_REQUIRED}`,
+    };
+  }
+  let baseEntry = entryByResultKey(manifest, requestedResultKey);
+  let recoveredFromRotatedResult = false;
+  if (!baseEntry && requestedPresetId !== null) {
+    baseEntry = entryByPresetId(manifest, requestedPresetId);
+    recoveredFromRotatedResult = baseEntry !== null;
+  }
+  if (!baseEntry) {
+    baseEntry = entryByResultKey(manifest, manifest.defaultResultKey);
+    recoveredFromRotatedResult = baseEntry !== null;
+  }
+  if (!baseEntry) {
+    return { baseEntry: null, requestedInputs: null, entry: null, error: LOCAL_API_REQUIRED };
+  }
+  const requestedInputs = cloneJson(baseEntry.normalizedInputs);
+  try {
+    INPUT_FIELDS.forEach((field) => {
+      if (params.has(field.key)) {
+        requestedInputs[field.key] = parseInputValue(field, params.get(field.key));
       }
-      if (params.has("evaluation_window_days") || params.has("evaluationYears")) applyResearchInputDependencies(requestedInputs);
-    } catch (error) {
-      return {
-        baseEntry,
-        requestedInputs,
-        entry: null,
-        error: `${error.message} ${LOCAL_API_REQUIRED}`,
-        recoveredFromRotatedResult,
-      };
+    });
+    if (params.has('evaluationYears')) {
+      const evaluationYears = Number(params.get('evaluationYears'));
+      if (!Number.isInteger(evaluationYears) || evaluationYears < 1 || evaluationYears > 10) {
+        throw new Error('evaluationYears는 1–10 정수여야 합니다.');
+      }
+      const impliedWindow = evaluationYears * 252;
+      if (
+        params.has('evaluation_window_days')
+        && Number(requestedInputs.evaluation_window_days) !== impliedWindow
+      ) {
+        throw new Error('evaluationYears와 evaluation_window_days가 다릅니다.');
+      }
+      requestedInputs.evaluation_window_days = impliedWindow;
     }
-    const entry = resolveExactEntry(manifest, requestedInputs);
+    if (params.has('evaluation_window_days') || params.has('evaluationYears')) {
+      applyResearchInputDependencies(requestedInputs);
+    }
+  } catch (error) {
     return {
       baseEntry,
       requestedInputs,
-      entry,
-      error: entry ? null : LOCAL_API_REQUIRED,
+      entry: null,
+      error: `${error.message} ${LOCAL_API_REQUIRED}`,
       recoveredFromRotatedResult,
     };
   }
+  const entry = resolveExactEntry(manifest, requestedInputs);
+  return {
+    baseEntry,
+    requestedInputs,
+    entry,
+    error: entry ? null : LOCAL_API_REQUIRED,
+    recoveredFromRotatedResult,
+  };
+}
 
-  function searchForRequest(resultKey, normalizedInputs, presetId = null) {
-    const params = new URLSearchParams();
-    params.set("result", resultKey);
-    if (presetId !== null) params.set("preset", presetId);
-    INPUT_FIELDS.forEach((field) => {
-      if (Object.prototype.hasOwnProperty.call(normalizedInputs, field.key)) {
-        params.set(field.key, serializeInputValue(field, normalizedInputs[field.key]));
-      }
-    });
-    if (integer(normalizedInputs.evaluation_window_days) && Number(normalizedInputs.evaluation_window_days) % 252 === 0) {
-      params.set("evaluationYears", String(Number(normalizedInputs.evaluation_window_days) / 252));
+function searchForRequest(resultKey, normalizedInputs, presetId = null) {
+  const params = new URLSearchParams();
+  params.set('result', resultKey);
+  if (presetId !== null) params.set('preset', presetId);
+  INPUT_FIELDS.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(normalizedInputs, field.key)) {
+      params.set(field.key, serializeInputValue(field, normalizedInputs[field.key]));
     }
-    return `?${params.toString()}`;
+  });
+  if (
+    integer(normalizedInputs.evaluation_window_days)
+    && Number(normalizedInputs.evaluation_window_days) % 252 === 0
+  ) {
+    params.set(
+      'evaluationYears',
+      String(Number(normalizedInputs.evaluation_window_days) / 252),
+    );
   }
+  return `?${params.toString()}`;
+}
 
-  function policyDefinition(payload, policyId) {
-    return payload.weightingPolicyRegistry.policies[policyId] || {};
-  }
+function pairKey(row) {
+  return `${row.factor}::${row.policy_id}`;
+}
 
-  function policyLabel(payload, policyId) {
-    return policyDefinition(payload, policyId).label || policyId || "—";
-  }
+function rowReasonCodes(row) {
+  return [...new Set([
+    ...(Array.isArray(row.guardrail_breaches) ? row.guardrail_breaches : []),
+    ...(Array.isArray(row.contribution_guardrail_breaches)
+      ? row.contribution_guardrail_breaches
+      : []),
+    ...(Array.isArray(row.exclusion_reason_codes) ? row.exclusion_reason_codes : []),
+  ].filter(
+    (value) => typeof value === 'string' && value.trim(),
+  ).map((value) => value.trim()))];
+}
 
-  function pairKey(row) {
-    return `${row.factor}::${row.policy_id}`;
-  }
+function validateTargetAllocation(payload) {
+  const target = payload.currentResearchTarget;
+  const config = payload.config;
+  requireCondition(isRecord(target) && isRecord(config), 'currentResearchTarget/config가 없습니다.');
+  const maxWeight = Number(config.max_weight);
+  requireCondition(
+    finite(maxWeight) && maxWeight > 0 && maxWeight <= 1,
+    'config.max_weight가 잘못되었습니다.',
+  );
+  requireCondition(Array.isArray(target.weights), 'currentResearchTarget.weights가 배열이 아닙니다.');
+  requireCondition(
+    integer(target.selectedSecurityCount)
+      && Number(target.selectedSecurityCount) === target.weights.length,
+    'currentResearchTarget 종목 수가 다릅니다.',
+  );
+  requireCondition(
+    integer(config.top_n)
+      && Number(config.top_n) >= 1
+      && Number(config.top_n) <= 50
+      && target.weights.length <= Number(config.top_n),
+    'currentResearchTarget 종목 수 또는 Top-N이 잘못되었습니다.',
+  );
+  requireCondition(
+    integer(target.eligibleSecurityCount)
+      && Number(target.eligibleSecurityCount) >= target.weights.length,
+    'currentResearchTarget 적격 종목 수가 잘못되었습니다.',
+  );
 
-  function rowReasonCodes(row) {
-    return [...new Set([
-      ...(Array.isArray(row.guardrail_breaches) ? row.guardrail_breaches : []),
-      ...(Array.isArray(row.contribution_guardrail_breaches) ? row.contribution_guardrail_breaches : []),
-      ...(Array.isArray(row.exclusion_reason_codes) ? row.exclusion_reason_codes : []),
-    ].filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
-  }
+  const symbols = new Set();
+  const weights = target.weights.map((row, index) => {
+    const symbol = typeof row?.symbol === 'string' ? row.symbol.trim().toUpperCase() : '';
+    const weight = Number(row?.weight);
+    requireCondition(
+      isRecord(row)
+        && row.rank === index + 1
+        && symbol
+        && !symbols.has(symbol)
+        && finite(row.factorScore)
+        && finite(weight)
+        && weight > 0
+        && weight <= maxWeight + 1e-12,
+      'currentResearchTarget 보유 행이 잘못되었습니다.',
+    );
+    if (Object.prototype.hasOwnProperty.call(row, 'maxWeight')) {
+      requireCondition(
+        closeNumber(row.maxWeight, maxWeight),
+        '보유 행 maxWeight가 config와 다릅니다.',
+      );
+    }
+    symbols.add(symbol);
+    return weight;
+  });
+  const cashWeight = Number(target.cashWeight);
+  requireCondition(
+    finite(cashWeight) && cashWeight >= 0 && cashWeight <= 1,
+    'currentResearchTarget 현금 비중이 잘못되었습니다.',
+  );
+  requireCondition(
+    closeNumber(weights.reduce((sum, value) => sum + value, 0) + cashWeight, 1),
+    'currentResearchTarget 비중과 현금의 합이 1이 아닙니다.',
+  );
 
-  function rankingRow(factor, policyId) {
-    return state.payload.factorPolicyRanking.find((row) => row.factor === factor && row.policy_id === policyId) || null;
-  }
+  const concentration = target.concentration;
+  requireCondition(isRecord(concentration), 'currentResearchTarget concentration이 없습니다.');
+  const invested = weights.reduce((sum, value) => sum + value, 0);
+  const normalized = invested > 0 ? weights.map((value) => value / invested) : [];
+  const hhi = normalized.reduce((sum, value) => sum + value * value, 0);
+  const ordered = weights.slice().sort((left, right) => right - left);
+  const expected = {
+    investedWeight: invested,
+    cashWeight,
+    riskySleeveHhi: hhi,
+    effectiveNames: hhi > 0 ? 1 / hhi : 0,
+    top1Weight: ordered.slice(0, 1).reduce((sum, value) => sum + value, 0),
+    top5Weight: ordered.slice(0, 5).reduce((sum, value) => sum + value, 0),
+    maxWeight: ordered[0] || 0,
+  };
+  Object.entries(expected).forEach(([field, value]) => {
+    requireCondition(
+      closeNumber(concentration[field], value),
+      `currentResearchTarget concentration.${field}가 잘못되었습니다.`,
+    );
+  });
+  return { target, maxWeight };
+}
 
-  function detailRankingRow() {
-    return state.payload.factorPolicyRanking.find((row) => pairKey(row) === state.detailPairKey) || null;
-  }
-
-  function definitionFor(factor) {
-    return state.payload.factorDefinitions.find((row) => row.factor === factor) || {};
-  }
-
-  function closeNumber(left, right, tolerance = 1e-9) {
-    if (!finite(left) || !finite(right)) return false;
-    const scale = Math.max(1, Math.abs(Number(left)), Math.abs(Number(right)));
-    return Math.abs(Number(left) - Number(right)) <= tolerance * scale;
-  }
-
-  function validateTargetAllocation(payload) {
-    const target = payload.currentResearchTarget;
-    const config = payload.config;
-    requireCondition(isRecord(target) && isRecord(config), "currentResearchTarget/config가 없습니다.");
-    const maxWeight = Number(config.max_weight);
-    requireCondition(finite(maxWeight) && maxWeight > 0 && maxWeight <= 1, "config.max_weight가 잘못되었습니다.");
-    requireCondition(Array.isArray(target.weights), "currentResearchTarget.weights가 배열이 아닙니다.");
-    requireCondition(integer(target.selectedSecurityCount) && Number(target.selectedSecurityCount) === target.weights.length, "currentResearchTarget 종목 수가 다릅니다.");
-    requireCondition(integer(config.top_n) && Number(config.top_n) >= 1 && target.weights.length <= Number(config.top_n), "currentResearchTarget 종목 수가 Top-N을 초과합니다.");
-    requireCondition(integer(target.eligibleSecurityCount) && Number(target.eligibleSecurityCount) >= target.weights.length, "currentResearchTarget 적격 종목 수가 잘못되었습니다.");
-
+function validateFactorPortfolios(payload) {
+  const portfolios = payload.factorPortfolios;
+  const definitions = payload.factorDefinitions;
+  const config = payload.config;
+  requireCondition(
+    isRecord(portfolios) && Array.isArray(definitions) && isRecord(config),
+    'factorPortfolios/factorDefinitions/config가 없습니다.',
+  );
+  const expectedFactors = definitions.map((row) => row?.factor).filter(Boolean).sort();
+  requireCondition(
+    expectedFactors.length === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
+      && sameJson(Object.keys(portfolios).sort(), expectedFactors),
+    'factorPortfolios가 64개 팩터 정의를 정확히 포함하지 않습니다.',
+  );
+  const maxWeight = Number(config.max_weight);
+  const topN = Number(config.top_n);
+  const selectedPolicy = payload.weightingPolicyRegistry?.policies?.[payload.selectedWeightingPolicy];
+  requireCondition(
+    isRecord(selectedPolicy) && typeof selectedPolicy.version === 'string',
+    '선택 weighting policy registry가 없습니다.',
+  );
+  expectedFactors.forEach((factor) => {
+    const target = portfolios[factor];
+    requireCondition(
+      isRecord(target)
+        && target.factor === factor
+        && target.weightingPolicyId === payload.selectedWeightingPolicy
+        && target.asOf === payload.data.asOf
+        && target.signalDate === payload.data.asOf
+        && target.targetType === 'current_research_target'
+        && target.executionTiming === 'next_available_session_close_after_signal'
+        && target.weightingPolicyVersion === selectedPolicy.version
+        && ['available', 'unavailable'].includes(target.status)
+        && Array.isArray(target.weights)
+        && Array.isArray(target.reasons)
+        && integer(target.selectedSecurityCount)
+        && Number(target.selectedSecurityCount) === target.weights.length
+        && integer(target.eligibleSecurityCount)
+        && Number(target.eligibleSecurityCount) >= target.weights.length
+        && target.weights.length <= topN,
+      `factorPortfolios.${factor}의 identity/status/count 계약이 잘못되었습니다.`,
+    );
     const symbols = new Set();
-    const weights = target.weights.map((row, index) => {
-      const symbol = typeof row?.symbol === "string" ? row.symbol.trim().toUpperCase() : "";
+    const weights = [];
+    let invested = 0;
+    target.weights.forEach((row, index) => {
+      const symbol = typeof row?.symbol === 'string' ? row.symbol.trim().toUpperCase() : '';
       const weight = Number(row?.weight);
       requireCondition(
         isRecord(row)
@@ -448,1365 +1138,7232 @@
           && finite(row.factorScore)
           && finite(weight)
           && weight > 0
-          && weight <= maxWeight + 1e-12,
-        "currentResearchTarget 보유 행이 잘못되었습니다.",
+          && weight <= maxWeight + 1e-12
+          && (!Object.prototype.hasOwnProperty.call(row, 'maxWeight') || closeNumber(row.maxWeight, maxWeight)),
+        `factorPortfolios.${factor}.weights[${index}]가 잘못되었습니다.`,
       );
-      if (Object.prototype.hasOwnProperty.call(row, "maxWeight")) {
-        requireCondition(closeNumber(row.maxWeight, maxWeight), "보유 행 maxWeight가 config와 다릅니다.");
-      }
       symbols.add(symbol);
-      return weight;
+      weights.push(weight);
+      invested += weight;
     });
-    const cashWeight = Number(target.cashWeight);
-    requireCondition(finite(cashWeight) && cashWeight >= 0 && cashWeight <= 1, "currentResearchTarget 현금 비중이 잘못되었습니다.");
-    requireCondition(closeNumber(weights.reduce((sum, value) => sum + value, 0) + cashWeight, 1), "currentResearchTarget 비중과 현금의 합이 1이 아닙니다.");
-
-    const concentration = target.concentration;
-    requireCondition(isRecord(concentration), "currentResearchTarget concentration이 없습니다.");
-    const invested = weights.reduce((sum, value) => sum + value, 0);
-    const normalized = invested > 0 ? weights.map((value) => value / invested) : [];
-    const hhi = normalized.reduce((sum, value) => sum + value * value, 0);
+    const cash = Number(target.cashWeight);
+    const eligibleCount = Number(target.eligibleSecurityCount);
+    const expectedSelectionFraction = eligibleCount > 0 ? weights.length / eligibleCount : 0;
+    requireCondition(
+      finite(cash)
+        && cash >= 0
+        && cash <= 1
+        && closeNumber(invested + cash, 1)
+        && isRecord(target.concentration)
+        && closeNumber(target.selectionFraction, expectedSelectionFraction),
+      `factorPortfolios.${factor}의 비중/현금/집중도 계약이 잘못되었습니다.`,
+    );
+    const normalized = invested > 0 ? weights.map((weight) => weight / invested) : [];
+    const riskySleeveHhi = normalized.reduce((sum, weight) => sum + weight * weight, 0);
     const ordered = weights.slice().sort((left, right) => right - left);
-    const expected = {
+    const expectedConcentration = {
       investedWeight: invested,
-      cashWeight,
-      riskySleeveHhi: hhi,
-      effectiveNames: hhi > 0 ? 1 / hhi : 0,
-      top1Weight: ordered.slice(0, 1).reduce((sum, value) => sum + value, 0),
-      top5Weight: ordered.slice(0, 5).reduce((sum, value) => sum + value, 0),
+      cashWeight: cash,
+      riskySleeveHhi,
+      effectiveNames: riskySleeveHhi > 0 ? 1 / riskySleeveHhi : 0,
+      top1Weight: ordered.slice(0, 1).reduce((sum, weight) => sum + weight, 0),
+      top5Weight: ordered.slice(0, 5).reduce((sum, weight) => sum + weight, 0),
       maxWeight: ordered[0] || 0,
     };
-    Object.entries(expected).forEach(([field, value]) => {
-      requireCondition(closeNumber(concentration[field], value), `currentResearchTarget concentration.${field}가 잘못되었습니다.`);
-    });
-    return { target, maxWeight };
-  }
-
-  function expectedGuardrailProfile(researchInputs) {
-    requireCondition(isRecord(researchInputs), "guardrailProfile researchInputs가 없습니다.");
-    const thresholdFields = [
-      "selectionMinSharpe",
-      "selectionMaxDrawdown",
-      "selectionMaxAnnualizedCostDrag",
-      "selectionMinEffectiveNames",
-      "selectionMaxTargetHhi",
-      "selectionMaxTargetWeight",
-      "selectionMaxAbsSecurityDayContribution",
-      "selectionMaxSecurityAbsoluteContributionShare",
-      "selectionMaxLeaveOneSecurityCagrDelta",
-      "selectionExtremeEventPenaltyPoints",
-    ];
-    thresholdFields.forEach((field) => {
-      requireCondition(finite(researchInputs[field]), `researchInputs.${field}가 잘못되었습니다.`);
-    });
-    requireCondition(
-      ["warn", "penalize", "exclude"].includes(researchInputs.selectionExtremeEventAction),
-      "researchInputs.selectionExtremeEventAction이 잘못되었습니다.",
-    );
-    return {
-      id: ABSOLUTE_GUARDRAIL_VERSION,
-      version: 1,
-      policyNeutral: true,
-      rules: [
-        {
-          id: "minimum_sharpe",
-          metric: "sharpe",
-          operator: ">=",
-          threshold: researchInputs.selectionMinSharpe,
-          unit: "ratio",
-        },
-        {
-          id: "maximum_drawdown_magnitude",
-          metric: "max_drawdown",
-          operator: ">=",
-          threshold: -Number(researchInputs.selectionMaxDrawdown),
-          unit: "fraction",
-        },
-        {
-          id: "maximum_annualized_cost_drag",
-          metric: "annualized_cost_drag",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxAnnualizedCostDrag,
-          unit: "fraction_per_year",
-        },
-        {
-          id: "minimum_historical_target_effective_names",
-          metric: "min_target_effective_names",
-          operator: ">=",
-          threshold: researchInputs.selectionMinEffectiveNames,
-          unit: "names",
-        },
-        {
-          id: "minimum_current_target_effective_names",
-          metric: "current_target_effective_names",
-          operator: ">=",
-          threshold: researchInputs.selectionMinEffectiveNames,
-          unit: "names",
-        },
-        {
-          id: "maximum_historical_target_hhi",
-          metric: "max_target_hhi",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxTargetHhi,
-          unit: "fraction",
-        },
-        {
-          id: "maximum_current_target_hhi",
-          metric: "current_target_hhi",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxTargetHhi,
-          unit: "fraction",
-        },
-        {
-          id: "maximum_historical_target_weight",
-          metric: "max_target_weight",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxTargetWeight,
-          unit: "fraction",
-        },
-        {
-          id: "maximum_current_target_weight",
-          metric: "current_target_max_weight",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxTargetWeight,
-          unit: "fraction",
-        },
-        {
-          id: "maximum_security_day_contribution",
-          metric: "max_abs_security_day_contribution",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxAbsSecurityDayContribution,
-          unit: "portfolio_return_fraction",
-        },
-        {
-          id: "maximum_security_absolute_contribution_share",
-          metric: "max_security_absolute_contribution_share",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxSecurityAbsoluteContributionShare,
-          unit: "fraction",
-        },
-        {
-          id: "maximum_leave_one_security_cagr_delta",
-          metric: "max_abs_leave_one_security_cagr_delta",
-          operator: "<=",
-          threshold: researchInputs.selectionMaxLeaveOneSecurityCagrDelta,
-          unit: "cagr_fraction",
-        },
-      ],
-      requiredContracts: {
-        completePolicyInputs: true,
-        completeExecutionCoverage: true,
-        currentTargetAvailable: true,
-        contributionDiagnosticsComplete: true,
-      },
-      extremeEventAction: researchInputs.selectionExtremeEventAction,
-      extremeEventPenaltyPoints: researchInputs.selectionExtremeEventPenaltyPoints,
-    };
-  }
-
-  function validateGuardrailProfile(payload) {
-    const profile = payload.selectionDecision?.guardrailProfile;
-    requireCondition(isRecord(profile), "selectionDecision.guardrailProfile이 없습니다.");
-    requireCondition(
-      Array.isArray(profile.rules) && profile.rules.length === 12,
-      "guardrailProfile은 정확히 12개 규칙이어야 합니다.",
-    );
-    requireCondition(
-      sameJson(profile, expectedGuardrailProfile(payload.researchInputs)),
-      "guardrailProfile이 researchInputs 기반 exact 계약과 다릅니다.",
-    );
-    return profile;
-  }
-
-  function concentrationGuardrailExpectations(row, researchInputs) {
-    return {
-      guardrail_historical_effective_names:
-        Number(row.min_target_effective_names) >= Number(researchInputs.selectionMinEffectiveNames),
-      guardrail_current_effective_names:
-        Number(row.current_target_effective_names) >= Number(researchInputs.selectionMinEffectiveNames),
-      guardrail_historical_target_hhi:
-        Number(row.max_target_hhi) <= Number(researchInputs.selectionMaxTargetHhi),
-      guardrail_current_target_hhi:
-        Number(row.current_target_hhi) <= Number(researchInputs.selectionMaxTargetHhi),
-      guardrail_historical_target_weight:
-        Number(row.max_target_weight) <= Number(researchInputs.selectionMaxTargetWeight),
-      guardrail_current_target_weight:
-        Number(row.current_target_max_weight) <= Number(researchInputs.selectionMaxTargetWeight),
-    };
-  }
-
-  function validateRankingConcentrationGuardrails(payload) {
-    const metricDomains = {
-      min_target_effective_names: (value) => value >= 0,
-      current_target_effective_names: (value) => value >= 0,
-      max_target_hhi: (value) => value >= 0 && value <= 1,
-      current_target_hhi: (value) => value >= 0 && value <= 1,
-      max_target_weight: (value) => value >= 0 && value <= 1,
-      current_target_max_weight: (value) => value >= 0 && value <= 1,
-    };
-    payload.factorPolicyRanking.forEach((row, index) => {
-      Object.entries(metricDomains).forEach(([field, validDomain]) => {
-        const value = Number(row[field]);
-        requireCondition(
-          finite(row[field]) && validDomain(value),
-          `factorPolicyRanking[${index}].${field}가 잘못되었습니다.`,
-        );
-      });
-      Object.entries(concentrationGuardrailExpectations(row, payload.researchInputs)).forEach(
-        ([field, expected]) => {
-          requireCondition(
-            row[field] === expected,
-            `factorPolicyRanking[${index}].${field}가 집중도 임계값과 다릅니다.`,
-          );
-        },
-      );
-    });
-  }
-
-  function validateSelectedConcentrationGuardrails(payload, row, target) {
-    const concentration = target.concentration;
-    const metrics = {
-      min_target_effective_names: Number(row.min_target_effective_names),
-      current_target_effective_names: Number(row.current_target_effective_names),
-      max_target_hhi: Number(row.max_target_hhi),
-      current_target_hhi: Number(row.current_target_hhi),
-      max_target_weight: Number(row.max_target_weight),
-      current_target_max_weight: Number(row.current_target_max_weight),
-    };
-    Object.entries(metrics).forEach(([field, value]) => {
-      requireCondition(finite(value), `선택 행 집중도 지표가 잘못되었습니다: ${field}`);
-    });
-    requireCondition(
-      closeNumber(metrics.current_target_effective_names, concentration.effectiveNames)
-        && closeNumber(metrics.current_target_hhi, concentration.riskySleeveHhi)
-        && closeNumber(metrics.current_target_max_weight, concentration.maxWeight),
-      "선택 행의 현재 집중도 지표가 currentResearchTarget과 다릅니다.",
-    );
-    const expected = concentrationGuardrailExpectations(row, payload.researchInputs);
-    requireCondition(
-      Object.values(expected).every(Boolean),
-      "선택 조합이 역사상 최악값 또는 현재 집중도 절대 가드레일을 통과하지 못했습니다.",
-    );
-    requireCondition(
-      row.absolute_guardrail_pass === true
-        && row.selection_eligible === true
-        && row.selection_status === "eligible"
-        && row.selected === true,
-      "선택 행이 pass/eligible/selected 계약을 충족하지 않습니다.",
-    );
-  }
-
-  function validateGridAccounting(payload) {
-    const accounting = payload.gridAccounting;
-    const ranking = payload.factorPolicyRanking;
-    requireCondition(isRecord(accounting), "gridAccounting이 없습니다.");
-    requireCondition(Array.isArray(ranking), "factorPolicyRanking이 배열이 아닙니다.");
-    const exactCounts = {
-      independentFactorCount: EXPECTED_INDEPENDENT_FACTOR_COUNT,
-      policyCount: EXPECTED_POLICY_COUNT,
-      expectedIndependentPairCount: EXPECTED_INDEPENDENT_PAIR_COUNT,
-      evaluatedIndependentPairCount: EXPECTED_INDEPENDENT_PAIR_COUNT,
-      missingIndependentPairCount: 0,
-      diagnosticAliasFactorCount: EXPECTED_ALIAS_FACTOR_COUNT,
-      diagnosticAliasPairCount: EXPECTED_ALIAS_PAIR_COUNT,
-    };
-    Object.entries(exactCounts).forEach(([field, expected]) => {
-      requireCondition(accounting[field] === expected, `gridAccounting.${field}가 ${expected}이 아닙니다.`);
-    });
-    requireCondition(
-      accounting.availableIndependentPairCount + accounting.excludedIndependentPairCount
-        === EXPECTED_INDEPENDENT_PAIR_COUNT,
-      "gridAccounting available + excluded가 244와 다릅니다.",
-    );
-    requireCondition(
-      ranking.length === EXPECTED_INDEPENDENT_PAIR_COUNT + EXPECTED_ALIAS_PAIR_COUNT,
-      "factorPolicyRanking 전체 행 수가 256이 아닙니다.",
-    );
-
-    const pairs = new Set();
-    ranking.forEach((row) => {
+    Object.entries(expectedConcentration).forEach(([field, value]) => {
       requireCondition(
-        isRecord(row) && typeof row.factor === "string" && typeof row.policy_id === "string",
-        "factorPolicyRanking 식별자가 잘못되었습니다.",
-      );
-      const key = pairKey(row);
-      requireCondition(!pairs.has(key), `중복 factor-policy 행입니다: ${key}`);
-      pairs.add(key);
-    });
-    const aliasRows = ranking.filter((row) => row.comparison_status === "duplicate_alias");
-    const independentRows = ranking.filter((row) => row.comparison_status !== "duplicate_alias");
-    requireCondition(aliasRows.length === EXPECTED_ALIAS_PAIR_COUNT, "diagnostic alias 행 수가 12가 아닙니다.");
-    requireCondition(
-      new Set(aliasRows.map((row) => row.factor)).size === EXPECTED_ALIAS_FACTOR_COUNT,
-      "diagnostic alias 팩터 수가 3이 아닙니다.",
-    );
-    requireCondition(independentRows.length === EXPECTED_INDEPENDENT_PAIR_COUNT, "독립 factor-policy 행 수가 244가 아닙니다.");
-    requireCondition(
-      new Set(independentRows.map((row) => row.factor)).size === EXPECTED_INDEPENDENT_FACTOR_COUNT,
-      "독립 팩터 수가 61이 아닙니다.",
-    );
-    requireCondition(
-      new Set(independentRows.map((row) => row.policy_id)).size === EXPECTED_POLICY_COUNT,
-      "비중 정책 수가 4가 아닙니다.",
-    );
-    const policyIds = [...new Set(independentRows.map((row) => row.policy_id))].sort();
-    const rowsByFactor = new Map();
-    independentRows.forEach((row) => {
-      if (!rowsByFactor.has(row.factor)) rowsByFactor.set(row.factor, []);
-      rowsByFactor.get(row.factor).push(row);
-    });
-    rowsByFactor.forEach((rows, factor) => {
-      requireCondition(
-        sameJson(rows.map((row) => row.policy_id).sort(), policyIds),
-        `독립 팩터의 4개 정책 grid가 불완전합니다: ${factor}`,
+        closeNumber(target.concentration[field], value),
+        `factorPortfolios.${factor}.concentration.${field}가 잘못되었습니다.`,
       );
     });
-    const commonComparableFactorCount = [...rowsByFactor.values()].filter(
-      (rows) => rows.every((row) => row.comparison_status === "available"),
-    ).length;
-    requireCondition(
-      commonComparableFactorCount === accounting.commonComparableFactorCount,
-      "commonComparableFactorCount가 ranking과 다릅니다.",
-    );
-
-    const availableRows = independentRows.filter((row) => row.comparison_status === "available");
-    const excludedRows = independentRows.filter((row) => row.comparison_status !== "available");
-    requireCondition(
-      availableRows.length === accounting.availableIndependentPairCount,
-      "availableIndependentPairCount가 ranking과 다릅니다.",
-    );
-    requireCondition(
-      excludedRows.length === accounting.excludedIndependentPairCount,
-      "excludedIndependentPairCount가 ranking과 다릅니다.",
-    );
-    const observedReasonCounts = {};
-    excludedRows.forEach((row) => {
+    if (target.status === 'available') {
+      const allowedInformationReasons = new Set([
+        'top_n_boundary_tie_resolved_by_trailing_dollar_volume',
+        'fewer_complete_policy_inputs_than_top_n',
+        'max_weight_capacity_or_missing_policy_inputs',
+      ]);
+      const hasFewerInputsReason = target.reasons.includes('fewer_complete_policy_inputs_than_top_n');
+      const hasCashCapacityReason = target.reasons.includes('max_weight_capacity_or_missing_policy_inputs');
       requireCondition(
-        Array.isArray(row.exclusion_reason_codes) && row.exclusion_reason_codes.length > 0,
-        `제외 행에 exact reason code가 없습니다: ${pairKey(row)}`,
+        target.weights.length > 0
+          && new Set(target.reasons).size === target.reasons.length
+          && target.reasons.every((reason) => allowedInformationReasons.has(reason))
+          && hasFewerInputsReason === (target.weights.length < topN)
+          && hasCashCapacityReason === (cash > 1e-12),
+        `factorPortfolios.${factor} available 목표의 informational reason 계약이 잘못되었습니다.`,
       );
+    } else {
       requireCondition(
-        Array.isArray(row.exclusion_reasons) && row.exclusion_reasons.length > 0,
-        `제외 행에 structured reason이 없습니다: ${pairKey(row)}`,
+        target.weights.length === 0
+          && closeNumber(cash, 1)
+          && target.reasons.length > 0
+          && target.reasons.every((reason) => typeof reason === 'string' && reason.trim()),
+        `factorPortfolios.${factor} unavailable 목표가 fail-closed가 아닙니다.`,
       );
-      const structuredCodes = row.exclusion_reasons.map((reason) => reason?.code);
-      requireCondition(
-        sameJson([...new Set(structuredCodes)].sort(), [...new Set(row.exclusion_reason_codes)].sort()),
-        `제외 행의 reason code와 structured reason이 다릅니다: ${pairKey(row)}`,
-      );
-      row.exclusion_reason_codes.forEach((code) => {
-        requireCondition(typeof code === "string" && code, `빈 제외 reason code입니다: ${pairKey(row)}`);
-        observedReasonCounts[code] = (observedReasonCounts[code] || 0) + 1;
-      });
-    });
+    }
+  });
+  requireCondition(
+    sameJson(portfolios[payload.selectedFactor], payload.currentResearchTarget),
+    'canonical factorPortfolio가 currentResearchTarget과 다릅니다.',
+  );
+  return portfolios;
+}
+
+function validateFactorDiagnostics(payload) {
+  const diagnostics = payload.factorDiagnostics;
+  const definitions = payload.factorDefinitions;
+  requireCondition(
+    isRecord(diagnostics)
+      && diagnostics.contractVersion === 1
+      && Array.isArray(definitions),
+    'factorDiagnostics v1 계약이 없습니다.',
+  );
+  const independentDefinitions = definitions.filter((row) => (
+    row?.selection_eligible === true && !row?.compatibility_alias_of
+  ));
+  const aliasDefinitions = definitions.filter((row) => Boolean(row?.compatibility_alias_of));
+  const independent = independentDefinitions.map((row) => row.factor).sort();
+  const independentSet = new Set(independent);
+  const categoryByFactor = new Map(independentDefinitions.map((row) => [row.factor, row.category]));
+  const canonicalIsoDate = (value) => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  };
+  const optionalClose = (actual, expected) => (
+    expected === null ? actual === null : closeNumber(actual, expected)
+  );
+  const scope = diagnostics.scope;
+  requireCondition(
+    isRecord(scope)
+      && scope.factorCount === definitions.length
+      && scope.independentFactorCount === independent.length
+      && scope.diagnosticAliasCount === aliasDefinitions.length
+      && scope.aliasHandling === 'excluded_from_rankings'
+      && Array.isArray(scope.aliases)
+      && scope.aliases.length === aliasDefinitions.length,
+    'factorDiagnostics scope/alias 계약이 잘못되었습니다.',
+  );
+  const expectedAliases = aliasDefinitions.map((row) => ({
+    factor: row.factor,
+    canonicalFactor: row.compatibility_alias_of,
+  })).sort((left, right) => left.factor.localeCompare(right.factor));
+  requireCondition(
+    sameJson(scope.aliases, expectedAliases)
+      && expectedAliases.every((row) => independentSet.has(row.canonicalFactor)),
+    'factorDiagnostics alias mapping이 다릅니다.',
+  );
+
+  const rankIc = diagnostics.rankIc;
+  const rankRows = rankIc?.rows;
+  const signalDates = rankIc?.signalDates;
+  const expectedRequestedSessions = Math.min(756, Number(payload.data?.observations));
+  requireCondition(
+    isRecord(rankIc)
+      && rankIc.method === 'cross_sectional_spearman_signal_t_vs_adjusted_close_return_t_to_t_plus_21'
+      && rankIc.priceBasis === 'analysis_adjusted_close'
+      && rankIc.horizonSessions === 21
+      && rankIc.maximumSignalSessions === 756
+      && rankIc.overlapping === true
+      && integer(payload.data?.observations)
+      && integer(rankIc.requestedSignalSessions)
+      && Number(rankIc.requestedSignalSessions) === expectedRequestedSessions
+      && Array.isArray(signalDates)
+      && signalDates.length === Number(rankIc.requestedSignalSessions)
+      && signalDates.length > 21
+      && signalDates.every(canonicalIsoDate)
+      && new Set(signalDates).size === signalDates.length
+      && signalDates.at(-1) === payload.data.asOf
+      && rankIc.requestedStartDate === signalDates[0]
+      && rankIc.requestedEndDate === signalDates.at(-1)
+      && sameJson([...signalDates].sort(), signalDates)
+      && Array.isArray(rankRows)
+      && rankRows.length === independent.length
+      && sameJson(rankRows.map((row) => row.factor).sort(), independent),
+    'factorDiagnostics Rank-IC 범위/coverage 계약이 잘못되었습니다.',
+  );
+  const maximumObservations = signalDates.length - rankIc.horizonSessions;
+  const latestForwardSignalDate = signalDates.at(-rankIc.horizonSessions - 1);
+  const requiredRankFields = [
+    'rank', 'factor', 'category', 'available', 'unavailableReason', 'horizonSessions',
+    'observations', 'mean', 'median', 'standardDeviation', 'positiveRate', 'startDate',
+    'endDate', 'minimumSecurityCount', 'averageSecurityCount', 'maximumSecurityCount',
+    'latestFiniteCount',
+  ];
+  rankRows.forEach((row, index) => {
     requireCondition(
-      sameJson(observedReasonCounts, accounting.exclusionReasonCounts || {}),
-      "gridAccounting.exclusionReasonCounts가 ranking exact reasons와 다릅니다.",
+      isRecord(row)
+        && requiredRankFields.every((field) => Object.prototype.hasOwnProperty.call(row, field))
+        && row.rank === index + 1
+        && row.category === categoryByFactor.get(row.factor)
+        && typeof row.available === 'boolean'
+        && row.horizonSessions === 21
+        && integer(row.observations)
+        && Number(row.observations) >= 0
+        && Number(row.observations) <= maximumObservations
+        && integer(row.latestFiniteCount)
+        && Number(row.latestFiniteCount) >= 0
+        && Number(row.latestFiniteCount) <= Number(payload.data.latestEligibleSecurityCount),
+      `factorDiagnostics Rank-IC ${row?.factor || index} 기본 필드가 잘못되었습니다.`,
     );
-    return accounting;
-  }
+    if (row.available) {
+      requireCondition(
+        [row.mean, row.median, row.standardDeviation, row.positiveRate, row.averageSecurityCount]
+          .every(finite)
+          && row.unavailableReason === null
+          && Number(row.observations) > 0
+          && Number(row.mean) >= -1 && Number(row.mean) <= 1
+          && Number(row.median) >= -1 && Number(row.median) <= 1
+          && Number(row.standardDeviation) >= 0 && Number(row.standardDeviation) <= 1
+          && Number(row.positiveRate) >= 0 && Number(row.positiveRate) <= 1
+          && integer(row.minimumSecurityCount)
+          && integer(row.maximumSecurityCount)
+          && Number(row.minimumSecurityCount) >= 3
+          && Number(row.minimumSecurityCount) <= Number(row.averageSecurityCount)
+          && Number(row.averageSecurityCount) <= Number(row.maximumSecurityCount)
+          && Number(row.maximumSecurityCount) <= Number(payload.data.analyzedSecurityCount)
+          && signalDates.includes(row.startDate)
+          && signalDates.includes(row.endDate)
+          && row.startDate <= row.endDate
+          && row.endDate <= latestForwardSignalDate,
+        `factorDiagnostics Rank-IC ${row.factor} 값/순서가 잘못되었습니다.`,
+      );
+    } else {
+      requireCondition(
+        typeof row.unavailableReason === 'string'
+          && row.unavailableReason.trim()
+          && Number(row.observations) === 0
+          && [
+            'mean', 'median', 'standardDeviation', 'positiveRate', 'startDate', 'endDate',
+            'minimumSecurityCount', 'averageSecurityCount', 'maximumSecurityCount',
+          ].every((field) => row[field] === null),
+        `factorDiagnostics Rank-IC ${row.factor} unavailable 계약이 잘못되었습니다.`,
+      );
+    }
+  });
+  const expectedRankOrder = [...rankRows].sort((left, right) => (
+    Number(right.available) - Number(left.available)
+      || (left.available ? Number(right.mean) - Number(left.mean) : 0)
+      || Number(right.observations) - Number(left.observations)
+      || String(left.factor).localeCompare(String(right.factor))
+  ));
+  requireCondition(
+    sameJson(rankRows.map((row) => row.factor), expectedRankOrder.map((row) => row.factor))
+      && rankIc.availableFactorCount === rankRows.filter((row) => row.available).length
+      && rankIc.unavailableFactorCount === rankRows.filter((row) => !row.available).length,
+    'factorDiagnostics Rank-IC 순서/available count가 다릅니다.',
+  );
 
-  function modeLabel(mode) {
-    return {
-      live_market: "실제 시장 데이터",
-      local_file: "검토된 로컬 데이터",
-      demo: "합성 데모",
-    }[mode] || mode || "미표기";
-  }
-
-  function evidenceLabel(value) {
-    return {
-      same_sample_descriptive_actual_market: "실제 시장 · 동일 표본 설명 연구",
-      same_sample_descriptive: "동일 표본 설명 연구",
-    }[value] || value || "미표기";
-  }
-
-  function formatDigestMap(value) {
-    if (!isRecord(value)) return String(value || "—");
-    const entries = Object.entries(value)
-      .filter(([key, digest]) => key && typeof digest === "string" && digest)
-      .map(([key, digest]) => `${key}:${digest.slice(0, 12)}`);
-    return entries.length ? entries.join(" · ") : "—";
-  }
-
-  async function validateResult(entry, payload, summary = null, options = {}) {
-    const apiResult = options.source === "local_api";
-    requireCondition(isRecord(payload) && payload.schemaVersion === RESULT_SCHEMA_VERSION, "detail schemaVersion 4가 아닙니다.");
-    validateIdentity(payload.resultIdentity, entry.resultKey, "detail", { requireCanonicalTransport: !apiResult });
-    requireCondition(sameJson(payload.resultIdentity, entry.identity), apiResult
-      ? "detail resultIdentity가 로컬 API 응답 identity와 다릅니다."
-      : "detail resultIdentity가 manifest와 다릅니다.");
-    requireCondition(payload.resultKey === undefined || payload.resultKey === entry.resultKey, "detail top-level resultKey가 다릅니다.");
-    requireCondition(isRecord(payload.data) && payload.data.synthetic === false && payload.data.mode === "live_market", "결과는 실제 시장 비합성 실행이어야 합니다.");
-    requireCondition(integer(payload.data.analyzedSecurityCount) && Number(payload.data.analyzedSecurityCount) >= 2700, "결과는 2,700개 이상 종목을 분석해야 합니다.");
-    requireCondition(typeof payload.data.asOf === "string" && payload.data.asOf, "detail data.asOf가 없습니다.");
+  const redundancy = diagnostics.redundancy;
+  const redundancyRows = redundancy?.rows;
+  requireCondition(
+    isRecord(redundancy)
+      && redundancy.method === 'latest_signal_date_cross_sectional_spearman'
+      && redundancy.diagnosticDate === payload.data.asOf
+      && closeNumber(redundancy.thresholdAbs, 0.95)
+      && Array.isArray(redundancyRows)
+      && redundancyRows.length === independent.length
+      && sameJson(redundancyRows.map((row) => row.factor).sort(), independent)
+      && integer(redundancy.eligiblePairCount)
+      && Number(redundancy.eligiblePairCount) >= 0
+      && Number(redundancy.eligiblePairCount) <= independent.length * (independent.length - 1) / 2,
+    'factorDiagnostics redundancy 범위/coverage 계약이 잘못되었습니다.',
+  );
+  const latestCounts = new Map(redundancyRows.map((row) => [row.factor, Number(row.latestFiniteCount)]));
+  const requiredRedundancyFields = [
+    'rank', 'factor', 'category', 'available', 'unavailableReason', 'nearestFactor',
+    'signedCorr', 'absCorr', 'validPeerCount', 'highCorrPeerCount', 'commonSecurityCount',
+    'latestFiniteCount',
+  ];
+  redundancyRows.forEach((row, index) => {
     requireCondition(
-      isRecord(payload.data.inputSha256)
-        && sameJson(Object.keys(payload.data.inputSha256).sort(), [...LIVE_INPUT_HASH_FIELDS].sort())
-        && LIVE_INPUT_HASH_FIELDS.every(
-          (field) => /^[0-9a-f]{64}$/.test(payload.data.inputSha256[field] || ""),
+      isRecord(row)
+        && requiredRedundancyFields.every((field) => Object.prototype.hasOwnProperty.call(row, field))
+        && row.rank === index + 1
+        && row.category === categoryByFactor.get(row.factor)
+        && typeof row.available === 'boolean'
+        && integer(row.validPeerCount)
+        && Number(row.validPeerCount) >= 0
+        && Number(row.validPeerCount) <= independent.length - 1
+        && integer(row.highCorrPeerCount)
+        && Number(row.highCorrPeerCount) >= 0
+        && Number(row.highCorrPeerCount) <= Number(row.validPeerCount)
+        && integer(row.commonSecurityCount)
+        && Number(row.commonSecurityCount) >= 0
+        && integer(row.latestFiniteCount)
+        && Number(row.latestFiniteCount) >= 0
+        && Number(row.latestFiniteCount) <= Number(payload.data.latestEligibleSecurityCount),
+      `factorDiagnostics redundancy ${row?.factor || index} 기본 필드가 잘못되었습니다.`,
+    );
+    if (row.available) {
+      requireCondition(
+        row.unavailableReason === null
+          && independentSet.has(row.nearestFactor)
+          && row.nearestFactor !== row.factor
+          && finite(row.signedCorr)
+          && finite(row.absCorr)
+          && Number(row.signedCorr) >= -1 && Number(row.signedCorr) <= 1
+          && Number(row.absCorr) >= 0 && Number(row.absCorr) <= 1
+          && closeNumber(row.absCorr, Math.abs(Number(row.signedCorr)))
+          && Number(row.validPeerCount) > 0
+          && Number(row.commonSecurityCount) >= 3
+          && Number(row.commonSecurityCount) <= Math.min(
+            latestCounts.get(row.factor),
+            latestCounts.get(row.nearestFactor),
+          ),
+        `factorDiagnostics redundancy ${row.factor} 값/순서가 잘못되었습니다.`,
+      );
+    } else {
+      requireCondition(
+        typeof row.unavailableReason === 'string'
+          && row.unavailableReason.trim()
+          && row.nearestFactor === null
+          && row.signedCorr === null
+          && row.absCorr === null
+          && Number(row.validPeerCount) === 0
+          && Number(row.highCorrPeerCount) === 0
+          && Number(row.commonSecurityCount) === 0,
+        `factorDiagnostics redundancy ${row.factor} unavailable 계약이 잘못되었습니다.`,
+      );
+    }
+  });
+  const expectedRedundancyOrder = [...redundancyRows].sort((left, right) => (
+    Number(right.available) - Number(left.available)
+      || (left.available ? Number(right.absCorr) - Number(left.absCorr) : 0)
+      || String(left.factor).localeCompare(String(right.factor))
+  ));
+  const highPeerTotal = redundancyRows.reduce((sum, row) => sum + Number(row.highCorrPeerCount), 0);
+  const validPeerTotal = redundancyRows.reduce((sum, row) => sum + Number(row.validPeerCount), 0);
+  const availableRedundancyCount = redundancyRows.filter((row) => row.available).length;
+  requireCondition(
+    sameJson(redundancyRows.map((row) => row.factor), expectedRedundancyOrder.map((row) => row.factor))
+      && redundancy.availableFactorCount === availableRedundancyCount
+      && redundancy.unavailableFactorCount === independent.length - availableRedundancyCount
+      && integer(redundancy.highRedundancyPairCount)
+      && Number(redundancy.highRedundancyPairCount) >= 0
+      && Number(redundancy.highRedundancyPairCount) <= Number(redundancy.eligiblePairCount)
+      && validPeerTotal === 2 * Number(redundancy.eligiblePairCount)
+      && highPeerTotal === 2 * Number(redundancy.highRedundancyPairCount),
+    'factorDiagnostics redundancy 순서/available/pair counts가 다릅니다.',
+  );
+  requireCondition(
+    redundancy.highRedundancyFactorCount
+      === redundancyRows.filter((row) => Number(row.highCorrPeerCount) > 0).length,
+    'factorDiagnostics 고중복 팩터 수가 다릅니다.',
+  );
+  const pairs = redundancy.topPairs;
+  requireCondition(
+    Array.isArray(pairs)
+      && pairs.length === Math.min(10, Number(redundancy.eligiblePairCount)),
+    'factorDiagnostics top redundancy pairs가 없습니다.',
+  );
+  const observedPairs = new Set();
+  pairs.forEach((row, index) => {
+    const key = `${row.leftFactor}::${row.rightFactor}`;
+    requireCondition(
+      row.rank === index + 1
+        && independent.includes(row.leftFactor)
+        && independent.includes(row.rightFactor)
+        && row.leftFactor < row.rightFactor
+        && !observedPairs.has(key)
+        && finite(row.signedCorr)
+        && finite(row.absCorr)
+        && Number(row.signedCorr) >= -1 && Number(row.signedCorr) <= 1
+        && Number(row.absCorr) >= 0 && Number(row.absCorr) <= 1
+        && closeNumber(row.absCorr, Math.abs(Number(row.signedCorr)))
+        && integer(row.commonSecurityCount)
+        && Number(row.commonSecurityCount) >= 3
+        && Number(row.commonSecurityCount) <= Math.min(
+          latestCounts.get(row.leftFactor),
+          latestCounts.get(row.rightFactor),
         ),
-      "실제시장 provenance 입력 해시가 없습니다.",
+      `factorDiagnostics top pair ${index + 1}이 잘못되었습니다.`,
     );
-    requireCondition(Array.isArray(payload.priceSources) && payload.priceSources.length > 0, "priceSources가 비어 있습니다.");
-    const priceSourceSymbols = new Set();
-    payload.priceSources.forEach((row) => {
-      const symbol = typeof row?.symbol === "string" ? row.symbol.trim().toUpperCase() : "";
-      requireCondition(
-        isRecord(row)
-          && symbol
-          && typeof row.price_source === "string"
-          && row.price_source.trim()
-          && !priceSourceSymbols.has(symbol),
-        "priceSources 행 또는 종목 유일성 계약이 잘못되었습니다.",
-      );
-      priceSourceSymbols.add(symbol);
-    });
-    requireCondition(Array.isArray(payload.data.analyzedSymbols), "analyzedSymbols가 배열이 아닙니다.");
-    const analyzedSymbols = payload.data.analyzedSymbols.map((value) => (
-      typeof value === "string" ? value.trim().toUpperCase() : ""
-    ));
+    observedPairs.add(key);
+  });
+  const expectedPairOrder = [...pairs].sort((left, right) => (
+    Number(right.absCorr) - Number(left.absCorr)
+      || String(left.leftFactor).localeCompare(String(right.leftFactor))
+      || String(left.rightFactor).localeCompare(String(right.rightFactor))
+  ));
+  const highPairsInTop = pairs.filter((row) => Number(row.absCorr) >= 0.95).length;
+  requireCondition(
+    sameJson(pairs.map((row) => [row.leftFactor, row.rightFactor]), expectedPairOrder.map((row) => [row.leftFactor, row.rightFactor]))
+      && Number(redundancy.highRedundancyPairCount) >= highPairsInTop
+      && (Number(redundancy.eligiblePairCount) > 10
+        || Number(redundancy.highRedundancyPairCount) === highPairsInTop),
+    'factorDiagnostics top pair 순서/고중복 count가 잘못되었습니다.',
+  );
+  const categories = diagnostics.categorySummary;
+  const expectedCategories = [...new Set(independentDefinitions.map((row) => row.category))].sort();
+  requireCondition(
+    Array.isArray(categories)
+      && sameJson(
+        categories.map((row) => row.category).sort(),
+        expectedCategories,
+      ),
+    'factorDiagnostics category summary coverage가 다릅니다.',
+  );
+  const rankByFactor = new Map(rankRows.map((row) => [row.factor, row]));
+  const redundancyByFactor = new Map(redundancyRows.map((row) => [row.factor, row]));
+  categories.forEach((row) => {
+    const factors = independent
+      .filter((factor) => categoryByFactor.get(factor) === row.category)
+      .sort();
+    const rankAvailable = factors.map((factor) => rankByFactor.get(factor)).filter((item) => item.available);
+    const redundancyAvailable = factors.map((factor) => redundancyByFactor.get(factor)).filter((item) => item.available);
+    const average = (items, field) => items.length
+      ? items.reduce((sum, item) => sum + Number(item[field]), 0) / items.length
+      : null;
     requireCondition(
-      analyzedSymbols.length === Number(payload.data.analyzedSecurityCount)
-        && analyzedSymbols.every((symbol, index) => (
-          symbol
-          && symbol === payload.data.analyzedSymbols[index]
-          && priceSourceSymbols.has(symbol)
-        ))
-        && new Set(analyzedSymbols).size === analyzedSymbols.length,
-      "analyzedSymbols 순서·유일성·priceSources coverage가 잘못되었습니다.",
+      row.factorCount === factors.length
+        && row.availableRankIcFactorCount === rankAvailable.length
+        && row.highCorrFactorCount === redundancyAvailable.filter((item) => Number(item.highCorrPeerCount) > 0).length
+        && sameJson(row.exampleFactors, factors.slice(0, 4))
+        && optionalClose(row.averageMeanRankIc, average(rankAvailable, 'mean'))
+        && optionalClose(row.averagePositiveRate, average(rankAvailable, 'positiveRate'))
+        && optionalClose(row.averageMaxAbsCorr, average(redundancyAvailable, 'absCorr')),
+      `factorDiagnostics ${row.category} category summary가 잘못되었습니다.`,
     );
-    const candidateSymbolsSha256 = await sha256Hex(
-      new TextEncoder().encode(canonicalString(analyzedSymbols)),
-    );
-    requireCondition(Array.isArray(payload.sourceHealth) && payload.sourceHealth.length > 0, "sourceHealth가 비어 있습니다.");
-    payload.sourceHealth.forEach((row) => {
-      requireCondition(
-        isRecord(row)
-          && typeof row.source === "string"
-          && row.source.trim()
-          && typeof row.status === "string"
-          && row.status.trim(),
-        "sourceHealth 행의 source/status가 잘못되었습니다.",
-      );
-    });
-    const [priceSourcesSha256, dataSourcesSha256] = await Promise.all([
-      canonicalSha256(payload.priceSources),
-      canonicalSha256(payload.sourceHealth),
-    ]);
-    requireCondition(
-      priceSourcesSha256 === payload.data.inputSha256.priceSources,
-      "priceSources RFC 8785 JCS SHA-256이 inputSha256.priceSources와 다릅니다.",
-    );
-    requireCondition(
-      dataSourcesSha256 === payload.data.inputSha256.dataSources,
-      "sourceHealth RFC 8785 JCS SHA-256이 inputSha256.dataSources와 다릅니다.",
-    );
-    const marketSnapshot = payload.resultIdentity?.keyParts?.marketSnapshot;
-    const expectedMarketSnapshot = {
-      sourceMode: payload.data.mode,
-      sourceLabel: payload.data.sourceLabel,
-      provider: payload.data.provider,
-      priceBasis: payload.data.priceBasis,
-      volumeBasis: payload.data.volumeBasis,
-      rawCloseProxySymbolCount: payload.data.rawCloseProxySymbolCount,
-      requestedThrough: payload.data.requestedThrough,
-      dataAsOf: payload.data.asOf,
-      inputSha256: payload.data.inputSha256,
-      requestedCandidateCount: payload.data.requestedCandidateCount,
-      providerReturnedCandidateCount: payload.data.providerReturnedCandidateCount,
-      analyzedSecurityCount: payload.data.analyzedSecurityCount,
-      candidateSymbolsSha256,
-    };
-    requireCondition(
-      isRecord(marketSnapshot)
-        && Object.entries(expectedMarketSnapshot).every(
-          ([field, value]) => sameJson(marketSnapshot[field], value),
-        ),
-      "resultIdentity marketSnapshot이 detail data와 다릅니다.",
-    );
-    if (!apiResult) {
-      requireCondition(isRecord(summary) && summary.schemaVersion === RESULT_SCHEMA_VERSION, "summary schemaVersion 4가 아닙니다.");
-      validateIdentity(summary.resultIdentity, entry.resultKey, "summary");
-      requireCondition(sameJson(summary.resultIdentity, entry.identity), "summary resultIdentity가 manifest와 다릅니다.");
-      requireCondition(summary.resultKey === undefined || summary.resultKey === entry.resultKey, "summary top-level resultKey가 다릅니다.");
-      requireCondition(summary.dataAsOf === payload.data.asOf && summary.dataMode === payload.data.mode && summary.synthetic === false, "summary/detail 데이터 기준이 다릅니다.");
-      requireCondition(summary.analyzedSecurityCount === payload.data.analyzedSecurityCount, "summary/detail 분석 종목 수가 다릅니다.");
-      requireCondition(summary.selectedFactor === payload.selectedFactor && summary.selectedWeightingPolicy === payload.selectedWeightingPolicy, "summary/detail 선택 조합이 다릅니다.");
-    }
+  });
+  const expectedCategoryOrder = [...categories].sort((left, right) => (
+    Number(right.factorCount) - Number(left.factorCount)
+      || String(left.category).localeCompare(String(right.category))
+  ));
+  requireCondition(
+    sameJson(categories.map((row) => row.category), expectedCategoryOrder.map((row) => row.category)),
+    'factorDiagnostics category summary 순서가 잘못되었습니다.',
+  );
+  return diagnostics;
+}
 
-    const required = [
-      "selectedFactor", "selectedWeightingPolicy", "selectedReason", "selectionDecision",
-      "factorPolicyRanking", "policyDiagnostics", "weightingPolicyRegistry",
-      "currentResearchTarget", "currentTransition", "selectionMethod", "performance",
-      "factorDefinitions", "researchInputs", "researchScope", "config", "meta",
-    ];
-    required.forEach((key) => requireCondition(Object.prototype.hasOwnProperty.call(payload, key), `detail 필드가 없습니다: ${key}`));
-    requireCondition(Array.isArray(payload.factorPolicyRanking) && payload.factorPolicyRanking.length > 0, "factorPolicyRanking이 비어 있습니다.");
-    requireCondition(Array.isArray(payload.policyDiagnostics), "policyDiagnostics가 배열이 아닙니다.");
-    requireCondition(isRecord(payload.weightingPolicyRegistry) && isRecord(payload.weightingPolicyRegistry.policies), "weightingPolicyRegistry가 없습니다.");
-    requireCondition(isRecord(payload.weightingPolicyRegistry.policies[payload.selectedWeightingPolicy]), "선택 정책이 registry에 없습니다.");
-    requireCondition(payload.selectionMethod.name === "joint_factor_policy_absolute_guardrails", "공동 팩터×정책 선택 계약이 아닙니다.");
-    requireCondition(isRecord(payload.researchInputs) && payload.researchInputs.version === RESEARCH_INPUTS_VERSION, "researchInputs 버전 계약이 아닙니다.");
-    Object.entries(RESEARCH_INPUT_PARITY).forEach(([publicKey, normalizedKey]) => {
-      requireCondition(
-        Object.prototype.hasOwnProperty.call(payload.researchInputs, publicKey)
-          && Object.prototype.hasOwnProperty.call(entry.normalizedInputs, normalizedKey)
-          && sameJson(payload.researchInputs[publicKey], entry.normalizedInputs[normalizedKey]),
-        `researchInputs.${publicKey}가 manifest normalizedInputs와 다릅니다.`,
-      );
-    });
-    requireCondition(
-      integer(payload.researchInputs.evaluationYears)
-        && Number(payload.researchInputs.evaluationYears) * 252 === Number(payload.researchInputs.evaluationWindowDays),
-      "researchInputs 평가 연수와 거래일 창이 다릅니다.",
-    );
-    if (apiResult) {
-      requireCondition(
-        sameJson(payload.researchInputs, options.expectedResearchInputs),
-        "로컬 API 결과 researchInputs가 요청과 다릅니다.",
-      );
-    }
+function configuredComparisonBenchmarks(config) {
+  const raw = [
+    config?.benchmark,
+    config?.chart_benchmark,
+    ...(Array.isArray(config?.additional_comparison_benchmarks)
+      ? config.additional_comparison_benchmarks
+      : []),
+  ];
+  const ordered = [];
+  raw.forEach((value) => {
+    const symbol = typeof value === 'string' ? value.trim().toUpperCase() : '';
+    if (symbol && !ordered.includes(symbol)) ordered.push(symbol);
+  });
+  return ordered;
+}
 
-    validateGuardrailProfile(payload);
-    validateGridAccounting(payload);
-    validateRankingConcentrationGuardrails(payload);
-    const selectedRows = payload.factorPolicyRanking.filter((row) => row.factor === payload.selectedFactor && row.policy_id === payload.selectedWeightingPolicy);
+function validatePeriodMetric(value, expectedBasis, expectedReturnCount, label) {
+  const required = [
+    'available',
+    'unavailableReason',
+    'basis',
+    'returnObservationCount',
+    'requiredReturnCount',
+    'riskObservationCount',
+    'riskMetricsExact',
+    ...PERFORMANCE_METRIC_KEYS,
+  ];
+  requireCondition(
+    isRecord(value)
+      && required.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+      && value.basis === expectedBasis,
+    `${label} 기간 성과 계약이 불완전합니다.`,
+  );
+  requireCondition(
+    typeof value.available === 'boolean'
+      && typeof value.riskMetricsExact === 'boolean'
+      && nonnegativeInteger(value.returnObservationCount)
+      && nonnegativeInteger(value.requiredReturnCount)
+      && nonnegativeInteger(value.riskObservationCount)
+      && value.returnObservationCount <= value.requiredReturnCount
+      && value.riskObservationCount <= value.returnObservationCount,
+    `${label} 기간 성과 관측치 수가 잘못되었습니다.`,
+  );
+  if (value.available) {
     requireCondition(
-      selectedRows.length === 1
-        && selectedRows[0].selected === true
-        && selectedRows[0].absolute_guardrail_pass === true
-        && selectedRows[0].selection_eligible === true
-        && selectedRows[0].selection_status === "eligible"
-        && selectedRows[0].comparison_status === "available"
-        && finite(selectedRows[0].selection_score),
-      "선택 팩터×정책 행이 정확히 하나의 pass/eligible/selected available 행이 아닙니다.",
+      value.unavailableReason === null
+        && value.requiredReturnCount === expectedReturnCount
+        && strictJsonNumber(value.cumulativeReturn)
+        && PERFORMANCE_METRIC_KEYS.every((metric) => (
+          value[metric] === null || strictJsonNumber(value[metric])
+        )),
+      `${label} available 기간 성과가 잘못되었습니다.`,
     );
-    requireCondition(payload.factorPolicyRanking.filter((row) => row.selected === true).length === 1, "factorPolicyRanking에 선택 행이 하나가 아닙니다.");
-    requireCondition(payload.meta.policyFactorRunCount === payload.factorPolicyRanking.length, "factorPolicyRanking 개수가 meta와 다릅니다.");
-
-    const { target, maxWeight } = validateTargetAllocation(payload);
-    requireCondition(isRecord(target) && target.factor === payload.selectedFactor && target.weightingPolicyId === payload.selectedWeightingPolicy, "currentResearchTarget이 선택 조합과 다릅니다.");
-    requireCondition(target.asOf === payload.data.asOf && target.signalDate === payload.data.asOf, "currentResearchTarget 기준일이 다릅니다.");
-    validateSelectedConcentrationGuardrails(payload, selectedRows[0], target);
-    if (!apiResult) {
-      requireCondition(sameJson(summary.currentResearchTarget, target), "summary/detail currentResearchTarget이 다릅니다.");
-      requireCondition(sameJson(summary.weights, target.weights), "summary/detail weights가 다릅니다.");
-      requireCondition(closeNumber(summary.cashWeight, target.cashWeight), "summary/detail cashWeight가 다릅니다.");
-      requireCondition(closeNumber(summary.maxWeight, maxWeight), "summary/detail maxWeight가 다릅니다.");
-      requireCondition(summary.portfolioSize === target.selectedSecurityCount, "summary/detail portfolioSize가 다릅니다.");
-      requireCondition(sameJson(summary.concentration, target.concentration), "summary/detail concentration이 다릅니다.");
-    }
-    return selectedRows[0];
+  } else {
+    requireCondition(
+      requiredText(value.unavailableReason)
+        && PERFORMANCE_METRIC_KEYS.every((metric) => value[metric] === null),
+      `${label} unavailable 기간 성과가 fail-closed가 아닙니다.`,
+    );
   }
+}
 
-  function initTheme() {
-    const saved = localStorage.getItem("mfl-theme");
-    const preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-    document.documentElement.dataset.theme = saved || preferred;
-    $("#theme-toggle").addEventListener("click", () => {
-      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-      document.documentElement.dataset.theme = next;
-      localStorage.setItem("mfl-theme", next);
-    });
-  }
+function validateFullPeriodCurveParity(metrics, curve, label, requireCommonSeries) {
+  if (metrics.available !== true) return;
+  const completePositiveCurve = Array.isArray(curve)
+    && curve.length >= 2
+    && curve.every((value) => strictJsonNumber(value) && value > 0);
+  requireCondition(
+    !requireCommonSeries || completePositiveCurve,
+    `${label} FULL 공통 평가 곡선이 잘못되었습니다.`,
+  );
+  if (!completePositiveCurve) return;
+  const expectedReturn = curve.at(-1) / curve[0] - 1;
+  requireCondition(
+    closeNumber(metrics.cumulativeReturn, expectedReturn),
+    `${label} FULL 누적 수익률이 그래프 endpoint와 다릅니다.`,
+  );
+}
 
-  function populateResultOptions(manifest) {
-    const select = $("#input-result-key");
-    select.innerHTML = manifest.entries.map((entry) => {
-      const market = entry.identity.keyParts.marketSnapshot || {};
-      const inputs = entry.normalizedInputs;
-      const label = `${market.dataAsOf || inputs.end_date || "기준일 미표기"} · Top ${inputs.top_n ?? "—"} · ${String(entry.resultKey).slice(0, 10)}`;
-      return `<option value="${entry.resultKey}">${escapeHtml(label)}</option>`;
-    }).join("");
-    const rebalanceValues = [...new Set([
-      "W", "ME", "QE",
-      ...manifest.entries.map((entry) => entry.normalizedInputs.rebalance_frequency).filter(Boolean),
-    ])];
-    $("#input-rebalance-frequency").innerHTML = rebalanceValues.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
-  }
+function validatePerformance(payload) {
+  const performance = payload.performance;
+  const config = payload.config;
+  const data = payload.data;
+  const dates = performance?.dates;
+  requireCondition(
+    isRecord(performance)
+      && performance.contractVersion === PERFORMANCE_CONTRACT_VERSION
+      && performance.weightingPolicyId === payload.selectedWeightingPolicy
+      && Array.isArray(dates)
+      && dates.length >= 2
+      && dates.every(requiredText)
+      && sameJson([...dates].sort(), dates)
+      && new Set(dates).size === dates.length
+      && dates.at(-1) === data?.asOf
+      && isRecord(performance.factorCurves),
+    'Python performance 날짜/정책 계약이 잘못되었습니다.',
+  );
 
-  function fillForm(entry, normalizedInputs = entry.normalizedInputs, researchInputs = null) {
-    $("#input-result-key").value = entry.resultKey;
-    INPUT_FIELDS.forEach((field) => {
-      const element = $(`#${field.id}`);
-      if (element && Object.prototype.hasOwnProperty.call(normalizedInputs, field.key)) {
-        element.value = serializeInputValue(field, normalizedInputs[field.key]);
+  const expectedFactors = (payload.factorDefinitions || [])
+    .map((row) => row?.factor)
+    .filter(requiredText)
+    .sort();
+  requireCondition(
+    expectedFactors.length === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
+      && new Set(expectedFactors).size === expectedFactors.length
+      && sameJson(Object.keys(performance.factorCurves).sort(), expectedFactors),
+    'Python performance 팩터 곡선 coverage가 잘못되었습니다.',
+  );
+  Object.entries(performance.factorCurves).forEach(([factor, curve]) => {
+    requireCondition(
+      Array.isArray(curve)
+        && curve.length === dates.length
+        && curve.every((value) => value === null || strictJsonNumber(value)),
+      `Python performance ${factor} 곡선의 길이/유한값/null gap이 잘못되었습니다.`,
+    );
+  });
+
+  const comparisonOrder = configuredComparisonBenchmarks(config);
+  requireCondition(
+    sameJson(config?.comparison_benchmarks, comparisonOrder)
+      && data?.chartBenchmark === config?.chart_benchmark
+      && sameJson(
+        data?.additionalComparisonBenchmarks,
+        config?.additional_comparison_benchmarks,
+      ),
+    '비교지수 config/data 순서가 다릅니다.',
+  );
+  const availability = data?.comparisonBenchmarkAvailability;
+  const benchmarkCurves = performance.benchmarkCurves;
+  requireCondition(
+    sameJson(performance.benchmarkOrder, comparisonOrder)
+      && isRecord(availability)
+      && sameJson(Object.keys(availability).sort(), [...comparisonOrder].sort())
+      && Object.values(availability).every((value) => typeof value === 'boolean')
+      && isRecord(benchmarkCurves)
+      && sameJson(Object.keys(benchmarkCurves).sort(), [...comparisonOrder].sort()),
+    'Python performance 비교지수 순서/coverage가 잘못되었습니다.',
+  );
+  comparisonOrder.forEach((symbol) => {
+    const curve = benchmarkCurves[symbol];
+    if (availability[symbol]) {
+      requireCondition(
+        Array.isArray(curve)
+          && curve.length === dates.length
+          && curve.every((value) => value === null || strictJsonNumber(value))
+          && curve.at(-1) !== null,
+        `${symbol} 비교지수 곡선의 길이/유한값/null gap이 잘못되었습니다.`,
+      );
+    } else {
+      requireCondition(curve === null, `${symbol} unavailable 비교지수 곡선은 null이어야 합니다.`);
+    }
+  });
+  const primary = typeof config?.benchmark === 'string' ? config.benchmark.trim().toUpperCase() : '';
+  requireCondition(
+    sameJson(performance.benchmarkCurve, benchmarkCurves[primary])
+      && data?.benchmarkAvailable === (availability[primary] || false),
+    'legacy benchmarkCurve/사용 가능성이 benchmarkCurves와 다릅니다.',
+  );
+
+  const periods = performance.periods;
+  requireCondition(
+    Array.isArray(periods)
+      && sameJson(
+        periods.map((period) => period?.key),
+        PERFORMANCE_PERIOD_CONTRACT.map((period) => period.key),
+      ),
+    'Python performance 기간 목록이 누락되었거나 순서가 다릅니다.',
+  );
+  periods.forEach((period, index) => {
+    const contract = PERFORMANCE_PERIOD_CONTRACT[index];
+    requireCondition(
+      isRecord(period)
+        && period.label === contract.label
+        && nonnegativeInteger(period.returnObservationCount)
+        && isRecord(period.factors)
+        && sameJson(Object.keys(period.factors).sort(), expectedFactors)
+        && isRecord(period.benchmarks)
+        && sameJson(Object.keys(period.benchmarks).sort(), [...comparisonOrder].sort()),
+      `Python performance ${contract.key} 기간 계약이 잘못되었습니다.`,
+    );
+    const count = period.returnObservationCount;
+    if (contract.returnCount !== null) {
+      requireCondition(
+        count === contract.returnCount,
+        `Python performance ${contract.key} 기간의 거래일 수가 다릅니다.`,
+      );
+    }
+    if (contract.key === 'FULL') {
+      requireCondition(
+        count === dates.length - 1
+          && period.startDate === dates[0]
+          && period.endDate === dates.at(-1),
+        'Python performance FULL 공통 평가기간이 곡선 날짜와 다릅니다.',
+      );
+    }
+    if (period.unavailableReason === null) {
+      requireCondition(
+        requiredText(period.startDate) && period.endDate === dates.at(-1),
+        `Python performance ${contract.key} 기간 경계가 잘못되었습니다.`,
+      );
+    } else {
+      requireCondition(
+        requiredText(period.unavailableReason),
+        `Python performance ${contract.key} unavailable reason이 잘못되었습니다.`,
+      );
+    }
+    Object.entries(period.factors).forEach(([factor, metrics]) => {
+      validatePeriodMetric(metrics, 'net_of_costs_strategy', count, `${contract.key}/${factor}`);
+      if (contract.key === 'FULL') {
+        validateFullPeriodCurveParity(metrics, performance.factorCurves[factor], `팩터 ${factor}`, false);
       }
     });
-    if (integer(researchInputs?.evaluationYears)) {
-      $("#input-evaluation-years").value = String(researchInputs.evaluationYears);
-    } else if (finite(normalizedInputs.evaluation_window_days)) {
-      $("#input-evaluation-years").value = (Number(normalizedInputs.evaluation_window_days) / 252).toFixed(2).replace(/\.00$/, "");
-    }
-  }
-
-  function readFormRequest() {
-    const baseEntry = entryByResultKey(state.manifest, $("#input-result-key").value);
-    if (!baseEntry) throw new Error(LOCAL_API_REQUIRED);
-    const requestedInputs = cloneJson(baseEntry.normalizedInputs);
-    INPUT_FIELDS.forEach((field) => {
-      requestedInputs[field.key] = parseInputValue(field, $(`#${field.id}`).value);
+    Object.entries(period.benchmarks).forEach(([symbol, metrics]) => {
+      validatePeriodMetric(metrics, 'adjusted_close_buy_and_hold', count, `${contract.key}/${symbol}`);
+      if (contract.key === 'FULL') {
+        validateFullPeriodCurveParity(metrics, benchmarkCurves[symbol], `비교지수 ${symbol}`, true);
+      }
     });
-    const evaluationYears = Number($("#input-evaluation-years").value);
-    if (!Number.isInteger(evaluationYears) || evaluationYears < 1 || evaluationYears > 10) {
-      throw new Error("평가 기간(년)은 1–10 정수여야 합니다.");
-    }
-    if (Number(requestedInputs.evaluation_window_days) !== evaluationYears * 252) {
-      throw new Error("평가 기간(년)과 거래일 창이 다릅니다.");
-    }
-    applyResearchInputDependencies(requestedInputs);
-    return { baseEntry, requestedInputs, entry: resolveExactEntry(state.manifest, requestedInputs) };
-  }
+  });
+  return performance;
+}
 
-  function updateLocation(mode, resultKey, normalizedInputs) {
-    const presetId = entryByResultKey(state.manifest, resultKey)?.presetId || null;
-    const next = `${window.location.pathname}${searchForRequest(resultKey, normalizedInputs, presetId)}${window.location.hash}`;
-    if (mode === "push") history.pushState({ resultKey }, "", next);
-    if (mode === "replace") history.replaceState({ resultKey }, "", next);
-  }
-
-  function setInputStatus(message, tone = "ok") {
-    const status = $("#input-status");
-    status.textContent = message;
-    status.dataset.tone = tone;
-  }
-
-  function setResultSource(source) {
-    state.resultSource = source;
-    const element = $("#result-source");
-    if (!element) return;
-    element.textContent = source === "local_api" ? "로컬 API 계산 결과" : (
-      source === "static_grid" ? "정적 사전 계산 결과" : "결과 없음"
+function validateBacktestHeldPortfolio(payload) {
+  const held = payload.backtestHeldPortfolio;
+  const asOf = payload.data?.asOf;
+  requireCondition(
+    isRecord(held)
+      && held.factor === payload.selectedFactor
+      && held.weightingPolicyId === payload.selectedWeightingPolicy
+      && held.asOf === asOf
+      && requiredText(held.lastSignalDate)
+      && requiredText(held.lastExecutionDate)
+      && typeof held.valuationAvailable === 'boolean'
+      && Array.isArray(held.weights)
+      && strictJsonNumber(held.cashWeight)
+      && held.cashWeight >= 0
+      && held.cashWeight <= 1
+      && held.lastSignalDate <= held.lastExecutionDate
+      && held.lastExecutionDate <= asOf,
+    'backtestHeldPortfolio identity/date/allocation 계약이 잘못되었습니다.',
+  );
+  requireCondition(
+    held.valuationAvailable !== true || held.weights.length > 0,
+    '평가 가능한 backtestHeldPortfolio에 보유 종목이 없습니다.',
+  );
+  const symbols = new Set();
+  let total = held.cashWeight;
+  held.weights.forEach((row, index) => {
+    requireCondition(
+      isRecord(row)
+        && row.rank === index + 1
+        && requiredText(row.symbol)
+        && requiredText(row.name)
+        && !symbols.has(row.symbol)
+        && strictJsonNumber(row.weight)
+        && row.weight > 0
+        && row.weight <= 1
+        && (row.factorScore === null || strictJsonNumber(row.factorScore))
+        && (held.valuationAvailable !== true
+          || (strictJsonNumber(row.latestPrice) && row.latestPrice > 0)),
+      `backtestHeldPortfolio.weights[${index}] 행이 잘못되었습니다.`,
     );
-    element.dataset.source = source || "none";
+    symbols.add(row.symbol);
+    total += row.weight;
+  });
+  requireCondition(
+    closeNumber(total, 1),
+    'backtestHeldPortfolio 비중과 현금의 합이 1이 아닙니다.',
+  );
+  return held;
+}
+
+function validateSelectedBacktestHoldingHistory(payload, held = validateBacktestHeldPortfolio(payload)) {
+  const history = payload.selectedBacktestHoldingHistory;
+  const expectedHistoryFields = [
+    'contractVersion',
+    'factor',
+    'weightingPolicyId',
+    'weightTiming',
+    'startDate',
+    'endDate',
+    'sessionCount',
+    'sessions',
+  ];
+  requireCondition(
+    exactRecordKeys(history, expectedHistoryFields)
+      && history.contractVersion === SELECTED_HOLDING_HISTORY_CONTRACT_VERSION
+      && history.factor === payload.selectedFactor
+      && history.weightingPolicyId === payload.selectedWeightingPolicy
+      && history.weightTiming === SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+      && history.sessionCount === SELECTED_HOLDING_HISTORY_SESSION_COUNT
+      && Array.isArray(history.sessions)
+      && history.sessions.length === SELECTED_HOLDING_HISTORY_SESSION_COUNT,
+    'selectedBacktestHoldingHistory identity/session 계약이 잘못되었습니다.',
+  );
+  const sessionFields = [
+    'date',
+    'valuationAvailable',
+    'cashWeight',
+    'executionStatus',
+    'lastSignalDate',
+    'lastExecutionDate',
+    'weights',
+  ];
+  const weightFields = ['rank', 'symbol', 'name', 'weight'];
+  const allowedStatuses = new Set(HOLDING_EXECUTION_STATUSES);
+  const dates = [];
+  let previousMetadata = null;
+  history.sessions.forEach((session, sessionIndex) => {
+    const signalDate = session?.lastSignalDate;
+    const executionDate = session?.lastExecutionDate;
+    const metadata = [signalDate, executionDate];
+    requireCondition(
+      exactRecordKeys(session, sessionFields)
+        && requiredText(session.date)
+        && session.date <= payload.data.asOf
+        && typeof session.valuationAvailable === 'boolean'
+        && strictJsonNumber(session.cashWeight)
+        && session.cashWeight >= 0
+        && session.cashWeight <= 1
+        && allowedStatuses.has(session.executionStatus)
+        && ((signalDate === null && executionDate === null)
+          || (requiredText(signalDate)
+            && requiredText(executionDate)
+            && signalDate <= executionDate
+            && executionDate <= session.date)),
+      `selectedBacktestHoldingHistory.sessions[${sessionIndex}] metadata가 잘못되었습니다.`,
+    );
+    if (['executed', 'executed_partial_unpriceable_targets'].includes(session.executionStatus)) {
+      requireCondition(
+        executionDate === session.date,
+        `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 체결일이 세션일과 다릅니다.`,
+      );
+    } else if (sessionIndex > 0) {
+      requireCondition(
+        sameJson(metadata, previousMetadata),
+        `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 미체결 메타데이터가 변경되었습니다.`,
+      );
+    }
+    previousMetadata = metadata;
+    requireCondition(
+      Array.isArray(session.weights) && session.weights.length > 0,
+      `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 비중이 없습니다.`,
+    );
+    const symbols = new Set();
+    let total = session.cashWeight;
+    session.weights.forEach((row, index) => {
+      requireCondition(
+        exactRecordKeys(row, weightFields)
+          && row.rank === index + 1
+          && requiredText(row.symbol)
+          && requiredText(row.name)
+          && !symbols.has(row.symbol)
+          && strictJsonNumber(row.weight)
+          && row.weight > 0
+          && row.weight <= 1,
+        `selectedBacktestHoldingHistory.sessions[${sessionIndex}].weights[${index}]가 잘못되었습니다.`,
+      );
+      symbols.add(row.symbol);
+      total += row.weight;
+    });
+    requireCondition(
+      closeNumber(total, 1)
+        && sameJson(
+          session.weights.map((row) => [row.weight, row.symbol]),
+          [...session.weights]
+            .sort(compareWeightSymbolOrder)
+            .map((row) => [row.weight, row.symbol]),
+        ),
+      `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 배분/정렬이 잘못되었습니다.`,
+    );
+    dates.push(session.date);
+  });
+  requireCondition(
+    new Set(dates).size === dates.length
+      && sameJson([...dates].sort(), dates)
+      && history.startDate === dates[0]
+      && history.endDate === dates.at(-1)
+      && dates.at(-1) === payload.data.asOf
+      && sameJson(
+        dates,
+        payload.performance.dates.slice(-SELECTED_HOLDING_HISTORY_SESSION_COUNT),
+      ),
+    'selectedBacktestHoldingHistory 날짜 범위가 performance 거래일과 다릅니다.',
+  );
+  const finalSession = history.sessions.at(-1);
+  const expectedFinalWeights = held.weights.map((row) => ({
+    rank: row.rank,
+    symbol: row.symbol,
+    name: row.name,
+    weight: row.weight,
+  }));
+  requireCondition(
+    sameJson(finalSession.weights, expectedFinalWeights)
+      && finalSession.cashWeight === held.cashWeight
+      && finalSession.valuationAvailable === held.valuationAvailable
+      && finalSession.lastSignalDate === held.lastSignalDate
+      && finalSession.lastExecutionDate === held.lastExecutionDate,
+    'selectedBacktestHoldingHistory 마지막 세션이 backtestHeldPortfolio와 다릅니다.',
+  );
+  return history;
+}
+
+function validateFactorHoldingHistorySidecarData(payload, data) {
+  const expectedFields = [
+    'contract',
+    'contractVersion',
+    'resultKey',
+    'selectedWeightingPolicy',
+    'weightTiming',
+    'startDate',
+    'endDate',
+    'sessionCount',
+    'dates',
+    'factorCount',
+    'independentFactorCount',
+    'diagnosticFactorCount',
+    'factorDefinitionSha256',
+    'policyDefinitionSha256',
+    'symbols',
+    'factors',
+  ];
+  const definitions = Array.isArray(payload.factorDefinitions) ? payload.factorDefinitions : [];
+  const factorIds = definitions.map((row) => row?.factor).filter(requiredText).sort();
+  const independent = definitions
+    .filter((row) => row?.selection_eligible === true && row?.compatibility_alias_of === null)
+    .map((row) => row.factor)
+    .sort();
+  const independentSet = new Set(independent);
+  const diagnostic = factorIds.filter((factor) => !independentSet.has(factor));
+  const dates = payload.performance.dates.slice(-SELECTED_HOLDING_HISTORY_SESSION_COUNT);
+  requireCondition(
+    exactRecordKeys(data, expectedFields)
+      && factorIds.length === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
+      && independent.length === EXPECTED_INDEPENDENT_FACTOR_COUNT
+      && diagnostic.length === EXPECTED_ALIAS_FACTOR_COUNT
+      && data.contract === FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
+      && data.contractVersion === FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION
+      && data.resultKey === payload.resultKey
+      && data.selectedWeightingPolicy === payload.selectedWeightingPolicy
+      && data.weightTiming === SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+      && data.startDate === dates[0]
+      && data.endDate === dates.at(-1)
+      && data.sessionCount === SELECTED_HOLDING_HISTORY_SESSION_COUNT
+      && sameJson(data.dates, dates)
+      && data.factorCount === factorIds.length
+      && data.independentFactorCount === independent.length
+      && data.diagnosticFactorCount === diagnostic.length
+      && data.factorDefinitionSha256 === payload.meta?.factorDefinitionSha256
+      && data.policyDefinitionSha256 === payload.meta?.policyDefinitionSha256,
+    '팩터별 보유 이력 sidecar provenance/date/count 계약이 잘못되었습니다.',
+  );
+
+  requireCondition(Array.isArray(data.symbols), '팩터별 보유 이력 symbol dictionary가 배열이 아닙니다.');
+  const symbols = [];
+  const names = [];
+  data.symbols.forEach((row, index) => {
+    requireCondition(
+      Array.isArray(row)
+        && row.length === 2
+        && requiredText(row[0])
+        && requiredText(row[1]),
+      `팩터별 보유 이력 symbols[${index}]가 잘못되었습니다.`,
+    );
+    symbols.push(row[0]);
+    names.push(row[1]);
+  });
+  requireCondition(
+    new Set(symbols).size === symbols.length
+      && sameJson([...symbols].sort(), symbols),
+    '팩터별 보유 이력 symbol dictionary의 순서/유일성이 잘못되었습니다.',
+  );
+
+  requireCondition(
+    isRecord(data.factors)
+      && sameJson(Object.keys(data.factors).sort(), factorIds),
+    '팩터별 보유 이력이 64개 팩터를 정확히 포함하지 않습니다.',
+  );
+  const allowedStatuses = new Set(HOLDING_EXECUTION_STATUSES);
+  const selectedSessions = [];
+  const topN = payload.config.top_n;
+  factorIds.forEach((factor) => {
+    const factorHistory = data.factors[factor];
+    requireCondition(
+      exactRecordKeys(factorHistory, ['factor', 'weightingPolicyId', 'resultKey', 'sessions'])
+        && factorHistory.factor === factor
+        && factorHistory.weightingPolicyId === payload.selectedWeightingPolicy
+        && factorHistory.resultKey === payload.resultKey
+        && Array.isArray(factorHistory.sessions)
+        && factorHistory.sessions.length === dates.length,
+      `팩터별 보유 이력 ${factor} identity/session 계약이 잘못되었습니다.`,
+    );
+    let previousMetadata = null;
+    factorHistory.sessions.forEach((session, sessionIndex) => {
+      const date = dates[sessionIndex];
+      const signalDate = session?.lastSignalDate;
+      const executionDate = session?.lastExecutionDate;
+      const metadata = [signalDate, executionDate];
+      requireCondition(
+        exactRecordKeys(session, [
+          'valuationAvailable',
+          'cashWeight',
+          'executionStatus',
+          'lastSignalDate',
+          'lastExecutionDate',
+          'weights',
+        ])
+          && typeof session.valuationAvailable === 'boolean'
+          && strictJsonNumber(session.cashWeight)
+          && session.cashWeight >= 0
+          && session.cashWeight <= 1
+          && allowedStatuses.has(session.executionStatus)
+          && ((signalDate === null && executionDate === null)
+            || (requiredText(signalDate)
+              && requiredText(executionDate)
+              && signalDate <= executionDate
+              && executionDate <= date)),
+        `팩터별 보유 이력 ${factor}/${date} metadata가 잘못되었습니다.`,
+      );
+      if (['executed', 'executed_partial_unpriceable_targets'].includes(session.executionStatus)) {
+        requireCondition(
+          executionDate === date,
+          `팩터별 보유 이력 ${factor}/${date} 체결일이 다릅니다.`,
+        );
+      } else if (sessionIndex > 0) {
+        requireCondition(
+          sameJson(metadata, previousMetadata),
+          `팩터별 보유 이력 ${factor}/${date} 미체결 메타데이터가 변경되었습니다.`,
+        );
+      }
+      previousMetadata = metadata;
+      requireCondition(
+        Array.isArray(session.weights) && session.weights.length <= topN,
+        `팩터별 보유 이력 ${factor}/${date} 비중 개수가 top_n을 넘습니다.`,
+      );
+      const observedIndexes = new Set();
+      const expandedWeights = [];
+      let total = session.cashWeight;
+      session.weights.forEach((pair, index) => {
+        const symbolIndex = pair?.[0];
+        const weight = pair?.[1];
+        requireCondition(
+          Array.isArray(pair)
+            && pair.length === 2
+            && Number.isInteger(symbolIndex)
+            && symbolIndex >= 0
+            && symbolIndex < symbols.length
+            && !observedIndexes.has(symbolIndex)
+            && strictJsonNumber(weight)
+            && weight > 0
+            && weight <= 1,
+          `팩터별 보유 이력 ${factor}/${date}/weights[${index}]가 잘못되었습니다.`,
+        );
+        observedIndexes.add(symbolIndex);
+        total += weight;
+        expandedWeights.push({
+          rank: index + 1,
+          symbol: symbols[symbolIndex],
+          name: names[symbolIndex],
+          weight,
+        });
+      });
+      requireCondition(
+        closeNumber(total, 1)
+          && sameJson(
+            expandedWeights.map((row) => [row.weight, row.symbol]),
+            [...expandedWeights]
+              .sort(compareWeightSymbolOrder)
+              .map((row) => [row.weight, row.symbol]),
+          ),
+        `팩터별 보유 이력 ${factor}/${date} 배분/정렬이 잘못되었습니다.`,
+      );
+      if (factor === payload.selectedFactor) {
+        selectedSessions.push({
+          date,
+          valuationAvailable: session.valuationAvailable,
+          cashWeight: session.cashWeight,
+          executionStatus: session.executionStatus,
+          lastSignalDate: signalDate,
+          lastExecutionDate: executionDate,
+          weights: expandedWeights,
+        });
+      }
+    });
+  });
+  requireCondition(
+    sameJson(selectedSessions, payload.selectedBacktestHoldingHistory.sessions),
+    '팩터별 보유 이력 sidecar의 선택 팩터가 canonical history와 다릅니다.',
+  );
+  return data;
+}
+
+function validateFactorHoldingHistorySidecarManifest(payload) {
+  const manifest = payload.factorHoldingHistorySidecar;
+  const hasData = isRecord(manifest) && Object.prototype.hasOwnProperty.call(manifest, 'data');
+  const expectedFields = [
+    'contract',
+    'contractVersion',
+    'storage',
+    'path',
+    'sha256',
+    'bytes',
+    'resultKey',
+    'selectedWeightingPolicy',
+    'weightTiming',
+    'startDate',
+    'endDate',
+    'sessionCount',
+    'factorCount',
+    'independentFactorCount',
+    'diagnosticFactorCount',
+    ...(hasData ? ['data'] : []),
+  ];
+  const expectedPath = `data/${FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY}/${payload.resultKey}.json`;
+  requireCondition(
+    exactRecordKeys(manifest, expectedFields)
+      && manifest.contract === FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
+      && manifest.contractVersion === FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION
+      && manifest.storage === (hasData ? 'embedded' : 'external')
+      && manifest.path === expectedPath
+      && validSha256(manifest.sha256)
+      && nonnegativeInteger(manifest.bytes)
+      && manifest.bytes >= 1
+      && manifest.bytes <= MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES
+      && manifest.resultKey === payload.resultKey
+      && manifest.selectedWeightingPolicy === payload.selectedWeightingPolicy
+      && manifest.weightTiming === SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
+      && manifest.startDate === payload.selectedBacktestHoldingHistory.startDate
+      && manifest.endDate === payload.selectedBacktestHoldingHistory.endDate
+      && manifest.sessionCount === SELECTED_HOLDING_HISTORY_SESSION_COUNT
+      && manifest.factorCount === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
+      && manifest.independentFactorCount === EXPECTED_INDEPENDENT_FACTOR_COUNT
+      && manifest.diagnosticFactorCount === EXPECTED_ALIAS_FACTOR_COUNT
+      && manifest.factorCount === payload.meta?.factorCount
+      && manifest.independentFactorCount === payload.meta?.independentFactorCount
+      && manifest.diagnosticFactorCount === payload.meta?.aliasFactorCount,
+    '팩터별 보유 이력 sidecar manifest 계약이 잘못되었습니다.',
+  );
+  if (hasData) validateFactorHoldingHistorySidecarData(payload, manifest.data);
+  return manifest;
+}
+
+function expectedGuardrailProfile(researchInputs) {
+  requireCondition(isRecord(researchInputs), 'guardrailProfile researchInputs가 없습니다.');
+  const thresholdFields = [
+    'selectionMinSharpe',
+    'selectionMaxDrawdown',
+    'selectionMaxAnnualizedCostDrag',
+    'selectionMinEffectiveNames',
+    'selectionMaxTargetHhi',
+    'selectionMaxTargetWeight',
+    'selectionMaxAbsSecurityDayContribution',
+    'selectionMaxSecurityAbsoluteContributionShare',
+    'selectionMaxLeaveOneSecurityCagrDelta',
+    'selectionExtremeEventPenaltyPoints',
+  ];
+  thresholdFields.forEach((field) => {
+    requireCondition(finite(researchInputs[field]), `researchInputs.${field}가 잘못되었습니다.`);
+  });
+  requireCondition(
+    ['warn', 'penalize', 'exclude'].includes(researchInputs.selectionExtremeEventAction),
+    'researchInputs.selectionExtremeEventAction이 잘못되었습니다.',
+  );
+  return {
+    id: ABSOLUTE_GUARDRAIL_VERSION,
+    version: 1,
+    policyNeutral: true,
+    rules: [
+      {
+        id: 'minimum_sharpe',
+        metric: 'sharpe',
+        operator: '>=',
+        threshold: researchInputs.selectionMinSharpe,
+        unit: 'ratio',
+      },
+      {
+        id: 'maximum_drawdown_magnitude',
+        metric: 'max_drawdown',
+        operator: '>=',
+        threshold: -Number(researchInputs.selectionMaxDrawdown),
+        unit: 'fraction',
+      },
+      {
+        id: 'maximum_annualized_cost_drag',
+        metric: 'annualized_cost_drag',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxAnnualizedCostDrag,
+        unit: 'fraction_per_year',
+      },
+      {
+        id: 'minimum_historical_target_effective_names',
+        metric: 'min_target_effective_names',
+        operator: '>=',
+        threshold: researchInputs.selectionMinEffectiveNames,
+        unit: 'names',
+      },
+      {
+        id: 'minimum_current_target_effective_names',
+        metric: 'current_target_effective_names',
+        operator: '>=',
+        threshold: researchInputs.selectionMinEffectiveNames,
+        unit: 'names',
+      },
+      {
+        id: 'maximum_historical_target_hhi',
+        metric: 'max_target_hhi',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxTargetHhi,
+        unit: 'fraction',
+      },
+      {
+        id: 'maximum_current_target_hhi',
+        metric: 'current_target_hhi',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxTargetHhi,
+        unit: 'fraction',
+      },
+      {
+        id: 'maximum_historical_target_weight',
+        metric: 'max_target_weight',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxTargetWeight,
+        unit: 'fraction',
+      },
+      {
+        id: 'maximum_current_target_weight',
+        metric: 'current_target_max_weight',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxTargetWeight,
+        unit: 'fraction',
+      },
+      {
+        id: 'maximum_security_day_contribution',
+        metric: 'max_abs_security_day_contribution',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxAbsSecurityDayContribution,
+        unit: 'portfolio_return_fraction',
+      },
+      {
+        id: 'maximum_security_absolute_contribution_share',
+        metric: 'max_security_absolute_contribution_share',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxSecurityAbsoluteContributionShare,
+        unit: 'fraction',
+      },
+      {
+        id: 'maximum_leave_one_security_cagr_delta',
+        metric: 'max_abs_leave_one_security_cagr_delta',
+        operator: '<=',
+        threshold: researchInputs.selectionMaxLeaveOneSecurityCagrDelta,
+        unit: 'cagr_fraction',
+      },
+    ],
+    requiredContracts: {
+      completePolicyInputs: true,
+      completeExecutionCoverage: true,
+      currentTargetAvailable: true,
+      contributionDiagnosticsComplete: true,
+    },
+    extremeEventAction: researchInputs.selectionExtremeEventAction,
+    extremeEventPenaltyPoints: researchInputs.selectionExtremeEventPenaltyPoints,
+  };
+}
+
+function validateGuardrailProfile(payload) {
+  const profile = payload.selectionDecision?.guardrailProfile;
+  requireCondition(isRecord(profile), 'selectionDecision.guardrailProfile이 없습니다.');
+  requireCondition(
+    Array.isArray(profile.rules) && profile.rules.length === 12,
+    'guardrailProfile은 정확히 12개 규칙이어야 합니다.',
+  );
+  requireCondition(
+    sameJson(profile, expectedGuardrailProfile(payload.researchInputs)),
+    'guardrailProfile이 researchInputs 기반 exact 계약과 다릅니다.',
+  );
+  return profile;
+}
+
+function concentrationGuardrailExpectations(row, researchInputs) {
+  return {
+    guardrail_historical_effective_names:
+      Number(row.min_target_effective_names) >= Number(researchInputs.selectionMinEffectiveNames),
+    guardrail_current_effective_names:
+      Number(row.current_target_effective_names) >= Number(researchInputs.selectionMinEffectiveNames),
+    guardrail_historical_target_hhi:
+      Number(row.max_target_hhi) <= Number(researchInputs.selectionMaxTargetHhi),
+    guardrail_current_target_hhi:
+      Number(row.current_target_hhi) <= Number(researchInputs.selectionMaxTargetHhi),
+    guardrail_historical_target_weight:
+      Number(row.max_target_weight) <= Number(researchInputs.selectionMaxTargetWeight),
+    guardrail_current_target_weight:
+      Number(row.current_target_max_weight) <= Number(researchInputs.selectionMaxTargetWeight),
+  };
+}
+
+function validateRankingConcentrationGuardrails(payload) {
+  const metricDomains = {
+    min_target_effective_names: (value) => value >= 0,
+    current_target_effective_names: (value) => value >= 0,
+    max_target_hhi: (value) => value >= 0 && value <= 1,
+    current_target_hhi: (value) => value >= 0 && value <= 1,
+    max_target_weight: (value) => value >= 0 && value <= 1,
+    current_target_max_weight: (value) => value >= 0 && value <= 1,
+  };
+  payload.factorPolicyRanking.forEach((row, index) => {
+    Object.entries(metricDomains).forEach(([field, validDomain]) => {
+      const value = Number(row[field]);
+      requireCondition(
+        finite(row[field]) && validDomain(value),
+        `factorPolicyRanking[${index}].${field}가 잘못되었습니다.`,
+      );
+    });
+    Object.entries(concentrationGuardrailExpectations(row, payload.researchInputs)).forEach(
+      ([field, expected]) => {
+        requireCondition(
+          row[field] === expected,
+          `factorPolicyRanking[${index}].${field}가 집중도 임계값과 다릅니다.`,
+        );
+      },
+    );
+  });
+}
+
+function validateSelectedConcentrationGuardrails(payload, row, target) {
+  const concentration = target.concentration;
+  const metrics = {
+    min_target_effective_names: Number(row.min_target_effective_names),
+    current_target_effective_names: Number(row.current_target_effective_names),
+    max_target_hhi: Number(row.max_target_hhi),
+    current_target_hhi: Number(row.current_target_hhi),
+    max_target_weight: Number(row.max_target_weight),
+    current_target_max_weight: Number(row.current_target_max_weight),
+  };
+  Object.entries(metrics).forEach(([field, value]) => {
+    requireCondition(finite(value), `선택 행 집중도 지표가 잘못되었습니다: ${field}`);
+  });
+  requireCondition(
+    closeNumber(metrics.current_target_effective_names, concentration.effectiveNames)
+      && closeNumber(metrics.current_target_hhi, concentration.riskySleeveHhi)
+      && closeNumber(metrics.current_target_max_weight, concentration.maxWeight),
+    '선택 행의 현재 집중도 지표가 currentResearchTarget과 다릅니다.',
+  );
+  const expected = concentrationGuardrailExpectations(row, payload.researchInputs);
+  requireCondition(
+    Object.values(expected).every(Boolean),
+    '선택 조합이 역사상 최악값 또는 현재 집중도 절대 가드레일을 통과하지 못했습니다.',
+  );
+  requireCondition(
+    row.absolute_guardrail_pass === true
+      && row.selection_eligible === true
+      && row.selection_status === 'eligible'
+      && row.selected === true,
+    '선택 행이 pass/eligible/selected 계약을 충족하지 않습니다.',
+  );
+}
+
+function validateGridAccounting(payload) {
+  const accounting = payload.gridAccounting;
+  const ranking = payload.factorPolicyRanking;
+  requireCondition(isRecord(accounting), 'gridAccounting이 없습니다.');
+  requireCondition(Array.isArray(ranking), 'factorPolicyRanking이 배열이 아닙니다.');
+  const exactCounts = {
+    independentFactorCount: EXPECTED_INDEPENDENT_FACTOR_COUNT,
+    policyCount: EXPECTED_POLICY_COUNT,
+    expectedIndependentPairCount: EXPECTED_INDEPENDENT_PAIR_COUNT,
+    evaluatedIndependentPairCount: EXPECTED_INDEPENDENT_PAIR_COUNT,
+    missingIndependentPairCount: 0,
+    diagnosticAliasFactorCount: EXPECTED_ALIAS_FACTOR_COUNT,
+    diagnosticAliasPairCount: EXPECTED_ALIAS_PAIR_COUNT,
+  };
+  Object.entries(exactCounts).forEach(([field, expected]) => {
+    requireCondition(
+      accounting[field] === expected,
+      `gridAccounting.${field}가 ${expected}이 아닙니다.`,
+    );
+  });
+  requireCondition(
+    accounting.availableIndependentPairCount + accounting.excludedIndependentPairCount
+      === EXPECTED_INDEPENDENT_PAIR_COUNT,
+    'gridAccounting available + excluded가 244와 다릅니다.',
+  );
+  requireCondition(
+    ranking.length === EXPECTED_INDEPENDENT_PAIR_COUNT + EXPECTED_ALIAS_PAIR_COUNT,
+    'factorPolicyRanking 전체 행 수가 256이 아닙니다.',
+  );
+
+  const pairs = new Set();
+  ranking.forEach((row) => {
+    requireCondition(
+      isRecord(row) && typeof row.factor === 'string' && typeof row.policy_id === 'string',
+      'factorPolicyRanking 식별자가 잘못되었습니다.',
+    );
+    const key = pairKey(row);
+    requireCondition(!pairs.has(key), `중복 factor-policy 행입니다: ${key}`);
+    pairs.add(key);
+  });
+  const aliasRows = ranking.filter((row) => row.comparison_status === 'duplicate_alias');
+  const independentRows = ranking.filter((row) => row.comparison_status !== 'duplicate_alias');
+  requireCondition(aliasRows.length === EXPECTED_ALIAS_PAIR_COUNT, 'diagnostic alias 행 수가 12가 아닙니다.');
+  requireCondition(
+    new Set(aliasRows.map((row) => row.factor)).size === EXPECTED_ALIAS_FACTOR_COUNT,
+    'diagnostic alias 팩터 수가 3이 아닙니다.',
+  );
+  requireCondition(
+    independentRows.length === EXPECTED_INDEPENDENT_PAIR_COUNT,
+    '독립 factor-policy 행 수가 244가 아닙니다.',
+  );
+  requireCondition(
+    new Set(independentRows.map((row) => row.factor)).size === EXPECTED_INDEPENDENT_FACTOR_COUNT,
+    '독립 팩터 수가 61이 아닙니다.',
+  );
+  requireCondition(
+    new Set(independentRows.map((row) => row.policy_id)).size === EXPECTED_POLICY_COUNT,
+    '비중 정책 수가 4가 아닙니다.',
+  );
+  const policyIds = [...new Set(independentRows.map((row) => row.policy_id))].sort();
+  const rowsByFactor = new Map();
+  independentRows.forEach((row) => {
+    if (!rowsByFactor.has(row.factor)) rowsByFactor.set(row.factor, []);
+    rowsByFactor.get(row.factor).push(row);
+  });
+  rowsByFactor.forEach((rows, factor) => {
+    requireCondition(
+      sameJson(rows.map((row) => row.policy_id).sort(), policyIds),
+      `독립 팩터의 4개 정책 grid가 불완전합니다: ${factor}`,
+    );
+  });
+  const commonComparableFactorCount = [...rowsByFactor.values()].filter(
+    (rows) => rows.every((row) => row.comparison_status === 'available'),
+  ).length;
+  requireCondition(
+    commonComparableFactorCount === accounting.commonComparableFactorCount,
+    'commonComparableFactorCount가 ranking과 다릅니다.',
+  );
+
+  const availableRows = independentRows.filter((row) => row.comparison_status === 'available');
+  const excludedRows = independentRows.filter((row) => row.comparison_status !== 'available');
+  requireCondition(
+    availableRows.length === accounting.availableIndependentPairCount,
+    'availableIndependentPairCount가 ranking과 다릅니다.',
+  );
+  requireCondition(
+    excludedRows.length === accounting.excludedIndependentPairCount,
+    'excludedIndependentPairCount가 ranking과 다릅니다.',
+  );
+  const observedReasonCounts = {};
+  excludedRows.forEach((row) => {
+    requireCondition(
+      Array.isArray(row.exclusion_reason_codes) && row.exclusion_reason_codes.length > 0,
+      `제외 행에 exact reason code가 없습니다: ${pairKey(row)}`,
+    );
+    requireCondition(
+      Array.isArray(row.exclusion_reasons) && row.exclusion_reasons.length > 0,
+      `제외 행에 structured reason이 없습니다: ${pairKey(row)}`,
+    );
+    const structuredCodes = row.exclusion_reasons.map((reason) => reason?.code);
+    requireCondition(
+      sameJson(
+        [...new Set(structuredCodes)].sort(),
+        [...new Set(row.exclusion_reason_codes)].sort(),
+      ),
+      `제외 행의 reason code와 structured reason이 다릅니다: ${pairKey(row)}`,
+    );
+    row.exclusion_reason_codes.forEach((code) => {
+      requireCondition(typeof code === 'string' && code, `빈 제외 reason code입니다: ${pairKey(row)}`);
+      observedReasonCounts[code] = (observedReasonCounts[code] || 0) + 1;
+    });
+  });
+  requireCondition(
+    sameJson(observedReasonCounts, accounting.exclusionReasonCounts || {}),
+    'gridAccounting.exclusionReasonCounts가 ranking exact reasons와 다릅니다.',
+  );
+  return accounting;
+}
+
+async function validateResult(entry, payload, summary = null, options = {}) {
+  const apiResult = options.source === 'local_api';
+  requireCondition(
+    isRecord(payload) && payload.schemaVersion === RESULT_SCHEMA_VERSION,
+    'detail schemaVersion 4가 아닙니다.',
+  );
+  validateIdentity(payload.resultIdentity, entry.resultKey, 'detail', {
+    requireCanonicalTransport: !apiResult,
+  });
+  requireCondition(
+    sameJson(payload.resultIdentity, entry.identity),
+    apiResult
+      ? 'detail resultIdentity가 로컬 API 응답 identity와 다릅니다.'
+      : 'detail resultIdentity가 manifest와 다릅니다.',
+  );
+  requireCondition(
+    payload.resultKey === undefined || payload.resultKey === entry.resultKey,
+    'detail top-level resultKey가 다릅니다.',
+  );
+  requireCondition(
+    isRecord(payload.data)
+      && payload.data.synthetic === false
+      && payload.data.mode === 'live_market',
+    '결과는 실제 시장 비합성 실행이어야 합니다.',
+  );
+  requireCondition(
+    integer(payload.data.analyzedSecurityCount)
+      && Number(payload.data.analyzedSecurityCount) >= 2700,
+    '결과는 2,700개 이상 종목을 분석해야 합니다.',
+  );
+  requireCondition(
+    typeof payload.data.asOf === 'string' && payload.data.asOf,
+    'detail data.asOf가 없습니다.',
+  );
+  const observedHashFields = isRecord(payload.data.inputSha256)
+    ? Object.keys(payload.data.inputSha256).sort()
+    : [];
+  const supportedHashContract = sameJson(observedHashFields, [...LIVE_INPUT_HASH_FIELDS].sort())
+    || sameJson(observedHashFields, [...LIVE_INPUT_HASH_FIELDS_V2].sort());
+  requireCondition(
+    supportedHashContract
+      && observedHashFields.every((field) => validSha256(payload.data.inputSha256[field])),
+    '실제시장 provenance 입력 해시가 없습니다.',
+  );
+  requireCondition(
+    Array.isArray(payload.priceSources) && payload.priceSources.length > 0,
+    'priceSources가 비어 있습니다.',
+  );
+  const priceSourceSymbols = new Set();
+  payload.priceSources.forEach((row) => {
+    const symbol = typeof row?.symbol === 'string' ? row.symbol.trim().toUpperCase() : '';
+    requireCondition(
+      isRecord(row)
+        && symbol
+        && typeof row.price_source === 'string'
+        && row.price_source.trim()
+        && !priceSourceSymbols.has(symbol),
+      'priceSources 행 또는 종목 유일성 계약이 잘못되었습니다.',
+    );
+    priceSourceSymbols.add(symbol);
+  });
+  requireCondition(Array.isArray(payload.data.analyzedSymbols), 'analyzedSymbols가 배열이 아닙니다.');
+  const analyzedSymbols = payload.data.analyzedSymbols.map((value) => (
+    typeof value === 'string' ? value.trim().toUpperCase() : ''
+  ));
+  requireCondition(
+    analyzedSymbols.length === Number(payload.data.analyzedSecurityCount)
+      && analyzedSymbols.every((symbol, index) => (
+        symbol
+        && symbol === payload.data.analyzedSymbols[index]
+        && priceSourceSymbols.has(symbol)
+      ))
+      && new Set(analyzedSymbols).size === analyzedSymbols.length,
+    'analyzedSymbols 순서·유일성·priceSources coverage가 잘못되었습니다.',
+  );
+  const candidateSymbolsSha256 = await sha256Hex(
+    new TextEncoder().encode(canonicalString(analyzedSymbols)),
+  );
+  requireCondition(
+    Array.isArray(payload.sourceHealth) && payload.sourceHealth.length > 0,
+    'sourceHealth가 비어 있습니다.',
+  );
+  payload.sourceHealth.forEach((row) => {
+    requireCondition(
+      isRecord(row)
+        && typeof row.source === 'string'
+        && row.source.trim()
+        && typeof row.status === 'string'
+        && row.status.trim(),
+      'sourceHealth 행의 source/status가 잘못되었습니다.',
+    );
+  });
+  const [priceSourcesSha256, dataSourcesSha256] = await Promise.all([
+    canonicalSha256(payload.priceSources),
+    canonicalSha256(payload.sourceHealth),
+  ]);
+  requireCondition(
+    priceSourcesSha256 === payload.data.inputSha256.priceSources,
+    'priceSources RFC 8785 JCS SHA-256이 inputSha256.priceSources와 다릅니다.',
+  );
+  requireCondition(
+    dataSourcesSha256 === payload.data.inputSha256.dataSources,
+    'sourceHealth RFC 8785 JCS SHA-256이 inputSha256.dataSources와 다릅니다.',
+  );
+  const marketSnapshot = payload.resultIdentity?.keyParts?.marketSnapshot;
+  const expectedMarketSnapshot = {
+    sourceMode: payload.data.mode,
+    sourceLabel: payload.data.sourceLabel,
+    provider: payload.data.provider,
+    priceBasis: payload.data.priceBasis,
+    volumeBasis: payload.data.volumeBasis,
+    rawCloseProxySymbolCount: payload.data.rawCloseProxySymbolCount,
+    requestedThrough: payload.data.requestedThrough,
+    dataAsOf: payload.data.asOf,
+    inputSha256: payload.data.inputSha256,
+    requestedCandidateCount: payload.data.requestedCandidateCount,
+    providerReturnedCandidateCount: payload.data.providerReturnedCandidateCount,
+    analyzedSecurityCount: payload.data.analyzedSecurityCount,
+    candidateSymbolsSha256,
+  };
+  const dataHasComparison = Object.prototype.hasOwnProperty.call(payload.data, 'comparisonSymbols')
+    && Object.prototype.hasOwnProperty.call(payload.data, 'comparisonPricesSha256');
+  const identityHasComparison = Object.prototype.hasOwnProperty.call(
+    marketSnapshot || {},
+    'comparisonSymbols',
+  ) && Object.prototype.hasOwnProperty.call(marketSnapshot || {}, 'comparisonPricesSha256');
+  const hashContractHasComparison = observedHashFields.includes('comparisonPrices');
+  requireCondition(
+    dataHasComparison === identityHasComparison
+      && dataHasComparison === hashContractHasComparison,
+    '비교지수 가격 provenance 필드 범위가 서로 다릅니다.',
+  );
+  if (dataHasComparison) {
+    expectedMarketSnapshot.comparisonSymbols = payload.data.comparisonSymbols;
+    expectedMarketSnapshot.comparisonPricesSha256 = payload.data.comparisonPricesSha256;
+    requireCondition(
+      Array.isArray(payload.data.comparisonSymbols)
+        && payload.data.comparisonSymbols.length > 0
+        && validSha256(payload.data.comparisonPricesSha256)
+        && payload.data.comparisonPricesSha256 === payload.data.inputSha256.comparisonPrices,
+      '비교지수 가격 provenance 계약이 잘못되었습니다.',
+    );
+  }
+  requireCondition(
+    isRecord(marketSnapshot)
+      && Object.entries(expectedMarketSnapshot).every(
+        ([field, value]) => sameJson(marketSnapshot[field], value),
+      ),
+    'resultIdentity marketSnapshot이 detail data와 다릅니다.',
+  );
+  if (!apiResult) {
+    requireCondition(
+      isRecord(summary) && summary.schemaVersion === RESULT_SCHEMA_VERSION,
+      'summary schemaVersion 4가 아닙니다.',
+    );
+    validateIdentity(summary.resultIdentity, entry.resultKey, 'summary');
+    requireCondition(
+      sameJson(summary.resultIdentity, entry.identity),
+      'summary resultIdentity가 manifest와 다릅니다.',
+    );
+    requireCondition(
+      summary.resultKey === undefined || summary.resultKey === entry.resultKey,
+      'summary top-level resultKey가 다릅니다.',
+    );
+    requireCondition(
+      summary.dataAsOf === payload.data.asOf
+        && summary.dataMode === payload.data.mode
+        && summary.synthetic === false,
+      'summary/detail 데이터 기준이 다릅니다.',
+    );
+    requireCondition(
+      summary.analyzedSecurityCount === payload.data.analyzedSecurityCount,
+      'summary/detail 분석 종목 수가 다릅니다.',
+    );
+    requireCondition(
+      summary.selectedFactor === payload.selectedFactor
+        && summary.selectedWeightingPolicy === payload.selectedWeightingPolicy,
+      'summary/detail 선택 조합이 다릅니다.',
+    );
   }
 
-  function showUnavailable(message, requestedInputs = null, baseEntry = null) {
-    document.body.classList.add("result-unavailable");
-    state.payload = null;
-    state.summary = null;
-    setResultSource(null);
-    $("#result-key").textContent = "unsupported";
-    setInputStatus(message, "error");
-    if (baseEntry && requestedInputs) fillForm(baseEntry, requestedInputs);
-    const loading = $("#loading-state");
-    loading.textContent = message;
-    loading.classList.add("error-state");
-    loading.classList.remove("is-hidden");
+  const required = [
+    'selectedFactor',
+    'selectedWeightingPolicy',
+    'selectedReason',
+    'selectionDecision',
+    'factorPolicyRanking',
+    'policyDiagnostics',
+    'weightingPolicyRegistry',
+    'currentResearchTarget',
+    'factorPortfolios',
+    'currentTransition',
+    'selectionMethod',
+    'performance',
+    'backtestHeldPortfolio',
+    'selectedBacktestHoldingHistory',
+    'factorHoldingHistorySidecar',
+    'factorDefinitions',
+    'factorDiagnostics',
+    'researchInputs',
+    'researchScope',
+    'config',
+    'meta',
+  ];
+  required.forEach((key) => {
+    requireCondition(
+      Object.prototype.hasOwnProperty.call(payload, key),
+      `detail 필드가 없습니다: ${key}`,
+    );
+  });
+  requireCondition(
+    Array.isArray(payload.factorPolicyRanking) && payload.factorPolicyRanking.length > 0,
+    'factorPolicyRanking이 비어 있습니다.',
+  );
+  requireCondition(Array.isArray(payload.policyDiagnostics), 'policyDiagnostics가 배열이 아닙니다.');
+  requireCondition(
+    isRecord(payload.weightingPolicyRegistry)
+      && isRecord(payload.weightingPolicyRegistry.policies),
+    'weightingPolicyRegistry가 없습니다.',
+  );
+  requireCondition(
+    isRecord(payload.weightingPolicyRegistry.policies[payload.selectedWeightingPolicy]),
+    '선택 정책이 registry에 없습니다.',
+  );
+  requireCondition(
+    payload.selectionMethod.name === 'joint_factor_policy_absolute_guardrails',
+    '공동 팩터×정책 선택 계약이 아닙니다.',
+  );
+  requireCondition(
+    isRecord(payload.researchInputs)
+      && payload.researchInputs.version === RESEARCH_INPUTS_VERSION,
+    'researchInputs 버전 계약이 아닙니다.',
+  );
+  Object.entries(RESEARCH_INPUT_PARITY).forEach(([publicKey, normalizedKey]) => {
+    requireCondition(
+      Object.prototype.hasOwnProperty.call(payload.researchInputs, publicKey)
+        && Object.prototype.hasOwnProperty.call(entry.normalizedInputs, normalizedKey)
+        && sameJson(payload.researchInputs[publicKey], entry.normalizedInputs[normalizedKey]),
+      `researchInputs.${publicKey}가 manifest normalizedInputs와 다릅니다.`,
+    );
+  });
+  requireCondition(
+    integer(payload.researchInputs.evaluationYears)
+      && Number(payload.researchInputs.evaluationYears) * 252
+        === Number(payload.researchInputs.evaluationWindowDays),
+    'researchInputs 평가 연수와 거래일 창이 다릅니다.',
+  );
+  if (apiResult) {
+    requireCondition(
+      sameJson(payload.researchInputs, options.expectedResearchInputs),
+      '로컬 API 결과 researchInputs가 요청과 다릅니다.',
+    );
   }
 
-  function showLoading(message) {
-    const loading = $("#loading-state");
-    loading.textContent = message;
-    loading.classList.remove("error-state", "is-hidden");
+  validateGuardrailProfile(payload);
+  validatePerformance(payload);
+  validateFactorDiagnostics(payload);
+  validateGridAccounting(payload);
+  validateRankingConcentrationGuardrails(payload);
+  const selectedRows = payload.factorPolicyRanking.filter((row) => (
+    row.factor === payload.selectedFactor
+      && row.policy_id === payload.selectedWeightingPolicy
+  ));
+  requireCondition(
+    selectedRows.length === 1
+      && selectedRows[0].selected === true
+      && selectedRows[0].absolute_guardrail_pass === true
+      && selectedRows[0].selection_eligible === true
+      && selectedRows[0].selection_status === 'eligible'
+      && selectedRows[0].comparison_status === 'available'
+      && finite(selectedRows[0].selection_score),
+    '선택 팩터×정책 행이 정확히 하나의 pass/eligible/selected available 행이 아닙니다.',
+  );
+  requireCondition(
+    payload.factorPolicyRanking.filter((row) => row.selected === true).length === 1,
+    'factorPolicyRanking에 선택 행이 하나가 아닙니다.',
+  );
+  requireCondition(
+    payload.meta.policyFactorRunCount === payload.factorPolicyRanking.length,
+    'factorPolicyRanking 개수가 meta와 다릅니다.',
+  );
+
+  const { target, maxWeight } = validateTargetAllocation(payload);
+  validateFactorPortfolios(payload);
+  const held = validateBacktestHeldPortfolio(payload);
+  validateSelectedBacktestHoldingHistory(payload, held);
+  validateFactorHoldingHistorySidecarManifest(payload);
+  requireCondition(
+    target.factor === payload.selectedFactor
+      && target.weightingPolicyId === payload.selectedWeightingPolicy,
+    'currentResearchTarget이 선택 조합과 다릅니다.',
+  );
+  requireCondition(
+    target.asOf === payload.data.asOf && target.signalDate === payload.data.asOf,
+    'currentResearchTarget 기준일이 다릅니다.',
+  );
+  validateSelectedConcentrationGuardrails(payload, selectedRows[0], target);
+  if (!apiResult) {
+    requireCondition(
+      sameJson(summary.currentResearchTarget, target),
+      'summary/detail currentResearchTarget이 다릅니다.',
+    );
+    requireCondition(
+      sameJson(summary.weights, target.weights),
+      'summary/detail weights가 다릅니다.',
+    );
+    requireCondition(
+      closeNumber(summary.cashWeight, target.cashWeight),
+      'summary/detail cashWeight가 다릅니다.',
+    );
+    requireCondition(
+      closeNumber(summary.maxWeight, maxWeight),
+      'summary/detail maxWeight가 다릅니다.',
+    );
+    requireCondition(
+      summary.portfolioSize === target.selectedSecurityCount,
+      'summary/detail portfolioSize가 다릅니다.',
+    );
+    requireCondition(
+      sameJson(summary.concentration, target.concentration),
+      'summary/detail concentration이 다릅니다.',
+    );
+  }
+  return selectedRows[0];
+}
+
+function bindManualUpdateControls() {
+  const button = document.querySelector('#manual-update-button');
+  if (button) {
+    button.setAttribute('href', MANUAL_UPDATE_WORKFLOW_URL);
+    button.setAttribute('target', '_blank');
+    button.setAttribute('rel', 'noopener');
+    if (typeof button.addEventListener === 'function') {
+      button.addEventListener('click', () => {
+        const status = document.querySelector('#manual-update-status');
+        if (status) {
+          status.textContent = '저장소 쓰기 권한이 있는 GitHub 계정으로 Run workflow를 눌러 실행 시점의 최신 제공자 데이터 재실행을 시작하세요.';
+        }
+      });
+    }
   }
 
-  function showResult() {
-    document.body.classList.remove("result-unavailable");
-    $("#loading-state").classList.add("is-hidden");
+  const command = document.querySelector('#manual-update-command');
+  if (command) command.textContent = MANUAL_UPDATE_COMMAND;
+
+  const copyButton = document.querySelector('#copy-update-command');
+  if (!copyButton || typeof copyButton.addEventListener !== 'function') return;
+  copyButton.addEventListener('click', async () => {
+    const status = document.querySelector('#manual-update-status');
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || !window.isSecureContext) {
+        throw new Error('clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(MANUAL_UPDATE_COMMAND);
+      if (status) status.textContent = 'CLI 실행 명령을 복사했습니다. 터미널에서 붙여넣어 수동 실행할 수 있습니다.';
+    } catch (_) {
+      if (status) status.textContent = `복사가 제한되었습니다. 아래 명령을 직접 복사하세요: ${MANUAL_UPDATE_COMMAND}`;
+    }
+  });
+}
+
+const formatPercent = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return `${(Number(value) * 100).toFixed(2)}%`;
+};
+
+const formatNumber = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 4 });
+};
+
+const formatInteger = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+  return Number(value).toLocaleString('ko-KR', { maximumFractionDigits: 0 });
+};
+
+const formatCount = (value) => {
+  const formatted = formatInteger(value);
+  return formatted === '-' ? '-' : `${formatted}개`;
+};
+
+const classForNumber = (value) => Number(value) >= 0 ? 'positive' : 'negative';
+const textValue = (value) => value === null || value === undefined ? '-' : String(value);
+const joinReasonList = (value) => {
+  if (Array.isArray(value)) return value.map(textValue).filter((item) => item !== '-').join(', ');
+  const text = textValue(value);
+  return text === '-' ? '' : text;
+};
+
+function formatKoreanDateTime(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return textValue(value);
+  return `${date.toLocaleString('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })} KST`;
+}
+
+function humanProvider(value) {
+  const text = textValue(value);
+  const labels = {
+    'yfinance-free-public-data': '야후 파이낸스 무료 공개 데이터',
+    'yahoo-chart-fallback': 'Yahoo chart 조정종가 보강 데이터',
+    'nasdaq-latest-repair': 'Nasdaq 최신 종가 보강 데이터',
+    'stooq-fallback': 'Stooq 무료 일별 종가 대체 데이터',
+    'finance-datareader-fallback': 'FinanceDataReader 무료 종가 대체 데이터',
+    'no-live-price-provider': '사용 가능한 실시간 가격 제공자 없음',
+    'offline-sample': '오프라인 샘플 데이터',
+    'offline_sample': '오프라인 샘플 데이터',
+  };
+  if (text.includes('+')) {
+    return text.split('+').map((part) => labels[part] || `기타 제공자(${part})`).join(' + ');
+  }
+  return labels[text] || text;
+}
+
+function humanOutputLabel(value) {
+  const text = textValue(value);
+  const labels = {
+    'Research signals (not tradable)': '연구용 신호(매매 권고 아님)',
+    'Practical recommendations': '실행 가능성 검토를 통과한 추천 후보',
+    'No current recommendation': '현재 추천 후보 없음',
+  };
+  return labels[text] || text;
+}
+
+function humanStatus(status, outputLabel) {
+  const text = textValue(status);
+  if (text === '-') return humanOutputLabel(outputLabel);
+  if (text === 'sample_offline_not_current') {
+    return '오프라인 샘플 · 현재 추천 아님';
+  }
+  if (text === 'current_live') {
+    return '최신 데이터 · 실행 가능성 점검 통과';
+  }
+  if (text.includes('subset')) {
+    return '일부 종목 실행 · 연구용 신호';
+  }
+  if (text.includes('with_limitations')) {
+    return '최신 데이터 · 제한 조건 때문에 연구용 신호';
+  }
+  if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
+    return '현재 데이터 사용 · 연구용 신호 · 매매 권고 아님';
+  }
+  if (text.includes('pass')) {
+    return '현재 데이터 사용 · 품질 점검 통과';
+  }
+  if (text.includes('stale')) {
+    return '데이터가 최신이 아닐 수 있음';
+  }
+  if (text.includes('fail') || text.includes('blocked')) {
+    return '제한 조건 때문에 추천 보류';
+  }
+  return text;
+}
+
+function isPracticalRun(run = currentRun()) {
+  const summary = run.summary || {};
+  return summary.recommendation_output_key === 'recommendations'
+    && summary.research_only === false
+    && summary.recommendation_output_available === true
+    && summary.tradable_output_available === true
+    && summary.current_recommendations_available === true
+    && summary.tradable_recommendations_available === true
+    && summary.same_run_factor_selection_blocked_for_tradable === false
+    && summary.same_sample_selection_blocked_for_tradable === false;
+}
+
+function humanFactorCategory(value) {
+  const text = textValue(value);
+  const labels = {
+    traditional: '전통 모멘텀',
+    recent: '최근 수익률',
+    composite: '복합 모멘텀',
+    risk_adjusted: '위험조정 모멘텀',
+    trend: '추세/이동평균',
+    drawdown: '낙폭/고점 근접',
+    breakout: '돌파',
+    reversal: '반전 보정',
+    acceleration: '가속도',
+    quality: '추세 품질',
+    cross_sectional: '횡단면 상대강도',
+    robust: '이상치 완화',
+    range: '가격 범위 위치',
+    unknown: '분류 정보 없음',
+  };
+  return labels[text] || `기타(${text})`;
+}
+
+function humanWeightingMethod(value) {
+  const text = textValue(value);
+  const labels = {
+    equal: '동일 비중',
+    score_size_liquidity: '점수·규모·유동성 기반',
+    score_proportional_capped: '팩터 점수 비례·상한 적용',
+    best_factor_score_proportional_capped: '최고 팩터 점수 비례·상한 적용',
+    top_factor_equal_sleeve: '상위 팩터 동일비중 합산',
+  };
+  return labels[text] || text;
+}
+
+function currentRun() {
+  const runs = state.data?.runs || [];
+  return runs[state.activeRunIndex] || runs[state.data?.latest_run_index || 0] || state.data?.latest || {};
+}
+
+function runPayloadGeneratedAt(run) {
+  return run?.generated_at_utc || state.data?.generated_at_utc || null;
+}
+
+function uniqueDates(run) {
+  const source = (run.factor_leaders || []).length ? run.factor_leaders : (run.holdings || []);
+  return [...new Set(source.map((row) => row.date).filter(Boolean))].sort().reverse();
+}
+
+function selectedDate() {
+  return document.querySelector('#date-select').value;
+}
+
+function selectedWindow() {
+  return document.querySelector('#window-select').value;
+}
+
+function selectedFactor() {
+  const selector = document.querySelector('#factor-select');
+  return selector?.value || currentRun().summary?.selected_factor || '';
+}
+
+function selectedLookbackMonths() {
+  const selector = document.querySelector('#lookback-months-select');
+  return Math.round(clampNumber(selector?.value, 1, 60, DASHBOARD_INPUT_DEFAULTS.lookbackMonths));
+}
+
+function selectedRebalanceFrequency() {
+  const selector = document.querySelector('#rebalance-select');
+  const value = selector?.value || DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+  return ['W', 'ME', 'QE'].includes(value) ? value : DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+}
+
+function clampedTransactionCostBps() {
+  const input = document.querySelector('#transaction-cost-input');
+  const value = clampNumber(input?.value, 0, 200, DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
+  if (input && String(input.value) !== String(value)) input.value = String(value);
+  return value;
+}
+
+function clampedSlippageBps() {
+  const input = document.querySelector('#slippage-input');
+  const value = clampNumber(input?.value, 0, 200, DASHBOARD_INPUT_DEFAULTS.slippageBps);
+  if (input && String(input.value) !== String(value)) input.value = String(value);
+  return value;
+}
+
+function clampNumber(value, minValue, maxValue, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(minValue, Math.min(maxValue, parsed));
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clampedTopN() {
+  const input = document.querySelector('#topn-input');
+  const limit = storedScenarioRowLimit(currentRun(), selectedFactor());
+  const value = Math.round(clampNumber(input?.value, 1, limit, Math.min(DASHBOARD_INPUT_DEFAULTS.topN, limit)));
+  if (input && String(input.value) !== String(value)) input.value = String(value);
+  return value;
+}
+
+function storedScenarioRowLimit(run = currentRun(), factor = selectedFactor()) {
+  const factorRows = (run?.factor_score_snapshots || [])
+    .filter((snapshot) => !factor || snapshot?.factor === factor)
+    .map((snapshot) => Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0);
+  const latestOutputCount = latestOutputMatchesFactor(run || {}, factor)
+    ? (run?.latest_output_rows || []).length
+    : 0;
+  const observed = Math.max(0, ...factorRows, latestOutputCount);
+  return Math.max(1, Math.min(50, observed || DASHBOARD_INPUT_DEFAULTS.topN));
+}
+
+function syncTopNAvailability(run = currentRun(), factor = selectedFactor()) {
+  const limit = storedScenarioRowLimit(run, factor);
+  const input = document.querySelector('#topn-input');
+  if (input) {
+    input.max = String(limit);
+    input.value = String(Math.round(clampNumber(
+      input.value,
+      1,
+      limit,
+      Math.min(DASHBOARD_INPUT_DEFAULTS.topN, limit),
+    )));
+  }
+  if (typeof document.querySelectorAll === 'function') {
+    document.querySelectorAll('[data-topn-preset]').forEach((button) => {
+      const requested = Number(button.getAttribute('data-topn-preset'));
+      const unavailable = Number.isFinite(requested) && requested > limit;
+      button.disabled = unavailable;
+      button.setAttribute('aria-disabled', String(unavailable));
+      button.title = unavailable
+        ? `현재 공개 payload에는 선택 팩터 구성종목이 ${formatInteger(limit)}개만 저장되어 있습니다.`
+        : '';
+    });
+  }
+  const hint = document.querySelector('#topn-hint');
+  if (hint) {
+    hint.textContent = `현재 공개 payload에 저장된 선택 팩터의 canonical 구성종목 ${formatInteger(limit)}개 안에서만 프록시를 계산합니다.`;
+  }
+  return limit;
+}
+
+function clampedMaxWeight() {
+  const input = document.querySelector('#max-weight-input');
+  const percent = clampNumber(input?.value, 1, 50, DASHBOARD_INPUT_DEFAULTS.maxWeightPercent);
+  if (input && String(input.value) !== String(percent)) input.value = String(percent);
+  return percent / 100;
+}
+
+function inputScenarioParameters() {
+  const transactionCostBps = clampedTransactionCostBps();
+  const slippageBps = clampedSlippageBps();
+  return {
+    lookbackMonths: selectedLookbackMonths(),
+    topN: clampedTopN(),
+    maxWeight: clampedMaxWeight(),
+    rebalanceFrequency: selectedRebalanceFrequency(),
+    transactionCostBps,
+    slippageBps,
+    totalCostRate: (transactionCostBps + slippageBps) / 10000,
+  };
+}
+
+function rebalanceFrequencyLabel(value) {
+  const labels = { W: '주간', ME: '월간', QE: '분기' };
+  return labels[value] || value || '-';
+}
+
+function factorOptions(run = currentRun()) {
+  const options = run.factor_options || [];
+  if (options.length) return options;
+  const factors = [...new Set([
+    run.summary?.selected_factor,
+    ...(run.factor_leaders || []).map((row) => row.best_factor),
+    ...(run.factor_period_rankings || []).map((row) => row.factor),
+  ].filter(Boolean))].sort();
+  return factors.map((factor) => ({ factor, category: 'unknown', description_ko: '팩터 설명 정보가 없습니다.' }));
+}
+
+function factorDescription(factor, run = currentRun()) {
+  const option = factorOptions(run).find((item) => item.factor === factor);
+  if (!option) return '팩터 설명 정보가 없습니다.';
+  const category = humanFactorCategory(option.category);
+  const description = option.description_ko || option.description || '설명 정보가 없습니다.';
+  return `${category} · ${description}`;
+}
+
+function periodMatrixEntry(run, date, windowKey) {
+  return (run.factor_period_matrix || []).find((row) => row.date === date && row.window === windowKey) || null;
+}
+
+function periodFactorStats(run, date, windowKey, factor) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors)) {
+    const index = matrix.factors.indexOf(factor);
+    if (index >= 0) {
+      return {
+        factor,
+        rank: index + 1,
+        period_return: optionalNumber(matrix.returns?.[index]),
+        factor_count: matrix.factors.length,
+        window_label: matrix.window_label || windowKey,
+      };
+    }
+    return {
+      factor,
+      rank: null,
+      period_return: null,
+      factor_count: matrix.factors.length,
+      window_label: matrix.window_label || windowKey,
+    };
+  }
+  const row = (run.factor_period_rankings || []).find((item) => (
+    item.date === date && item.window === windowKey && item.factor === factor
+  ));
+  if (!row) return null;
+  return { ...row, rank: row.rank, factor_count: row.factor_count || null };
+}
+
+function periodFactorStatsIncludingDiagnostic(run, date, windowKey, factor) {
+  const ranked = periodFactorStats(run, date, windowKey, factor);
+  if (ranked && optionalNumber(ranked.period_return) !== null) return ranked;
+
+  const series = factorBacktestSeries(run, factor);
+  const endIndex = Array.isArray(series?.dates) ? series.dates.indexOf(date) : -1;
+  const tradingDays = tradingDaysForWindow(run, windowKey);
+  const startIndex = endIndex - tradingDays;
+  const start = startIndex >= 0 ? strictPositiveNav(series?.equity?.[startIndex]) : null;
+  const end = endIndex >= 0 ? strictPositiveNav(series?.equity?.[endIndex]) : null;
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  const option = factorOptions(run).find((row) => row.factor === factor) || {};
+  return {
+    factor,
+    rank: null,
+    period_return: start !== null && end !== null ? end / start - 1 : null,
+    factor_count: matrix?.factors?.length ?? ranked?.factor_count ?? null,
+    window_label: matrix?.window_label || ranked?.window_label || windowKey,
+    selection_eligible: option.selection_eligible === true,
+    selection_status: option.selection_status || 'diagnostic_only',
+    diagnostic_fallback: true,
+  };
+}
+
+function periodBestStats(run, date, windowKey) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors) && matrix.factors.length) {
+    return {
+      factor: matrix.factors[0],
+      rank: 1,
+      period_return: optionalNumber(matrix.returns?.[0]),
+      factor_count: matrix.factors.length,
+      window_label: matrix.window_label || windowKey,
+    };
+  }
+  const leader = (run.factor_leaders || []).find((item) => item.date === date && item.window === windowKey);
+  if (!leader) return null;
+  return {
+    factor: leader.best_factor,
+    rank: 1,
+    period_return: leader.best_return,
+    factor_count: leader.factor_count,
+    window_label: leader.window_label || windowKey,
+  };
+}
+
+function factorScoreSnapshot(run, date, factor) {
+  return (run.factor_score_snapshots || []).find((snapshot) => snapshot.date === date && snapshot.factor === factor) || null;
+}
+
+function factorWeightSnapshot(run, date, windowKey, factor) {
+  return (run.factor_weight_snapshots || []).find((snapshot) => (
+    snapshot.date === date && snapshot.window === windowKey && snapshot.factor === factor
+  )) || null;
+}
+
+function normalizeSnapshotRows(snapshot) {
+  const rows = snapshot?.rows || [];
+  return rows
+    .map((row) => {
+      if (Array.isArray(row)) return { symbol: row[0], score: Number(row[1]) };
+      return { symbol: row.symbol, score: Number(row.score) };
+    })
+    .filter((row) => row.symbol && Number.isFinite(row.score))
+    .sort((a, b) => Number(b.score) - Number(a.score) || String(a.symbol).localeCompare(String(b.symbol)));
+}
+
+function normalizeWeightRows(snapshot) {
+  const rows = snapshot?.rows || [];
+  return rows
+    .map((row) => {
+      if (Array.isArray(row)) return { symbol: row[0], weight: Number(row[1]), score: Number(row[2]) };
+      return { symbol: row.symbol, weight: Number(row.weight ?? row.default_weight), score: Number(row.score) };
+    })
+    .filter((row) => row.symbol && Number.isFinite(row.weight) && row.weight > 0)
+    .sort((a, b) => Number(b.weight) - Number(a.weight) || String(a.symbol).localeCompare(String(b.symbol)));
+}
+
+function computeScenarioAllocation(rows, topN, maxWeight) {
+  const safeRows = normalizeSnapshotRows({ rows });
+  const count = Math.max(1, Math.min(50, Math.round(Number(topN) || 20), safeRows.length || 1));
+  const cap = Math.max(0.01, Math.min(0.5, Number(maxWeight) || 0.1));
+  const selected = safeRows.slice(0, count);
+  const scores = selected.map((row) => Number(row.score) || 0);
+  const minScore = scores.length ? Math.min(...scores) : 0;
+  const maxScore = scores.length ? Math.max(...scores) : 0;
+  const scoreRange = maxScore - minScore;
+  const rawScores = scoreRange > 0
+    ? scores.map((score) => score - minScore + Math.max(scoreRange * 1e-6, 1e-9))
+    : selected.map((_, index) => selected.length - index);
+  const weights = Array(selected.length).fill(0);
+  const remainingIndexes = new Set(selected.map((_, index) => index));
+  let remainingBudget = 1;
+  while (remainingIndexes.size && remainingBudget > 1e-12) {
+    const activeRawTotal = [...remainingIndexes].reduce((sum, index) => sum + rawScores[index], 0);
+    if (activeRawTotal <= 0) break;
+    const cappedThisRound = [];
+    for (const index of remainingIndexes) {
+      const candidateWeight = remainingBudget * (rawScores[index] / activeRawTotal);
+      if (candidateWeight > cap) {
+        weights[index] = cap;
+        cappedThisRound.push(index);
+      }
+    }
+    if (!cappedThisRound.length) {
+      for (const index of remainingIndexes) {
+        weights[index] = remainingBudget * (rawScores[index] / activeRawTotal);
+      }
+      remainingBudget = 0;
+      break;
+    }
+    cappedThisRound.forEach((index) => {
+      remainingIndexes.delete(index);
+      remainingBudget -= weights[index];
+    });
+  }
+  const weighted = selected.map((row, index) => ({
+    ...row,
+    display_rank: index + 1,
+    display_weight: Math.max(0, weights[index] || 0),
+    scenario_weight: Math.max(0, weights[index] || 0),
+  }));
+  const investedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
+  return {
+    weighted,
+    investedTotal,
+    displayedTotal: investedTotal,
+    portfolioTotal: investedTotal,
+    cashTotal: Math.max(0, 1 - investedTotal),
+    unusedCandidateCount: Math.max(0, safeRows.length - weighted.length),
+    weightingMethod: 'score_proportional_capped',
+    topN: count,
+    maxWeight: cap,
+    availableCount: safeRows.length,
+  };
+}
+
+function topFactorsForDate(run, date, windowKey, limit = 10) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors)) {
+    return matrix.factors
+      .map((factor, index) => ({
+        factor,
+        rank: index + 1,
+        period_return: optionalNumber(matrix.returns?.[index]),
+        window_label: matrix.window_label || windowKey,
+        factor_count: matrix.factor_count || matrix.factors.length,
+      }))
+      .filter((row) => row.factor)
+      .slice(0, limit);
+  }
+  return (run.factor_period_rankings || [])
+    .filter((row) => row.date === date && row.window === windowKey)
+    .sort((a, b) => Number(a.rank || 9999) - Number(b.rank || 9999))
+    .slice(0, limit)
+    .map((row, index) => ({
+      factor: row.factor,
+      rank: row.rank || index + 1,
+      period_return: optionalNumber(row.period_return),
+      window_label: row.window_label || windowKey,
+      factor_count: row.factor_count || null,
+    }))
+    .filter((row) => row.factor);
+}
+
+function capAggregatedWeights(rows, maxWeight) {
+  const cap = Math.max(0.01, Math.min(0.5, Number(maxWeight) || 0.1));
+  const clean = rows
+    .map((row) => ({ ...row, raw_ensemble_weight: Math.max(0, Number(row.raw_ensemble_weight) || 0) }))
+    .filter((row) => row.symbol && row.raw_ensemble_weight > 0);
+  const rawTotal = clean.reduce((sum, row) => sum + row.raw_ensemble_weight, 0);
+  if (!clean.length || rawTotal <= 0) {
+    return {
+      rows: [],
+      investedTotal: 0,
+      cashTotal: 1,
+      maxWeight: cap,
+    };
+  }
+  const targetBudget = Math.min(1, rawTotal);
+  const weights = clean.map((row) => row.raw_ensemble_weight * targetBudget / rawTotal);
+  const active = new Set(clean.map((_, index) => index));
+  let remainingBudget = targetBudget;
+  while (active.size && remainingBudget > 1e-12) {
+    const activeWeightTotal = [...active].reduce((sum, index) => sum + weights[index], 0);
+    if (activeWeightTotal <= 0) break;
+    const cappedThisRound = [];
+    for (const index of active) {
+      const candidateWeight = remainingBudget * (weights[index] / activeWeightTotal);
+      if (candidateWeight > cap) {
+        weights[index] = cap;
+        cappedThisRound.push(index);
+      }
+    }
+    if (!cappedThisRound.length) {
+      for (const index of active) {
+        weights[index] = remainingBudget * (weights[index] / activeWeightTotal);
+      }
+      remainingBudget = 0;
+      break;
+    }
+    cappedThisRound.forEach((index) => {
+      active.delete(index);
+      remainingBudget -= weights[index];
+    });
+  }
+  const cappedRows = clean.map((row, index) => ({
+    ...row,
+    display_weight: Math.max(0, weights[index] || 0),
+    weight_cap: cap,
+    weight_cap_excess: Math.max(0, (row.raw_ensemble_weight * targetBudget / rawTotal) - (weights[index] || 0)),
+  }));
+  const investedTotal = cappedRows.reduce((sum, row) => sum + row.display_weight, 0);
+  return {
+    rows: cappedRows,
+    investedTotal,
+    cashTotal: Math.max(0, 1 - investedTotal),
+    maxWeight: cap,
+  };
+}
+
+function topFactorEnsembleAllocation(run, date, windowKey, topN, maxWeight, factorLimit = 10) {
+  const factorRows = topFactorsForDate(run, date, windowKey, factorLimit);
+  const displayTopN = Math.max(1, Math.min(50, Math.round(Number(topN) || 20)));
+  const sleeves = [];
+  const missingFactors = [];
+  factorRows.forEach((factorRow) => {
+    const snapshot = factorWeightSnapshot(run, date, windowKey, factorRow.factor);
+    const rows = normalizeWeightRows(snapshot);
+    if (!rows.length) {
+      missingFactors.push(factorRow.factor);
+      return;
+    }
+    sleeves.push({ ...factorRow, snapshot, rows });
+  });
+
+  const bySymbol = new Map();
+  const sleeveWeight = sleeves.length ? 1 / sleeves.length : 0;
+  sleeves.forEach((sleeve) => {
+    sleeve.rows.forEach((row) => {
+      const key = String(row.symbol);
+      const current = bySymbol.get(key) || {
+        symbol: key,
+        raw_ensemble_weight: 0,
+        factor_count: 0,
+        factors: [],
+        score_sum: 0,
+        best_score: Number.NEGATIVE_INFINITY,
+        factor_weight_sum: 0,
+      };
+      const sleeveContribution = sleeveWeight * (Number(row.weight) || 0);
+      current.raw_ensemble_weight += sleeveContribution;
+      current.factor_weight_sum += Number(row.weight) || 0;
+      current.factor_count += 1;
+      current.factors.push(sleeve.factor);
+      current.score_sum += Number(row.score) || 0;
+      current.best_score = Math.max(current.best_score, Number(row.score) || Number.NEGATIVE_INFINITY);
+      bySymbol.set(key, current);
+    });
+  });
+
+  const capped = capAggregatedWeights([...bySymbol.values()], maxWeight);
+  const allWeighted = capped.rows
+    .sort((a, b) => (
+      Number(b.display_weight) - Number(a.display_weight)
+      || Number(b.factor_count) - Number(a.factor_count)
+      || Number(b.score_sum) - Number(a.score_sum)
+      || String(a.symbol).localeCompare(String(b.symbol))
+    ));
+  const weighted = allWeighted
+    .slice(0, displayTopN)
+    .map((row, index) => ({
+      ...row,
+      display_rank: index + 1,
+      display_weight: Math.max(0, row.display_weight || 0),
+      weighting_method: 'top_factor_equal_sleeve',
+    }));
+
+  return {
+    weighted,
+    topN: displayTopN,
+    factorRows,
+    sleeves,
+    factorsUsedCount: sleeves.length,
+    factorLimit,
+    missingFactors,
+    totalCandidateCount: bySymbol.size,
+    hiddenWeight: allWeighted.slice(displayTopN).reduce((sum, row) => sum + (Number(row.display_weight) || 0), 0),
+    investedTotal: capped.investedTotal,
+    cashTotal: capped.cashTotal,
+    maxWeight: capped.maxWeight,
+    windowLabel: factorRows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
+  };
+}
+
+function latestOutputFactor(run) {
+  const rows = Array.isArray(run.latest_output_rows) ? run.latest_output_rows : [];
+  if (!rows.length) return '';
+  const rowFactors = [...new Set(rows.map((row) => row?.selected_factor).filter(Boolean))];
+  if (rowFactors.length === 1) return rowFactors[0];
+  if (rowFactors.length === 0) return run.summary?.selected_factor || '';
+  return '';
+}
+
+function latestOutputMatchesFactor(run, factor) {
+  const outputFactor = latestOutputFactor(run);
+  return Boolean(outputFactor && factor && outputFactor === factor);
+}
+
+function latestOutputSignalRows(run, topN, factor = null) {
+  if (factor && !latestOutputMatchesFactor(run, factor)) return [];
+  const rows = Array.isArray(run.latest_output_rows) ? run.latest_output_rows : [];
+  const count = Math.max(1, Math.min(50, Math.round(Number(topN) || 20), rows.length || 1));
+  return rows.slice(0, count).map((row, index) => ({
+    rank: row.rank || index + 1,
+    symbol: row.symbol,
+    score: optionalNumber(row.score),
+    weight: optionalNumber(row.weight) || 0,
+    pre_cap_weight: optionalNumber(row.pre_cap_weight ?? row.proposed_weight ?? row.weight) || 0,
+    weighting_method: row.weighting_method || 'latest_output_rows',
+    signal_date: row.signal_date || run.summary?.data_as_of || '-',
+    selected_factor: row.selected_factor || run.summary?.selected_factor || '-',
+  })).filter((row) => row.symbol);
+}
+
+function bestFactorSignalRows(run, date, windowKey, topN, maxWeight) {
+  const best = periodBestStats(run, date, windowKey);
+  const snapshot = best?.factor ? factorScoreSnapshot(run, date, best.factor) : null;
+  const allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
+  const researchOnly = !isPracticalRun(run);
+  const requestedTopN = Math.max(1, Math.min(50, Math.round(Number(topN) || 20)));
+  let rows = allocation.weighted.map((row) => ({
+    rank: row.display_rank,
+    symbol: row.symbol,
+    score: row.score,
+    weight: researchOnly ? 0 : row.display_weight,
+    pre_cap_weight: row.display_weight,
+    weighting_method: 'best_factor_score_proportional_capped',
+    signal_date: snapshot?.score_date || date,
+    selected_factor: best?.factor || '-',
+  }));
+  let signalSource = 'best_factor_score_snapshot';
+  if (!rows.length && Array.isArray(run.latest_output_rows) && run.latest_output_rows.length) {
+    rows = latestOutputSignalRows(run, requestedTopN);
+    signalSource = 'latest_output_rows_fallback';
+  }
+  return {
+    rows,
+    best,
+    snapshot,
+    allocation,
+    researchOnly,
+    signalSource,
+    topN: signalSource === 'latest_output_rows_fallback' ? requestedTopN : allocation.topN,
+    maxWeight: allocation.maxWeight,
+    windowLabel: best?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
+  };
+}
+
+function setText(selector, value) {
+  document.querySelector(selector).textContent = textValue(value);
+}
+
+function appendDefinition(target, label, value) {
+  const dt = document.createElement('dt');
+  dt.textContent = label;
+  const dd = document.createElement('dd');
+  dd.textContent = textValue(value);
+  target.append(dt, dd);
+}
+
+function formatCounts(counts, labels = {}) {
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return '-';
+  const entries = Object.entries(counts).filter(([, value]) => Number(value) > 0);
+  if (!entries.length) return '-';
+  return entries
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([key, value]) => `${labels[key] || key} ${formatInteger(value)}`)
+    .join(' · ');
+}
+
+function humanSourceName(value) {
+  const text = textValue(value);
+  const labels = {
+    'yfinance-adjusted-daily': 'yfinance 조정가격',
+    'yahoo-chart-adjusted-daily-fallback': 'Yahoo chart 보강',
+    'nasdaq-latest-close-repair': 'Nasdaq 최신일 보강',
+    'stooq-daily-close-fallback': 'Stooq 대체',
+    'finance-datareader-close-fallback': 'FinanceDataReader 대체',
+    'yfinance-fast-info-market-cap': '시가총액 보강',
+    'finviz-snapshot-market-cap': 'Finviz 시가총액 보강',
+    'live-run-summary': '전체 실행 요약',
+    'acquisition-run-diagnostics': '전체 수집 실행',
+    'packaged-default-universe': '패키지 유니버스',
+  };
+  return labels[text] || text;
+}
+
+function formatCoverageMetric(ratio, numerator, denominator) {
+  const ratioText = formatPercent(ratio);
+  const num = Number(numerator);
+  const den = Number(denominator);
+  if (Number.isFinite(num) && Number.isFinite(den) && den > 0) {
+    return `${ratioText} (${formatInteger(num)} / ${formatInteger(den)})`;
+  }
+  return ratioText;
+}
+
+function formatSourceHealth(rows, context = {}) {
+  if (!Array.isArray(rows) || !rows.length) return '-';
+  const validRows = rows.filter((row) => row && row.source);
+  if (!validRows.length) return '-';
+
+  const pieces = [];
+  const requested = optionalNumber(context.requestedCandidateCount);
+  const usable = optionalNumber(context.providerReturnedCandidateCount);
+  const finalEligible = optionalNumber(context.latestEligibleSecurityCount);
+  if (requested !== null && usable !== null) {
+    const unavailable = Math.max(0, requested - usable);
+    pieces.push(
+      `전체 결과: 공급자 사용 가능 ${formatInteger(usable)} / 후보 ${formatInteger(requested)}`
+      + `${finalEligible !== null ? ` · 최종 편입 적격 ${formatInteger(finalEligible)}` : ''}`
+      + ` · 미반환/사용 불가 ${formatInteger(unavailable)}`,
+    );
   }
 
-  function renderOverview() {
-    const payload = state.payload;
-    const data = payload.data;
-    const selected = rankingRow(payload.selectedFactor, payload.selectedWeightingPolicy);
-    const target = payload.currentResearchTarget;
-    const concentration = target.concentration || {};
-    const modeBadge = $("#data-mode-badge");
-    modeBadge.textContent = modeLabel(data.mode);
-    modeBadge.dataset.mode = data.mode;
-    $("#asof-label").textContent = `실제 기준일 ${data.asOf}`;
-    $("#source-label").textContent = `요청 종료 ${data.requestedThrough || "—"}`;
-    $("#winner-factor").textContent = `${payload.selectedFactor} × ${policyLabel(payload, payload.selectedWeightingPolicy)}`;
-    $("#decision-factor").textContent = payload.selectedFactor;
-    $("#winner-score").textContent = fmtNumber(selected.selection_score, 1);
-    $("#decision-policy").textContent = policyLabel(payload, payload.selectedWeightingPolicy);
-    $("#winner-reason").textContent = payload.selectedReason;
-    $("#policy-reason").textContent = `${payload.selectionMethod.version} · ${payload.selectionMethod.guardrailVersion} · 정책별 집계는 진단 전용`;
-    const metrics = [
-      ["CAGR", fmtPercent(selected.cagr)],
-      ["Sharpe", fmtNumber(selected.sharpe)],
-      ["Sortino", fmtNumber(selected.sortino)],
-      ["Calmar", fmtNumber(selected.calmar)],
-      ["MDD", fmtPercent(selected.max_drawdown)],
-      ["회전율", fmtPercent(selected.annualized_turnover)],
-    ];
-    $("#winner-metrics").innerHTML = metrics.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("");
+  const bySource = new Map();
+  validRows.forEach((row) => {
+    if (!bySource.has(row.source)) {
+      bySource.set(row.source, {
+        statuses: new Map(),
+        successRows: 0,
+        noNewerRows: 0,
+        failedRows: 0,
+        rowCount: 0,
+      });
+    }
+    const aggregate = bySource.get(row.source);
+    const status = row.status || '';
+    if (status) aggregate.statuses.set(status, (aggregate.statuses.get(status) || 0) + 1);
+    aggregate.successRows += Math.max(0, Number(row.success_rows) || 0);
+    aggregate.noNewerRows += Math.max(0, Number(row.no_newer_rows) || 0);
+    aggregate.failedRows += Math.max(0, Number(row.failed_rows) || 0);
+    aggregate.rowCount += Math.max(0, Number(row.row_count) || 0);
+  });
 
-    $("#portfolio-status").textContent = target.status === "available" ? "Python 목표 산출" : "현금 대기";
-    $("#portfolio-status").classList.toggle("unavailable", target.status !== "available");
-    $("#target-timing").textContent = `${target.signalDate} 신호 · ${String(target.executionTiming || "—").replaceAll("_", " ")}`;
-    $("#compact-holdings").innerHTML = target.weights.slice(0, 5).map((row) => `
-      <li>
-        <span class="holding-rank">${row.rank}</span>
-        <span class="holding-name"><strong>${escapeHtml(row.symbol)}</strong><small>점수 ${fmtNumber(row.factorScore, 3)}</small></span>
-        <strong class="holding-weight">${fmtPercent(row.weight, 2)}</strong>
-      </li>`).join("") || '<li class="empty-row">Python 결과가 현금 100%를 지정했습니다.</li>';
-    $("#compact-invested").textContent = fmtPercent(concentration.investedWeight);
-    $("#compact-cash").textContent = fmtPercent(target.cashWeight);
-    $("#compact-count").textContent = `${fmtCount(target.selectedSecurityCount)}개`;
+  const statusLabels = {
+    fetched: '수집 성공',
+    loaded: '로드',
+    full_requested_universe: '전체 후보 요청',
+    no_newer_rows: '새 행 없음',
+    failed: '실패',
+  };
+  const statusOrder = ['fetched', 'loaded', 'full_requested_universe', 'no_newer_rows', 'failed'];
+  let recordedFailures = 0;
+  bySource.forEach((aggregate, source) => {
+    const parts = [];
+    statusOrder.forEach((status) => {
+      const count = aggregate.statuses.get(status) || 0;
+      if (count > 0) parts.push(`${statusLabels[status]} ${formatInteger(count)}건`);
+      if (status === 'failed') recordedFailures += count;
+    });
+    [...aggregate.statuses.entries()]
+      .filter(([status]) => !statusOrder.includes(status))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .forEach(([status, count]) => parts.push(`${status} ${formatInteger(count)}건`));
+    if (!aggregate.statuses.has('fetched') && aggregate.successRows > 0) {
+      parts.push(`성공 ${formatInteger(aggregate.successRows)}`);
+    }
+    if (!aggregate.statuses.has('no_newer_rows') && aggregate.noNewerRows > 0) {
+      parts.push(`추가 없음 ${formatInteger(aggregate.noNewerRows)}`);
+    }
+    if (!aggregate.statuses.has('failed') && aggregate.failedRows > 0) {
+      parts.push(`실패 ${formatInteger(aggregate.failedRows)}`);
+      recordedFailures += aggregate.failedRows;
+    }
+    if (!parts.length) parts.push(`기록 ${formatInteger(aggregate.rowCount)}`);
+    pieces.push(`${humanSourceName(source)}: ${parts.join(', ')}`);
+  });
+  if (recordedFailures > 0) {
+    pieces.push('실패 건수는 단계별 원천·보강 시도 기록이며, 최종 사용 가능 여부는 앞의 전체 결과를 기준으로 판단합니다.');
+  }
+  return pieces.join(' · ');
+}
 
-    $("#requested-count").textContent = fmtCount(data.requestedCandidateCount);
-    $("#returned-count").textContent = fmtCount(data.providerReturnedCandidateCount);
-    $("#analyzed-count").textContent = fmtCount(data.analyzedSecurityCount);
-    $("#eligible-count").textContent = fmtCount(data.latestEligibleSecurityCount);
-    $("#factor-count").textContent = fmtCount(payload.meta.independentFactorCount);
-    $("#factor-count-context").textContent = `전체 ${fmtCount(payload.meta.factorCount)}개 · alias ${fmtCount(payload.meta.aliasFactorCount)}개`;
-    $("#policy-count").textContent = fmtCount(Object.keys(payload.weightingPolicyRegistry.policies).length);
-    $("#footer-runtime").textContent = `Python ${fmtNumber(payload.meta.runtimeSeconds, 1)}초 · peak RSS ${fmtMoney(Number(payload.meta.maxRssBytes) / 1e6)}MB`;
+function setStatusMessage(message) {
+  const statusCard = document.querySelector('#run-status');
+  statusCard.replaceChildren();
+  statusCard.textContent = message;
+  statusCard.setAttribute('aria-busy', 'true');
+  statusCard.classList.add('is-updating');
+}
+
+function appendStatusLine(target, label, value) {
+  const row = document.createElement('div');
+  row.className = 'status-line';
+  const labelNode = document.createElement('span');
+  labelNode.className = 'status-label';
+  labelNode.textContent = label;
+  const valueNode = document.createElement('span');
+  valueNode.className = 'status-value';
+  valueNode.textContent = textValue(value);
+  row.append(labelNode, valueNode);
+  target.appendChild(row);
+}
+
+function appendFactorHoldingHistoryLoadStatus(target, payload) {
+  const error = payload?.__factorHoldingHistorySidecarError;
+  if (!error) return;
+  appendStatusLine(
+    target,
+    '팩터별 보유 이력',
+    `검증 실패 · canonical 이외 팩터 이력은 표시하지 않음 (${error})`,
+  );
+}
+
+function appendHeader(tr, value) {
+  const th = document.createElement('th');
+  th.setAttribute('scope', 'col');
+  th.textContent = textValue(value);
+  tr.appendChild(th);
+}
+
+function appendRowHeader(tr, value) {
+  const th = document.createElement('th');
+  th.setAttribute('scope', 'row');
+  const strong = document.createElement('strong');
+  strong.textContent = textValue(value);
+  th.appendChild(strong);
+  tr.appendChild(th);
+}
+
+function appendCell(tr, value, options = {}) {
+  const td = document.createElement('td');
+  if (options.className) td.className = options.className;
+  if (options.badge) {
+    const span = document.createElement('span');
+    span.className = 'badge';
+    span.textContent = textValue(value);
+    td.appendChild(span);
+  } else if (options.strong) {
+    const strong = document.createElement('strong');
+    strong.textContent = textValue(value);
+    td.appendChild(strong);
+  } else {
+    td.textContent = textValue(value);
+  }
+  tr.appendChild(td);
+}
+
+function appendEmpty(selector, message) {
+  const target = document.querySelector(selector);
+  target.replaceChildren();
+  const empty = document.createElement('div');
+  empty.className = 'empty-state';
+  empty.textContent = message;
+  target.appendChild(empty);
+}
+
+function barWidth(value, maxAbs) {
+  if (!Number.isFinite(Number(value)) || maxAbs <= 0) return '0%';
+  return `${Math.max(3, Math.min(100, Math.abs(Number(value)) / maxAbs * 100)).toFixed(1)}%`;
+}
+
+function factorComparisonBarClass({ selected = false, best = false } = {}) {
+  if (selected) return CHART_PALETTE_CLASS_MAP.bars.focal;
+  if (best) return CHART_PALETTE_CLASS_MAP.bars.best;
+  return CHART_PALETTE_CLASS_MAP.bars.context;
+}
+
+function benchmarkPaletteClass(symbol) {
+  return CHART_PALETTE_CLASS_MAP.benchmarks[symbol]
+    || CHART_PALETTE_CLASS_MAP.benchmarks.default;
+}
+
+function scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeight) {
+  const snapshot = factorScoreSnapshot(run, date, factor);
+  let allocation = computeScenarioAllocation(snapshot?.rows || [], topN, maxWeight);
+  let fallbackSource = null;
+  if (!allocation.weighted.length) {
+    const weightSnapshot = factorWeightSnapshot(run, date, windowKey, factor);
+    const weightRows = normalizeWeightRows(weightSnapshot).map((row) => ({
+      symbol: row.symbol,
+      score: Number.isFinite(Number(row.score)) ? Number(row.score) : Number(row.weight) || 0,
+    }));
+    allocation = computeScenarioAllocation(weightRows, topN, maxWeight);
+    if (allocation.weighted.length) fallbackSource = 'factor_weight_snapshot_fallback';
+  }
+  if (!allocation.weighted.length) {
+    const holdingRows = (run.holdings || [])
+      .filter((row) => row.date === date && row.window === windowKey && row.factor === factor)
+      .map((row) => ({
+        symbol: row.symbol,
+        score: Number.isFinite(Number(row.score)) ? Number(row.score) : Number(row.default_weight) || 0,
+      }));
+    allocation = computeScenarioAllocation(holdingRows, topN, maxWeight);
+    if (allocation.weighted.length) fallbackSource = 'holding_rows_fallback';
+  }
+  const latestOutputRowsFactor = latestOutputFactor(run);
+  if (
+    !allocation.weighted.length
+    && Array.isArray(run.latest_output_rows)
+    && run.latest_output_rows.length
+    && latestOutputMatchesFactor(run, factor)
+  ) {
+    const fallbackRows = latestOutputSignalRows(run, topN, factor).map((row, index) => {
+      const displayWeight = Math.max(0, Math.min(maxWeight, optionalNumber(row.pre_cap_weight) || optionalNumber(row.weight) || 0));
+      return {
+        ...row,
+        display_rank: row.rank || index + 1,
+        display_weight: displayWeight,
+        scenario_weight: displayWeight,
+      };
+    });
+    const investedTotal = fallbackRows.reduce((sum, row) => sum + (Number(row.display_weight) || 0), 0);
+    allocation = {
+      weighted: fallbackRows,
+      investedTotal,
+      displayedTotal: investedTotal,
+      portfolioTotal: investedTotal,
+      cashTotal: Math.max(0, 1 - investedTotal),
+      unusedCandidateCount: Math.max(0, (run.latest_output_rows || []).length - fallbackRows.length),
+      weightingMethod: 'latest_output_rows_fallback',
+      topN: Math.max(1, Math.min(50, Math.round(Number(topN) || DASHBOARD_INPUT_DEFAULTS.topN))),
+      maxWeight,
+      availableCount: fallbackRows.length,
+    };
+    fallbackSource = 'latest_output_rows_fallback';
+  }
+  return { allocation, snapshot, fallbackSource, latestOutputRowsFactor };
+}
+
+function currentWeightedHoldings() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const { allocation, snapshot, fallbackSource, latestOutputRowsFactor } = scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeight);
+  const availableDates = factorAvailableDates(run, factor);
+  const stats = periodFactorStats(run, date, windowKey, factor);
+  return {
+    ...allocation,
+    snapshot,
+    selectedFactor: factor || '-',
+    windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
+    scoreDate: snapshot?.score_date || (fallbackSource ? run.summary?.data_as_of || null : null),
+    scoreScope: snapshot?.score_scope || fallbackSource,
+    latestOutputRowsFactor,
+    rawAvailableCount: snapshot?.raw_available_count ?? null,
+    eligibilityFilterApplied: snapshot?.eligibility_filter_applied === true,
+    missingReason: snapshot
+      ? null
+      : fallbackSource
+      ? null
+      : latestOutputRowsFactor && factor && latestOutputRowsFactor !== factor
+      ? `저장된 latest_output_rows는 ${latestOutputRowsFactor} 기준이라 선택 팩터 ${factor} 시나리오로 표시하지 않습니다.`
+      : availableDates.size && !availableDates.has(date)
+      ? '선택한 기준일은 용량과 로딩 속도 제한 때문에 종목/비중 스냅샷 보관 범위 밖입니다.'
+      : '선택한 기준일에 이 팩터의 점수 스냅샷이 없습니다.',
+  };
+}
+
+function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
+  const row = document.createElement('div');
+  row.className = `bar-row ${options.className || ''}`.trim();
+
+  const labelNode = document.createElement('div');
+  labelNode.className = 'bar-label';
+  labelNode.textContent = textValue(label);
+
+  const track = document.createElement('div');
+  track.className = 'bar-track';
+  const fill = document.createElement('div');
+  fill.className = `bar-fill ${Number(value) < 0 ? 'negative' : ''}`;
+  fill.style.setProperty('--bar-width', barWidth(value, maxAbs));
+  track.appendChild(fill);
+
+  const valueNode = document.createElement('div');
+  valueNode.className = `bar-value ${classForNumber(value)}`;
+  valueNode.textContent = valueLabel;
+
+  row.append(labelNode, track, valueNode);
+  target.appendChild(row);
+}
+
+function factorAvailableDates(run, factor) {
+  const byFactor = run.scenario_available_dates_by_factor || {};
+  const hasFactorSpecificDates = Object.keys(byFactor).length > 0;
+  const dates = [...(hasFactorSpecificDates ? (byFactor[factor] || []) : (run.scenario_available_dates || []))];
+  if (!dates.length && latestOutputMatchesFactor(run, factor) && run.summary?.data_as_of) {
+    dates.push(run.summary.data_as_of);
+  }
+  return new Set(dates);
+}
+
+function fillDateOptions(run, preferredDate = null, factor = selectedFactor()) {
+  const dates = uniqueDates(run);
+  const availableDates = factorAvailableDates(run, factor);
+  const dateSelect = document.querySelector('#date-select');
+  dateSelect.replaceChildren();
+  dates.forEach((date) => {
+    const option = document.createElement('option');
+    option.value = date;
+    option.textContent = availableDates.has(date) ? `${date} · 종목/비중 가능` : `${date} · 팩터 수익률만`;
+    dateSelect.appendChild(option);
+  });
+  if (dates.length) {
+    dateSelect.value = preferredDate && dates.includes(preferredDate) ? preferredDate : dates[0];
+  }
+}
+
+function syncFactorDependentControls(run, factor, preferredDate = null) {
+  fillDateOptions(run, preferredDate, factor);
+  syncTopNAvailability(run, factor);
+}
+
+function factorOptionLabel(item, bestDefaultFactor, run) {
+  if (item.factor === bestDefaultFactor) return `${item.factor} · 현재 기준 최고 팩터`;
+  if (item.factor === run.summary?.selected_factor) return `${item.factor} · 실행 저장 선택`;
+  if (item.selection_eligible === false) {
+    const reason = item.selection_status === 'extreme_event_excluded' ? '극단사건 제외' : '선정 제외';
+    return `${item.factor} · ${reason} · 진단용`;
+  }
+  return `${item.factor} · ${humanFactorCategory(item.category)}`;
+}
+
+function updateFactorOptionLabels(run, bestDefaultFactor) {
+  const factorSelect = document.querySelector('#factor-select');
+  if (!factorSelect) return;
+  const metadata = new Map(factorOptions(run).map((item) => [item.factor, item]));
+  Array.from(factorSelect.children || []).forEach((option) => {
+    const item = metadata.get(option.value) || { factor: option.value, category: 'unknown' };
+    option.textContent = factorOptionLabel(item, bestDefaultFactor, run);
+  });
+}
+
+function defaultFactorForRun(run, factors, previousFactor = '', bestDefaultFactor = null) {
+  if (previousFactor && factors.includes(previousFactor)) return previousFactor;
+  if (factors.includes(run.summary?.selected_factor)) return run.summary.selected_factor;
+  if (bestDefaultFactor && factors.includes(bestDefaultFactor)) return bestDefaultFactor;
+  return factors[0] || '';
+}
+
+function syncDefaultFactorToCurrentBasis() {
+  const run = currentRun();
+  const factorSelect = document.querySelector('#factor-select');
+  if (!run || !factorSelect) return;
+  const bestDefaultFactor = periodBestStats(run, selectedDate(), selectedWindow())?.factor;
+  updateFactorOptionLabels(run, bestDefaultFactor);
+  // A period leader is an ex-post comparison series, not the current research
+  // target.  Changing the date/window must never silently replace the factor
+  // the user is inspecting (or the canonical Python-selected default).
+  fillDateOptions(run, selectedDate(), factorSelect.value);
+}
+
+function fillControls() {
+  const runSelect = document.querySelector('#run-select');
+  const runs = state.data.runs || [];
+  if (state.manifest) {
+    runSelect.value = state.baseEntry?.resultKey || state.entry?.resultKey || state.manifest.defaultResultKey;
+    runSelect.disabled = state.manifest.entries.length <= 1;
+  } else {
+    runSelect.replaceChildren();
+    runs.forEach((run, index) => {
+      const option = document.createElement('option');
+      option.value = String(index);
+      const prefix = runs.length <= 1 ? '최신 실행만 표시' : `실행 ${index + 1}`;
+      option.textContent = `${prefix} · 기준일 ${run.summary?.data_as_of || '알 수 없음'} · 실행 ${formatKoreanDateTime(run.summary?.run_timestamp_utc)} · ${run.summary?.selected_factor || '-'}`;
+      runSelect.appendChild(option);
+    });
+    runSelect.value = String(state.activeRunIndex);
+    runSelect.disabled = runs.length <= 1;
   }
 
-  function renderAllocation() {
-    const payload = state.payload;
-    const target = payload.currentResearchTarget;
-    const concentration = target.concentration || {};
-    const transition = payload.currentTransition || {};
-    $("#allocation-factor-policy").textContent = `${target.factor} · ${policyLabel(payload, target.weightingPolicyId)}`;
-    $("#allocation-total").textContent = "Python 검증";
-    $("#allocation-note").textContent = `${target.signalDate} 마지막 관측 신호로 Python이 산출한 다음 세션 종가용 연구 목표입니다. ${transition.note || ""}`;
-    const concentrationItems = [
-      ["투자 비중", fmtPercent(concentration.investedWeight)],
-      ["현금", fmtPercent(concentration.cashWeight)],
-      ["유효 종목 수", fmtNumber(concentration.effectiveNames, 1)],
-      ["상위 1종목", fmtPercent(concentration.top1Weight)],
-      ["상위 5종목", fmtPercent(concentration.top5Weight)],
-      ["위험자산 HHI", fmtNumber(concentration.riskySleeveHhi, 4)],
-    ];
-    $("#concentration-strip").innerHTML = concentrationItems.map(([label, value]) => `<article><span>${label}</span><strong>${value}</strong></article>`).join("");
+  const run = currentRun();
+  const windows = run.periods || [];
+  const windowSelect = document.querySelector('#window-select');
+  const previousWindow = windowSelect?.value || '';
+  windowSelect.replaceChildren();
+  windows.forEach((period) => {
+    const option = document.createElement('option');
+    option.value = period.key;
+    option.textContent = period.label;
+    windowSelect.appendChild(option);
+  });
+  const windowKeys = windows.map((period) => period.key);
+  const defaultWindow = windowKeys.includes(DASHBOARD_INPUT_DEFAULTS.window)
+    ? DASHBOARD_INPUT_DEFAULTS.window
+    : (windowKeys.includes('1Y') ? '1Y' : (windowKeys.at(-1) || windowKeys[0] || '1M'));
+  windowSelect.value = windowKeys.includes(previousWindow) ? previousWindow : defaultWindow;
 
-    const displayMax = finite(concentration.maxWeight) && Number(concentration.maxWeight) > 0 ? Number(concentration.maxWeight) : 1;
-    $("#allocation-bars").innerHTML = target.weights.map((row) => `
-      <div class="allocation-row">
-        <span class="rank">${row.rank}</span>
-        <span class="symbol">${escapeHtml(row.symbol)}</span>
-        <span class="bar-track"><span class="bar-fill" style="width:${Math.max(0, Math.min(100, Number(row.weight) / displayMax * 100))}%"></span></span>
-        <strong>${fmtPercent(row.weight, 2)}</strong>
-      </div>`).join("") || '<p class="empty-row">Python 결과가 현금 100%를 지정했습니다.</p>';
-    $("#allocation-table tbody").innerHTML = target.weights.map((row) => `
-      <tr>
-        <td><span class="rank-chip">${row.rank}</span></td>
-        <td><strong>${escapeHtml(row.symbol)}</strong></td>
-        <td>${escapeHtml(row.name || row.symbol)}</td>
-        <td>${fmtNumber(row.factorScore, 4)}</td>
-        <td>${fmtNumber(row.latestPrice, 2)}</td>
-        <td>${fmtNumber(row.rawPolicyScore, 4)}</td>
-        <td>${fmtPercent(row.trailingVolatility, 1)}</td>
-        <td>${fmtMoney(row.trailingDollarVolume)}</td>
-        <td>${fmtPercent(row.preCapWeight, 2)}</td>
-        <td class="weight-cell">${fmtPercent(row.weight, 2)}${row.capBinding ? '<small> cap</small>' : ""}</td>
-      </tr>`).join("");
-    const definition = policyDefinition(payload, target.weightingPolicyId);
-    const componentStatus = target.componentStatus || {};
-    const contractItems = [
-      ["정책 ID", target.weightingPolicyId],
-      ["정책 버전", target.weightingPolicyVersion],
-      ["구현 ID", definition.implementationId],
-      ["상한", fmtPercent(payload.config.max_weight)],
-      ["Top-N", fmtCount(payload.config.top_n)],
-      ["동점 규칙", target.tieBreakPolicy],
-      ["현재 추정 회전율", fmtPercent(transition.oneWayTurnover)],
-      ["현재 추정 비용", fmtPercent(transition.modeledCostFraction, 3)],
-      ...Object.entries(componentStatus).map(([key, value]) => [`구성 ${key}`, value]),
-    ];
-    $("#allocation-contract").innerHTML = contractItems.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value ?? "—")}</dd></div>`).join("");
+  const previousDate = document.querySelector('#date-select')?.value || null;
+  fillDateOptions(run, previousDate);
+  const dateForDefault = selectedDate();
+
+  const factorSelect = document.querySelector('#factor-select');
+  const previousFactor = state.hasUserSelectedFactor ? factorSelect?.value || '' : '';
+  factorSelect.replaceChildren();
+  const options = factorOptions(run);
+  const bestDefaultFactor = periodBestStats(run, dateForDefault, windowSelect.value)?.factor;
+  options.forEach((item) => {
+    const option = document.createElement('option');
+    option.value = item.factor;
+    option.textContent = factorOptionLabel(item, bestDefaultFactor, run);
+    factorSelect.appendChild(option);
+  });
+  const factors = options.map((item) => item.factor);
+  factorSelect.value = defaultFactorForRun(run, factors, previousFactor, bestDefaultFactor);
+
+  fillDateOptions(run, selectedDate());
+  document.querySelector('#topn-input').value = DASHBOARD_INPUT_DEFAULTS.topN;
+  syncTopNAvailability(run, factorSelect.value);
+  document.querySelector('#max-weight-input').value = DASHBOARD_INPUT_DEFAULTS.maxWeightPercent;
+  const lookback = document.querySelector('#lookback-months-select');
+  if (lookback) lookback.value = String(DASHBOARD_INPUT_DEFAULTS.lookbackMonths);
+  const rebalance = document.querySelector('#rebalance-select');
+  if (rebalance) rebalance.value = DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+  const transactionCost = document.querySelector('#transaction-cost-input');
+  if (transactionCost) transactionCost.value = String(DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
+  const slippage = document.querySelector('#slippage-input');
+  if (slippage) slippage.value = String(DASHBOARD_INPUT_DEFAULTS.slippageBps);
+}
+
+function renderSummary() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const params = inputScenarioParameters();
+  const scenarioRows = scenarioPeriodRows(run, date, windowKey, params);
+  const best = scenarioRows[0] || scenarioBestStats(run, date, windowKey, params);
+  const factor = selectedFactor();
+  const selectedStats = scenarioRows.find((row) => row.factor === factor) || scenarioFactorStats(run, date, windowKey, factor, params);
+  const summary = run.summary || {};
+  const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
+  const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
+  setText('#best-factor', best?.factor || '-');
+  setText(
+    '#best-factor-detail',
+    best
+      ? `${best.window_label} 브라우저 시나리오 수익률 ${formatPercent(best.period_return)}${best.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(best.raw_period_return)}` : ''}`
+      : '-',
+  );
+  setText('#selected-factor', factor || '-');
+  setText(
+    '#selected-factor-detail',
+    selectedStats && selectedStats.rank
+      ? `${selectedStats.window_label} 브라우저 시나리오 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)}${selectedStats.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(selectedStats.raw_period_return)}` : ''} · ${factorDescription(factor, run)}`
+      : `자료 없음 · ${factorDescription(factor, run)}`,
+  );
+  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
+  setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
+  setText('#latest-run-at', latestRunAt);
+  setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
+  const scenario = currentWeightedHoldings();
+  setText(
+    '#scenario-live-summary',
+    `브라우저 시나리오/프록시 입력 · 최근 ${params.lookbackMonths}개월 · 상위 ${params.topN}개 · 종목당 최대 ${formatPercent(params.maxWeight)} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 리밸런싱 · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps · 시나리오 투자 ${formatPercent(scenario.investedTotal)} · 현금/미사용 ${formatPercent(scenario.cashTotal)}`,
+  );
+
+  const statusCard = document.querySelector('#run-status');
+  statusCard.replaceChildren();
+  statusCard.removeAttribute('aria-busy');
+  statusCard.classList.remove('is-updating');
+  appendStatusLine(statusCard, '데이터 기준일', summary.data_as_of || '-');
+  appendStatusLine(statusCard, '최근 실행', latestRunAt);
+  appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
+  appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
+  appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
+  appendFactorHoldingHistoryLoadStatus(statusCard, state.v4Payload);
+
+  setText('#generated-at', `사이트 빌드 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
+}
+
+function appendDiagnosticBar(target, {
+  label,
+  detail,
+  value,
+  valueLabel,
+  maxAbs = 1,
+  selected = false,
+  threshold = null,
+  diverging = false,
+}) {
+  const row = document.createElement('div');
+  row.className = `diagnostic-bar-row${selected ? ' is-selected' : ''}`;
+  const labelNode = document.createElement('div');
+  labelNode.className = 'diagnostic-bar-label';
+  const strong = document.createElement('strong');
+  strong.textContent = label;
+  const small = document.createElement('small');
+  small.textContent = detail;
+  labelNode.append(strong, small);
+
+  const track = document.createElement('div');
+  track.className = `diagnostic-bar-track${diverging ? ' diverging' : ''}`;
+  if (diverging) {
+    const zero = document.createElement('span');
+    zero.className = 'diagnostic-zero-line';
+    track.appendChild(zero);
   }
-
-  function renderPolicies() {
-    const payload = state.payload;
-    const selected = payload.selectedWeightingPolicy;
-    const policies = Object.entries(payload.weightingPolicyRegistry.policies);
-    const diagnostics = new Map(payload.policyDiagnostics.map((row) => [row.policy_id, row]));
-    $("#policy-selected-badge").textContent = `선택 조합의 정책 · ${policyLabel(payload, selected)}`;
-    $("#policy-cards").innerHTML = policies.map(([id, definition]) => `
-      <article class="policy-card ${id === selected ? "is-selected" : ""}">
-        <div class="policy-card-top"><span>v${escapeHtml(definition.version)}</span><b>${id === selected ? "선택 조합" : "정책 후보"}</b></div>
-        <h3>${escapeHtml(definition.label || id)}</h3>
-        <code>${escapeHtml(id)}</code>
-        <p>${escapeHtml(definition.description || "설명 미표기")}</p>
-        <dl>
-          <div><dt>구현 ID</dt><dd>${escapeHtml(definition.implementationId || "—")}</dd></div>
-          <div><dt>필요 입력</dt><dd>${fmtCount((definition.requiredSignalDateInputs || []).length)}개</dd></div>
-          <div><dt>진단 조합</dt><dd>${fmtCount(diagnostics.get(id)?.pair_count ?? diagnostics.get(id)?.available_pair_count ?? diagnostics.get(id)?.paired_factor_count)}</dd></div>
-        </dl>
-      </article>`).join("");
-    $("#policy-table tbody").innerHTML = policies.map(([id, definition]) => {
-      const row = diagnostics.get(id) || {};
-      return `
-        <tr class="${id === selected ? "is-selected" : ""}">
-          <td><strong>${escapeHtml(definition.label || id)}</strong><small>${escapeHtml(id)}</small></td>
-          <td>${escapeHtml(definition.version || "—")}</td>
-          <td>${escapeHtml(definition.implementationId || "—")}</td>
-          <td>${escapeHtml(definition.formula || "—")}</td>
-          <td>${fmtCount(row.pair_count ?? row.available_pair_count ?? row.paired_factor_count)}</td>
-          <td>${fmtNumber(row.sharpe)}</td>
-          <td>${fmtPercent(row.cagr)}</td>
-          <td class="${signClass(row.max_drawdown)}">${fmtPercent(row.max_drawdown)}</td>
-          <td>${fmtPercent(row.annualized_turnover)}</td>
-          <td>${fmtPercent(row.annualized_cost_drag)}</td>
-        </tr>`;
-    }).join("");
+  if (Number.isFinite(Number(threshold))) {
+    const thresholdLine = document.createElement('span');
+    thresholdLine.className = 'diagnostic-threshold-line';
+    thresholdLine.style.setProperty('--threshold-position', `${Math.max(0, Math.min(100, Number(threshold) * 100))}%`);
+    thresholdLine.title = `고중복 기준 |ρ| ${formatNumber(threshold)}`;
+    track.appendChild(thresholdLine);
   }
+  const fill = document.createElement('span');
+  fill.className = `diagnostic-bar-fill${Number(value) < 0 ? ' negative' : ''}`;
+  const ratio = Math.max(0, Math.min(1, Math.abs(Number(value) || 0) / Math.max(Math.abs(maxAbs), 1e-12)));
+  if (diverging) {
+    fill.style.setProperty('--diagnostic-width', `${ratio * 50}%`);
+    fill.style.setProperty('--diagnostic-left', Number(value) < 0 ? `${50 - ratio * 50}%` : '50%');
+  } else {
+    fill.style.setProperty('--diagnostic-width', `${ratio * 100}%`);
+    fill.style.setProperty('--diagnostic-left', '0%');
+  }
+  track.appendChild(fill);
+  const valueNode = document.createElement('strong');
+  valueNode.className = 'diagnostic-bar-value';
+  valueNode.textContent = valueLabel;
+  row.append(labelNode, track, valueNode);
+  target.appendChild(row);
+}
 
-  function filteredPairs() {
-    return state.payload.factorPolicyRanking.filter((row) => {
-      const categoryMatch = state.category === "all" || row.category === state.category;
-      const text = `${row.factor} ${row.policy_id}`.toLowerCase();
-      return categoryMatch && text.includes(state.search.toLowerCase());
+function appendDiagnosticTable(target, {
+  label,
+  headers,
+  rows,
+  selectedFactor: selected,
+  rowHeaderIndex = 1,
+}) {
+  const wrap = document.createElement('div');
+  wrap.className = 'diagnostic-table-wrap';
+  wrap.setAttribute('role', 'region');
+  wrap.setAttribute('tabindex', '0');
+  wrap.setAttribute('aria-label', label);
+  const table = document.createElement('table');
+  table.className = 'diagnostic-table';
+  const thead = document.createElement('thead');
+  const header = document.createElement('tr');
+  headers.forEach((text) => appendHeaderCell(header, text));
+  thead.appendChild(header);
+  const tbody = document.createElement('tbody');
+  rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    if (row.factor === selected) tr.className = 'is-selected';
+    row.cells.forEach((cell, index) => {
+      if (index === rowHeaderIndex) appendRowHeader(tr, cell.text);
+      else appendCell(tr, cell.text, cell.options || {});
+    });
+    tbody.appendChild(tr);
+  });
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  target.appendChild(wrap);
+}
+
+function renderRankIcEvidence(target, diagnostics) {
+  const rows = diagnostics.rank_ic_rows || diagnostics.rank_ic_top || [];
+  if (!rows.length) {
+    appendEmpty('#factor-rank-ic-summary', 'Forward Rank-IC 진단이 없습니다.');
+    return;
+  }
+  const selected = selectedFactor();
+  const selectedAlias = (diagnostics.aliases || []).find((row) => row.factor === selected);
+  const diagnosticSelected = selectedAlias?.canonicalFactor || selected;
+  const availableRows = rows.filter((row) => (
+    row.available === true && Number.isFinite(Number(row.mean_rank_ic))
+  ));
+  const top = availableRows.slice().sort((left, right) => Number(right.mean_rank_ic) - Number(left.mean_rank_ic)).slice(0, 8);
+  const selectedRow = rows.find((row) => row.factor === diagnosticSelected);
+  if (selectedRow?.available === true && !top.some((row) => row.factor === diagnosticSelected)) top.push(selectedRow);
+  const observationCounts = availableRows.map((row) => Number(row.observations)).filter(Number.isFinite);
+  const minimumObservations = observationCounts.length ? Math.min(...observationCounts) : null;
+  const maximumObservations = observationCounts.length ? Math.max(...observationCounts) : null;
+  const observationLabel = minimumObservations === maximumObservations
+    ? formatInteger(minimumObservations)
+    : `${formatInteger(minimumObservations)}–${formatInteger(maximumObservations)}`;
+  const meta = document.createElement('p');
+  meta.className = 'diagnostic-contract-note';
+  meta.textContent = `${formatInteger(diagnostics.rank_ic_horizon_days)}세션 Forward · 최대 ${formatInteger(diagnostics.rank_ic_requested_sessions)}개 신호일 · 팩터별 실제 ${observationLabel}개 중첩 일별 IC · 독립 표본 검정이 아닌 동일표본 탐색 진단${selectedAlias ? ` · 선택 alias ${selected}는 ${diagnosticSelected}와 중복되어 canonical 행을 강조` : ''}`;
+  target.appendChild(meta);
+  const chart = document.createElement('div');
+  chart.className = 'diagnostic-ranked-chart';
+  const maxAbs = Math.max(...top.map((row) => Math.abs(Number(row.mean_rank_ic) || 0)), 0.01);
+  top.forEach((row) => appendDiagnosticBar(chart, {
+    label: row.factor,
+    detail: `${humanFactorCategory(row.category)} · 양수 ${formatPercent(row.positive_ic_rate)}`,
+    value: row.mean_rank_ic,
+    valueLabel: formatNumber(row.mean_rank_ic),
+    maxAbs,
+    selected: row.factor === diagnosticSelected,
+    diverging: true,
+  }));
+  target.appendChild(chart);
+  appendDiagnosticTable(target, {
+    label: '독립 팩터 61개 Forward Rank-IC 전체 표',
+    headers: ['순위', '팩터', '카테고리', '평균 IC', '중앙값', '표준편차', '양수 비율', '관측', '평균 N', '기간'],
+    selectedFactor: diagnosticSelected,
+    rows: rows.map((row, index) => ({
+      factor: row.factor,
+      cells: [
+        { text: row.rank || index + 1 },
+        { text: row.factor },
+        { text: humanFactorCategory(row.category) },
+        { text: formatNumber(row.mean_rank_ic), options: { className: classForNumber(row.mean_rank_ic) } },
+        { text: formatNumber(row.median_rank_ic), options: { className: classForNumber(row.median_rank_ic) } },
+        { text: formatNumber(row.standard_deviation) },
+        { text: formatPercent(row.positive_ic_rate) },
+        { text: formatInteger(row.observations) },
+        { text: formatInteger(row.average_security_count) },
+        { text: `${row.start_date || '-'} → ${row.end_date || '-'}` },
+      ],
+    })),
+  });
+}
+
+function renderRedundancyEvidence(target, diagnostics) {
+  const rows = diagnostics.redundancy_rows || diagnostics.redundancy_top || [];
+  const pairs = diagnostics.redundancy_pairs || [];
+  if (!rows.length) {
+    appendEmpty('#factor-redundancy-summary', '팩터 중복도 진단이 없습니다.');
+    return;
+  }
+  const selected = selectedFactor();
+  const selectedAlias = (diagnostics.aliases || []).find((row) => row.factor === selected);
+  const diagnosticSelected = selectedAlias?.canonicalFactor || selected;
+  const threshold = Number(diagnostics.redundancy_threshold_abs) || 0.95;
+  const top = pairs.slice(0, 8).map((row) => ({
+    ...row,
+    factor: row.left_factor,
+    nearest_factor: row.right_factor,
+  }));
+  const selectedRow = rows.find((row) => row.factor === diagnosticSelected);
+  if (selectedRow?.available === true && !top.some((row) => row.factor === diagnosticSelected || row.nearest_factor === diagnosticSelected)) top.push(selectedRow);
+  const highPairCount = Number(diagnostics.redundancy_high_pair_count);
+  const meta = document.createElement('p');
+  meta.className = 'diagnostic-contract-note';
+  meta.textContent = `${diagnostics.redundancy_date || rows[0]?.diagnostic_date || '-'} 최신 공통 신호일 횡단면 Spearman · 독립 팩터 고유쌍 ${formatInteger(diagnostics.redundancy_pair_count)}개 · |ρ| ≥ ${formatNumber(threshold)} 고중복 ${formatInteger(highPairCount)}쌍 · alias 제외${selectedAlias ? ` · 선택 alias ${selected}는 ${diagnosticSelected} canonical 행으로 표시` : ''}`;
+  target.appendChild(meta);
+  const chart = document.createElement('div');
+  chart.className = 'diagnostic-ranked-chart';
+  top.forEach((row) => appendDiagnosticBar(chart, {
+    label: `${row.factor || row.left_factor} ↔ ${row.nearest_factor || row.right_factor}`,
+    detail: `공통 ${formatInteger(row.common_security_count)}종목 · signed ${formatNumber(row.signed_rank_corr)}`,
+    value: row.abs_rank_corr,
+    valueLabel: formatNumber(row.abs_rank_corr),
+    maxAbs: 1,
+    threshold,
+    selected: row.factor === diagnosticSelected || row.nearest_factor === diagnosticSelected,
+  }));
+  target.appendChild(chart);
+  appendDiagnosticTable(target, {
+    label: '독립 팩터 61개 최신 중복도 전체 표',
+    headers: ['순위', '팩터', '가장 가까운 팩터', 'signed ρ', '|ρ|', '고중복 피어', '공통 N', '진단일'],
+    selectedFactor: diagnosticSelected,
+    rows: rows.map((row, index) => ({
+      factor: row.factor,
+      cells: [
+        { text: row.rank || index + 1 },
+        { text: row.factor },
+        { text: row.nearest_factor || '-' },
+        { text: formatNumber(row.signed_rank_corr), options: { className: classForNumber(row.signed_rank_corr) } },
+        { text: formatNumber(row.abs_rank_corr) },
+        { text: formatInteger(row.high_corr_peer_count) },
+        { text: formatInteger(row.common_security_count) },
+        { text: row.diagnostic_date || diagnostics.redundancy_date || '-' },
+      ],
+    })),
+  });
+}
+
+function renderDiagnostics() {
+  const run = currentRun();
+  const summary = run.summary || {};
+  const quality = run.data_quality_summary || {};
+  const dataSummary = document.querySelector('#data-quality-summary');
+  dataSummary.replaceChildren();
+  appendDefinition(dataSummary, '후보 종목', formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size));
+  appendDefinition(dataSummary, '가격 분석 가능 종목', formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size));
+  appendDefinition(dataSummary, '최종 편입 적격 종목', formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size));
+  appendDefinition(dataSummary, '모형 가격 보유 종목', formatCount(quality.fetched_price_symbol_count));
+  appendDefinition(dataSummary, '제외 종목 수', formatCount(quality.excluded_symbols));
+  if (quality.latest_eligibility_exclusion_counts) {
+    const overlapNote = quality.exclusion_counts_may_overlap
+      ? ' · 규칙 간 중복 집계이므로 합계는 제외 종목 수와 일치하지 않을 수 있음'
+      : '';
+    appendDefinition(
+      dataSummary,
+      '최종 적격 제외 사유',
+      `${formatCounts(quality.latest_eligibility_exclusion_counts, {
+        insufficient_history: '이력 부족',
+        liquidity_requirement: '유동성 기준',
+        missing_or_below_min_price: '가격 누락/최저가 미달',
+        recent_extreme_return: '최근 극단 수익률',
+        recent_price_coverage: '최근 가격 커버리지',
+        recent_volume_coverage: '최근 거래량 커버리지',
+      })}${overlapNote}`,
+    );
+  }
+  appendDefinition(
+    dataSummary,
+    '요청 가격 커버리지',
+    formatCoverageMetric(
+      quality.price_coverage_ratio,
+      quality.provider_returned_symbol_count,
+      quality.provider_requested_symbol_count,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '모형 가격 보유 비율',
+    formatCoverageMetric(
+      quality.model_price_universe_ratio,
+      quality.fetched_price_symbol_count,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '가격 분석 가능 비율',
+    formatCoverageMetric(
+      quality.eligible_price_ratio,
+      summary.eligible_price_universe_size ?? quality.eligible_price_universe_size,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '최종 편입 적격 비율',
+    formatCoverageMetric(
+      quality.liquidity_eligible_ratio,
+      summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size,
+      summary.candidate_universe_size ?? quality.candidate_universe_size,
+    ),
+  );
+  appendDefinition(
+    dataSummary,
+    '신선 가격 비율 (분석 가능 후보)',
+    formatCoverageMetric(quality.fresh_price_ratio, quality.fresh_price_rows, quality.price_quality_rows),
+  );
+  appendDefinition(dataSummary, '데이터 기준일', quality.data_as_of || summary.data_as_of || '-');
+  appendDefinition(dataSummary, '최근 실행 시각', formatKoreanDateTime(summary.run_timestamp_utc));
+  appendDefinition(dataSummary, '실행 결과 생성 시각', formatKoreanDateTime(runPayloadGeneratedAt(run)));
+  appendDefinition(dataSummary, '가격 제공자', humanProvider(quality.provider || summary.provider));
+  appendDefinition(dataSummary, '소스별 수집 상태', formatSourceHealth(quality.source_health, {
+    requestedCandidateCount: summary.candidate_universe_size ?? quality.candidate_universe_size,
+    providerReturnedCandidateCount: quality.provider_returned_symbol_count,
+    latestEligibleSecurityCount: summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size,
+  }));
+  appendDefinition(
+    dataSummary,
+    '가격 소스 분포',
+    formatCounts(quality.price_source_counts, {
+      'yfinance-adjusted-daily': 'yfinance',
+      'yahoo-chart-adjusted-daily-fallback': 'Yahoo chart',
+      'nasdaq-latest-close-repair': 'Nasdaq 보강',
+      'stooq-daily-close-fallback': 'Stooq',
+      'finance-datareader-close-fallback': 'FinanceDataReader',
+    }),
+  );
+  appendDefinition(
+    dataSummary,
+    '품질 상태',
+    formatCounts(quality.data_quality_status_counts, {
+      pass: '통과',
+      missing_price: '가격 누락',
+      missing_volume: '거래량 누락',
+      provider_adjustment_incompatible: '조정가격 불일치',
+      stale_price: '오래된 가격',
+      insufficient_history: '이력 부족',
+      below_liquidity_floor: '유동성 부족',
+      excluded: '분석 가능 중 최종 제외',
+      benchmark_comparator_only: '벤치마크 전용',
+    }),
+  );
+  appendDefinition(
+    dataSummary,
+    '최종 편입 적격 상태',
+    formatCounts(quality.final_eligibility_status_counts || quality.liquidity_status_counts, { pass: '통과', fail: '미통과' }),
+  );
+  appendDefinition(
+    dataSummary,
+    '체결 용량 상태',
+    quality.capacity_status_note || formatCounts(quality.capacity_status_counts, { pass: '통과', fail: '미통과' }),
+  );
+
+  const gateTarget = document.querySelector('#tradability-gate-list');
+  gateTarget.replaceChildren();
+  const gates = run.tradability_gate || [];
+  if (!gates.length) {
+    appendEmpty('#tradability-gate-list', '추천/신호 게이트 정보가 없습니다.');
+  } else {
+    gates.forEach((gate) => {
+      const item = document.createElement('div');
+      item.className = `gate-item ${gate.passed ? 'pass' : 'block'}`;
+      const title = document.createElement('strong');
+      title.textContent = `${gate.passed ? '통과' : '점검 필요'} · ${gate.label_ko || gate.key}`;
+      const detail = document.createElement('small');
+      detail.textContent = gate.description_ko || '추가 실행 가능성 점검 항목입니다.';
+      item.append(title, detail);
+      gateTarget.appendChild(item);
     });
   }
 
-  function renderFactorFilters() {
-    const categories = [...new Set(state.payload.factorPolicyRanking.map((row) => row.category).filter(Boolean))].sort();
-    $("#category-filter").innerHTML = '<option value="all">전체</option>'
-      + categories.map((category) => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join("");
+  const diagnostics = run.factor_diagnostics || {};
+  setText('#factor-scope-note', diagnostics.scope_note_ko || '팩터 진단 정보가 없습니다.');
+
+  const categoryTarget = document.querySelector('#factor-category-summary');
+  categoryTarget.replaceChildren();
+  const categories = diagnostics.category_summary || [];
+  if (!categories.length) {
+    appendEmpty('#factor-category-summary', '팩터 카테고리 요약이 없습니다.');
+  } else {
+    categories.slice(0, 8).forEach((row) => {
+      const item = document.createElement('div');
+      item.className = 'mini-item';
+      const title = document.createElement('strong');
+      title.textContent = `${humanFactorCategory(row.category)} · ${formatInteger(row.factor_count)}개`;
+      const detail = document.createElement('small');
+      detail.textContent = `평균 Rank-IC ${formatNumber(row.avg_mean_rank_ic)} · 양수 비율 ${formatPercent(row.avg_positive_ic_rate)} · 예: ${row.example_factors || '-'}`;
+      item.append(title, detail);
+      categoryTarget.appendChild(item);
+    });
   }
 
-  function renderFactorComparison() {
-    const payload = state.payload;
-    const rows = filteredPairs();
-    const available = rows.filter((row) => row.selection_eligible === true && finite(row.selection_score));
-    $("#ranking-chart").innerHTML = available.slice(0, 12).map((row) => `
-      <button class="ranking-row ${pairKey(row) === state.detailPairKey ? "is-selected" : ""}" type="button" data-pair="${escapeHtml(pairKey(row))}">
-        <span class="ranking-name">${escapeHtml(row.factor)}<small>${escapeHtml(policyLabel(payload, row.policy_id))}</small></span>
-        <span class="bar-track"><span class="bar-fill" style="width:${Math.max(0, Math.min(100, Number(row.selection_score)))}%"></span></span>
-        <strong>${fmtNumber(row.selection_score, 1)}</strong>
-      </button>`).join("") || '<p class="empty-row">조건에 맞는 유효 팩터×정책 조합이 없습니다.</p>';
-    $("#factor-table tbody").innerHTML = rows.map((row) => {
-      const status = row.selection_status || row.comparison_status || "미표기";
-      const statusReasons = rowReasonCodes(row);
-      const coverage = `${fmtPercent(row.valuation_coverage_ratio)} · ${fmtCount(row.daily_risk_observations)}일`;
-      return `
-        <tr tabindex="0" data-pair="${escapeHtml(pairKey(row))}" class="${pairKey(row) === state.detailPairKey ? "is-selected" : ""}">
-          <td>${finite(row.rank) ? row.rank : "—"}</td>
-          <td><strong>${escapeHtml(row.factor)}</strong><small>${escapeHtml(row.category || "other")}</small></td>
-          <td>${escapeHtml(policyLabel(payload, row.policy_id))}<small>${escapeHtml(row.policy_id)}</small></td>
-          <td><span class="${row.selection_eligible ? "ok-text" : "muted"}">${escapeHtml(status)}</span>${statusReasons.length ? `<small>${escapeHtml([...new Set(statusReasons)].join(", "))}</small>` : ""}</td>
-          <td class="score-cell">${fmtNumber(row.selection_score, 1)}</td>
-          <td class="${signClass(row.cagr)}">${fmtPercent(row.cagr)}</td>
-          <td>${fmtNumber(row.sharpe)}</td>
-          <td>${fmtNumber(row.sortino)}</td>
-          <td>${fmtNumber(row.calmar)}</td>
-          <td class="${signClass(row.max_drawdown)}">${fmtPercent(row.max_drawdown)}</td>
-          <td>${fmtPercent(row.annualized_turnover)}</td>
-          <td>${fmtPercent(row.annualized_cost_drag)}</td>
-          <td>${coverage}</td>
-        </tr>`;
-    }).join("");
-    document.querySelectorAll("[data-pair]").forEach((element) => {
-      const select = () => {
-        state.detailPairKey = element.dataset.pair;
-        renderFactorComparison();
-        renderFactorDetail();
+  const icTarget = document.querySelector('#factor-rank-ic-summary');
+  icTarget.replaceChildren();
+  renderRankIcEvidence(icTarget, diagnostics);
+
+  const redundancyTarget = document.querySelector('#factor-redundancy-summary');
+  redundancyTarget.replaceChildren();
+  renderRedundancyEvidence(redundancyTarget, diagnostics);
+}
+
+function renderFactorTable() {
+  const run = currentRun();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const params = inputScenarioParameters();
+  const rows = (run.factor_leaders || []).filter((row) => row.window === windowKey).slice(-30).reverse();
+  const tbody = document.querySelector('#factor-table tbody');
+  tbody.replaceChildren();
+  rows.forEach((row) => {
+    const scenarioRows = scenarioPeriodRows(run, row.date, row.window, params);
+    const bestStats = scenarioRows[0] || periodBestStats(run, row.date, row.window);
+    const selectedStats = scenarioRows.find((item) => item.factor === factor) || scenarioFactorStats(run, row.date, row.window, factor, params);
+    const tr = document.createElement('tr');
+    appendCell(tr, row.date);
+    appendCell(tr, row.window_label, { badge: true });
+    appendCell(tr, bestStats?.factor || row.best_factor);
+    appendCell(tr, bestStats?.period_return == null ? '자료 없음' : `${formatPercent(bestStats.period_return)} · 시나리오`, { className: classForNumber(bestStats?.period_return) });
+    appendCell(tr, selectedStats?.period_return == null ? '자료 없음' : `${formatPercent(selectedStats.period_return)} · 시나리오`, { className: classForNumber(selectedStats?.period_return) });
+    appendCell(tr, selectedStats?.rank ? `${selectedStats.rank}/${selectedStats.factor_count || '-'}` : '자료 없음');
+    tbody.appendChild(tr);
+  });
+}
+
+function renderHoldingsTable() {
+  const run = currentRun();
+  const {
+    weighted,
+    displayedTotal,
+    portfolioTotal,
+    cashTotal,
+    topN,
+    availableCount,
+    selectedFactor: factor,
+    windowLabel,
+    scoreDate,
+    scoreScope,
+    unusedCandidateCount,
+    maxWeight,
+    rawAvailableCount,
+    eligibilityFilterApplied,
+    missingReason,
+  } = currentWeightedHoldings();
+  const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
+  setText(
+    '#weight-summary',
+    `시나리오 배분 ${formatPercent(portfolioTotal)} · 화면 표시 ${formatPercent(displayedTotal)} · 현금/미사용 ${formatPercent(cashTotal)}`,
+  );
+  const capNote = topN * maxWeight < 1
+    ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
+    : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
+  const usingLatestOutputFallback = scoreScope === 'latest_output_rows_fallback';
+  const usingCanonicalStoredConstituents = scoreScope === 'schema_v4_current_python_portfolio_top_constituents';
+  const scopeNote = usingLatestOutputFallback
+    ? `점수 스냅샷이 없어 저장된 latest_output_rows ${formatInteger(availableCount)}개를 선택 팩터 시나리오 fallback으로 표시합니다.`
+    : usingCanonicalStoredConstituents
+    ? `Python factorPortfolios에 공개 저장된 현재 canonical 구성종목 ${formatInteger(availableCount)}개만 사용합니다. 최종 적격 종목 전체의 팩터 점수는 공개 payload에 없으므로 후보 전체 스냅샷으로 확대 해석하지 않습니다.`
+    : eligibilityFilterApplied
+    ? `현재 모델 편입 가능 필터를 통과한 ${formatInteger(availableCount)}개 후보를 사용합니다${rawAvailableCount && rawAvailableCount !== availableCount ? ` (원점수 후보 ${formatInteger(rawAvailableCount)}개 중 실무 필터 통과분)` : ''}.`
+    : `편입 가능 필터 정보가 없어 원점수 후보 ${formatInteger(availableCount)}개를 연구 진단용으로 표시합니다.`;
+  setText(
+    '#holdings-availability',
+    missingReason
+      ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
+      : run.history_payload_type === 'summary'
+      ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
+      : usingLatestOutputFallback
+      ? `${windowLabel} 선택 팩터 ${factor}의 점수 스냅샷이 없어 기존 최신 출력 행 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, 저장된 게이트 전 비중을 종목당 최대 ${formatPercent(maxWeight)}로 제한해 표시합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`
+      : usingCanonicalStoredConstituents
+      ? `${scoreDate || run.summary?.data_as_of || '최근'} 현재 선택 팩터 ${factor}의 canonical ${formatInteger(availableCount)}종목 snapshot 프록시입니다. 선택한 성과 기간의 과거 종목 구성이 아닙니다. ${scopeNote} 저장 범위 안에서 상위 ${Math.min(topN, availableCount)}개를 표시하고, 브라우저가 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정을 적용합니다. 미선택 저장 행 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`
+      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
+  );
+  const tbody = document.querySelector('#holdings-table tbody');
+  tbody.replaceChildren();
+  if (!weighted.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 6;
+    td.textContent = '선택한 기준일과 팩터에 표시할 점수 스냅샷이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  weighted.forEach((row) => {
+    const tr = document.createElement('tr');
+    appendCell(tr, row.display_rank);
+    appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, formatNumber(row.score));
+    appendCell(tr, formatPercent(row.display_weight));
+    appendCell(tr, factor);
+    appendCell(tr, scoreDate || selectedDate());
+    tbody.appendChild(tr);
+  });
+}
+
+function renderCurrentOutputTable() {
+  const run = currentRun();
+  const summary = run.summary || {};
+  const quality = run.data_quality_summary || {};
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const {
+    rows,
+    best,
+    snapshot,
+    allocation,
+    researchOnly,
+    signalSource,
+    windowLabel,
+  } = bestFactorSignalRows(run, date, windowKey, topN, maxWeight);
+  const tbody = document.querySelector('#current-output-table tbody');
+  const note = document.querySelector('#current-output-note');
+  tbody.replaceChildren();
+  if (note) {
+    const blockers = joinReasonList(summary.tradability_blockers) || joinReasonList(summary.fail_closed_reasons) || '실전 매매 게이트 미통과';
+    const candidateCount = formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size);
+    const eligibleCount = formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size);
+    const finalEligibleCount = formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size);
+    const usingLatestOutputFallback = signalSource === 'latest_output_rows_fallback';
+    const usingCanonicalStoredConstituents = snapshot?.score_scope === 'schema_v4_current_python_portfolio_top_constituents';
+    const scope = usingLatestOutputFallback
+      ? `${run.summary?.data_as_of || date || '-'} · 기존 최신 출력 행`
+      : best?.factor
+      ? `${date || '-'} · ${windowLabel} 최고 팩터 ${best.factor}`
+      : `${date || '-'} · ${windowLabel} 최고 팩터 자료 없음`;
+    const availability = usingLatestOutputFallback
+      ? `최고 팩터 점수 스냅샷이 없어 저장된 latest_output_rows ${formatInteger(rows.length)}개를 투명한 fallback으로 표시합니다.`
+      : usingCanonicalStoredConstituents
+      ? `공개 payload에 저장된 해당 팩터의 현재 canonical 구성종목 ${formatInteger(allocation.availableCount)}개 안에서만 상위 ${rows.length}개를 표시합니다. 최종 적격 종목 전체의 팩터 점수 스냅샷은 아닙니다.`
+      : snapshot
+      ? `모델 편입 가능 후보 ${formatInteger(allocation.availableCount)}개 중 상위 ${rows.length}개를 표시합니다.`
+      : '해당 최고 팩터의 종목 점수 스냅샷이 없어 행을 표시하지 못했습니다.';
+    const bestFactorCaution = 'Best factor는 해당 기간의 과거 성과 1위 팩터이므로 미래 우위를 보장하지 않으며, 선택 팩터 드롭다운과 별개입니다.';
+    note.textContent = researchOnly
+      ? `${scope} · 연구용 신호(매매 비중 0%). ${availability} ${bestFactorCaution} 미충족: ${blockers}. 후보 ${candidateCount} · 가격 분석 가능 ${eligibleCount} · 최종 편입 적격 ${finalEligibleCount}.`
+      : `${scope} 기준 표시용 best-factor 신호입니다. ${availability} ${bestFactorCaution} 후보 ${candidateCount}, 가격 분석 가능 ${eligibleCount}, 최종 편입 적격 ${finalEligibleCount}.`;
+  }
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 8;
+    td.textContent = '선택한 기준일과 기간의 최고 팩터에 표시할 신호 스냅샷이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  rows.forEach((row, index) => {
+    const tr = document.createElement('tr');
+    appendCell(tr, row.rank || index + 1);
+    appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, formatNumber(row.score));
+    appendCell(tr, row.selected_factor || best?.factor || '-');
+    appendCell(tr, formatPercent(row.weight), { className: classForNumber(row.weight) });
+    appendCell(tr, formatPercent(row.pre_cap_weight), { className: classForNumber(row.pre_cap_weight) });
+    appendCell(tr, humanWeightingMethod(row.weighting_method));
+    appendCell(tr, row.signal_date || run.summary?.data_as_of || '-');
+    tbody.appendChild(tr);
+  });
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 7;
+    td.textContent = '최신 추천/연구 신호 출력 행이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+}
+
+function renderFactorReturnChart() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const params = inputScenarioParameters();
+  let rows = scenarioPeriodRows(run, date, windowKey, params);
+  const best = rows[0] || scenarioBestStats(run, date, windowKey, params);
+  const selectedRow = rows.find((row) => row.factor === factor);
+  rows = rows.slice(0, 10);
+  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
+  const target = document.querySelector('#factor-return-chart');
+  target.replaceChildren();
+  const windowLabel = rows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || '-';
+  setText(
+    '#factor-chart-meta',
+    `${date || '-'} · ${windowLabel} · 브라우저 시나리오/프록시 · 최근 ${params.lookbackMonths}개월 · 선택 ${factor || '-'} · 상위 ${params.topN}개 · 최대 ${formatPercent(params.maxWeight)} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps`,
+  );
+  if (!rows.length) {
+    appendEmpty('#factor-return-chart', '선택한 기준일과 기간에 표시할 팩터 수익률 데이터가 없습니다.');
+    return;
+  }
+  const maxAbs = Math.max(...rows.map((row) => Math.abs(Number(row.period_return) || 0)), 0.01);
+  rows.forEach((row) => appendBarRow(
+    target,
+    `${row.rank}. ${row.factor}`,
+    `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(row.raw_period_return)}` : ''}`,
+    row.period_return,
+    maxAbs,
+    {
+      className: [
+        row.factor === factor ? 'is-selected' : '',
+        row.factor === best?.factor ? 'is-best' : '',
+        factorComparisonBarClass({
+          selected: row.factor === factor,
+          best: row.factor === best?.factor,
+        }),
+      ].filter(Boolean).join(' '),
+    },
+  ));
+  const note = document.createElement('div');
+  note.className = 'scenario-note';
+  const fallbackCount = rows.filter((row) => !row.scenario_adjusted).length;
+  note.textContent = `막대값은 저장된 팩터 성과에 현재 입력값을 반영한 브라우저 시나리오/민감도 프록시입니다.${fallbackCount ? ` ${fallbackCount}개 팩터는 원자료 수익률 fallback을 사용했습니다.` : ''}`;
+  target.appendChild(note);
+  if (!selectedRow) {
+    const missingNote = document.createElement('div');
+    missingNote.className = 'scenario-note';
+    missingNote.textContent = '선택 팩터가 이 기준일/기간의 내보낸 순위 데이터에 없습니다. 팩터 비교는 가능한 데이터 범위 안에서만 표시됩니다.';
+    target.appendChild(missingNote);
+  }
+}
+
+function renderWindowComparisonChart() {
+  const run = currentRun();
+  const date = selectedDate();
+  const selectedFactorName = selectedFactor();
+  const params = inputScenarioParameters();
+  const periodOrder = (run.periods || []).map((period) => period.key);
+  const rows = (run.factor_leaders || [])
+    .filter((row) => row.date === date)
+    .sort((a, b) => periodOrder.indexOf(a.window) - periodOrder.indexOf(b.window));
+  const target = document.querySelector('#window-comparison-chart');
+  target.replaceChildren();
+  if (!rows.length) {
+    appendEmpty('#window-comparison-chart', '선택한 기준일에 기간별 최고 팩터 데이터가 없습니다.');
+    return;
+  }
+  rows.forEach((row) => {
+    const chip = document.createElement('div');
+    chip.className = 'window-chip';
+    const label = document.createElement('span');
+    label.textContent = row.window_label || row.window;
+    const scenarioRows = scenarioPeriodRows(run, row.date, row.window, params);
+    const best = scenarioRows[0] || periodBestStats(run, row.date, row.window);
+    const selectedStats = scenarioRows.find((item) => item.factor === selectedFactorName) || scenarioFactorStats(run, row.date, row.window, selectedFactorName, params);
+    const factorNode = document.createElement('strong');
+    factorNode.textContent = best?.factor || row.best_factor || '-';
+    const detail = document.createElement('small');
+    detail.textContent = selectedStats?.rank
+      ? `브라우저 시나리오 최고 ${formatPercent(best?.period_return)} · 선택 팩터 ${formatPercent(selectedStats.period_return)} · 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
+      : `브라우저 시나리오 최고 ${formatPercent(best?.period_return)} · 선택 팩터 자료 없음`;
+    chip.append(label, factorNode, detail);
+    target.appendChild(chip);
+  });
+}
+
+function renderLeaderTrendChart() {
+  const run = currentRun();
+  const windowKey = selectedWindow();
+  const params = inputScenarioParameters();
+  const rows = (run.factor_leaders || [])
+    .filter((row) => row.window === windowKey)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .slice(-30)
+    .map((row) => {
+      const best = scenarioBestStats(run, row.date, row.window, params);
+      return {
+        ...row,
+        best_factor: best?.factor || row.best_factor,
+        best_return: best?.period_return ?? row.best_return,
+        scenario_adjusted: best?.scenario_adjusted === true,
       };
-      element.addEventListener("click", select);
-      element.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          select();
-        }
+    });
+  const target = document.querySelector('#leader-trend-chart');
+  target.replaceChildren();
+  if (!rows.length) {
+    appendEmpty('#leader-trend-chart', '선택한 기간에 최근 리더 추이 데이터가 없습니다.');
+    return;
+  }
+  const maxAbs = Math.max(...rows.map((row) => Math.abs(Number(row.best_return) || 0)), 0.01);
+  const bars = document.createElement('div');
+  bars.className = 'trend-bars';
+  rows.forEach((row) => {
+    const bar = document.createElement('div');
+    bar.className = 'trend-bar';
+    bar.title = `${row.date} · ${row.best_factor} · ${formatPercent(row.best_return)} · 브라우저 시나리오/프록시`;
+    const fill = document.createElement('div');
+    fill.className = `trend-fill chart-trend-focal ${Number(row.best_return) < 0 ? 'negative' : ''}`.trim();
+    fill.style.setProperty('--bar-height', barWidth(row.best_return, maxAbs));
+    const label = document.createElement('div');
+    label.className = 'trend-label';
+    label.textContent = String(row.date || '').slice(5);
+    bar.append(fill, label);
+    bars.appendChild(bar);
+  });
+  target.appendChild(bars);
+}
+
+function renderWeightChart() {
+  const run = currentRun();
+  const { weighted, cashTotal, topN, maxWeight, unusedCandidateCount } = currentWeightedHoldings();
+  const target = document.querySelector('#weight-chart');
+  target.replaceChildren();
+  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 시나리오' : '연구 시나리오'} · 선택 팩터 ${selectedFactor() || '-'} · 상위 ${topN}개 · 최대 ${formatPercent(maxWeight)}`);
+  if (!weighted.length) {
+    appendEmpty('#weight-chart', '선택한 기준일과 팩터에 표시할 상위 종목 점수 스냅샷이 없습니다.');
+    return;
+  }
+  const maxWeightValue = Math.max(
+    ...weighted.map((row) => Number(row.display_weight) || 0),
+    Number(cashTotal) || 0,
+    0.01,
+  );
+  weighted.forEach((row) => appendBarRow(
+    target,
+    row.symbol,
+    formatPercent(row.display_weight),
+    row.display_weight,
+    maxWeightValue,
+    { className: CHART_PALETTE_CLASS_MAP.bars.focal },
+  ));
+  if (cashTotal > 0.000001) {
+    appendBarRow(
+      target,
+      '현금/미사용',
+      formatPercent(cashTotal),
+      cashTotal,
+      maxWeightValue,
+      { className: CHART_PALETTE_CLASS_MAP.bars.neutralOpen },
+    );
+  }
+  if (unusedCandidateCount > 0) {
+    const note = document.createElement('div');
+    note.className = 'scenario-note';
+    note.textContent = `상위 N개 제한 때문에 ${formatInteger(unusedCandidateCount)}개 후보는 이번 브라우저 시나리오 목표 비중에서 제외했습니다.`;
+    target.appendChild(note);
+  }
+}
+
+function renderEnsembleWeightChart() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const topN = clampedTopN();
+  const maxWeight = clampedMaxWeight();
+  const target = document.querySelector('#ensemble-weight-chart');
+  target.replaceChildren();
+  const ensemble = topFactorEnsembleAllocation(run, date, windowKey, topN, maxWeight, 10);
+  setText(
+    '#ensemble-chart-meta',
+    `${date || '-'} · ${ensemble.windowLabel} · ${ensemble.factorsUsedCount}/${Math.min(10, ensemble.factorRows.length)}개 팩터 · 최종 상한 ${formatPercent(ensemble.maxWeight)}`,
+  );
+  if (!ensemble.weighted.length) {
+    appendEmpty(
+      '#ensemble-weight-chart',
+      '선택한 기준일과 기간에 상위 팩터의 백테스트 보유 비중 스냅샷이 없어 합산 비중을 표시할 수 없습니다.',
+    );
+    return;
+  }
+  const maxWeightValue = Math.max(
+    ...ensemble.weighted.map((row) => Number(row.display_weight) || 0),
+    0.01,
+  );
+  ensemble.weighted.forEach((row) => {
+    const label = `${row.symbol} · ${row.factor_count}개 팩터`;
+    appendBarRow(
+      target,
+      label,
+      formatPercent(row.display_weight),
+      row.display_weight,
+      maxWeightValue,
+      { className: CHART_PALETTE_CLASS_MAP.bars.support },
+    );
+  });
+  const factorNames = ensemble.sleeves.map((sleeve) => `${sleeve.rank}. ${sleeve.factor}`).join(', ');
+  const note = document.createElement('div');
+  note.className = 'scenario-note';
+  const missing = ensemble.missingFactors.length
+    ? ` 스냅샷이 없는 팩터 ${ensemble.missingFactors.length}개는 제외했습니다.`
+    : '';
+  note.textContent = `해석: ${ensemble.windowLabel} 성과 상위 팩터를 동일 sleeve로 합산하되, 각 팩터 내부에는 백테스트 일별 보유 이력이 아니라 Python factorPortfolios에 공개 저장된 현재 canonical 구성종목 최대 ${formatInteger(storedScenarioRowLimit(run))}개의 목표 비중을 사용합니다. 따라서 선택 기간의 과거 포트폴리오를 재현한 백테스트가 아니라 현재 snapshot 프록시입니다. 합산 후 브라우저 종목당 최대 비중 ${formatPercent(ensemble.maxWeight)}를 최종 상한으로 적용했습니다. 시각화는 개별 종목 ${ensemble.weighted.length}개만 표시하고, 미표시 저장 행 합계 ${formatPercent(ensemble.hiddenWeight)} 및 현금/상한 미사용 ${formatPercent(ensemble.cashTotal)}는 숫자로만 제공합니다. 전체 중복 제거 저장 종목 ${ensemble.totalCandidateCount}개. 사용 팩터: ${factorNames}.${missing}`;
+  target.appendChild(note);
+}
+
+function factorBacktestSeries(run, factor) {
+  return (run.factor_backtest_series || []).find((series) => series.factor === factor) || null;
+}
+
+function benchmarkBacktestSeries(run) {
+  const series = run.benchmark_backtest_series;
+  if (!series || !Array.isArray(series.dates)) return null;
+  return series;
+}
+
+function strictPositiveNav(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : null;
+}
+
+function strictFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : null;
+}
+
+function seriesPointsThroughDate(series, date, limit = 260) {
+  if (!series || !Array.isArray(series.dates)) return [];
+  const points = series.dates.map((pointDate, index) => ({
+    date: pointDate,
+    equity: strictPositiveNav(series.equity?.[index]),
+    drawdown: strictFiniteNumber(series.drawdown?.[index]),
+  })).filter((point) => point.date);
+  const through = date ? points.filter((point) => String(point.date) <= String(date)) : points;
+  const limited = through.slice(-limit);
+  return limited.some((point) => point.equity === null) ? [] : limited;
+}
+
+function normalizedLine(points) {
+  if (!points.length) return [];
+  const base = points[0].equity || 1;
+  return points.map((point) => ({ ...point, normalized: base ? point.equity / base : point.equity }));
+}
+
+function v4CommonEvaluationPeriod(payload) {
+  const dates = Array.isArray(payload?.performance?.dates) ? payload.performance.dates : [];
+  const full = (payload?.performance?.periods || []).find((period) => period?.key === 'FULL');
+  if (!full || !dates.length) return null;
+  const startIndex = dates.indexOf(full.startDate);
+  const endIndex = dates.lastIndexOf(full.endDate);
+  if (
+    startIndex < 0
+    || endIndex <= startIndex
+    || endIndex - startIndex !== Number(full.returnObservationCount)
+  ) return null;
+  return {
+    key: full.key,
+    label: full.label,
+    startDate: full.startDate,
+    endDate: full.endDate,
+    startIndex,
+    endIndex,
+    returnObservationCount: endIndex - startIndex,
+  };
+}
+
+function commonEvaluationSeriesPoints(series, period) {
+  if (!series || !period || !Array.isArray(series.dates)) return [];
+  const startIndex = series.dates.indexOf(period.startDate);
+  const endIndex = series.dates.lastIndexOf(period.endDate);
+  if (
+    startIndex < 0
+    || endIndex <= startIndex
+    || endIndex - startIndex !== Number(period.returnObservationCount)
+  ) return [];
+  const dates = series.dates.slice(startIndex, endIndex + 1);
+  const equity = dates.map((_date, offset) => (
+    strictPositiveNav(series.equity?.[startIndex + offset])
+  ));
+  if (
+    dates.length !== Number(period.returnObservationCount) + 1
+    || equity.some((value) => value === null)
+  ) return [];
+  const base = equity[0];
+  let peak = 1;
+  return dates.map((date, offset) => {
+    const pointEquity = equity[offset];
+    const normalized = pointEquity / base;
+    peak = Math.max(peak, normalized);
+    return {
+      date,
+      equity: pointEquity,
+      normalized,
+      drawdown: peak > 0 ? normalized / peak - 1 : 0,
+    };
+  });
+}
+
+function commonEvaluationSeriesSegments(series, period) {
+  if (!series || !period || !Array.isArray(series.dates)) {
+    return { points: [], segments: [], missingCount: 0, missingDates: [], available: false };
+  }
+  const startIndex = series.dates.indexOf(period.startDate);
+  const endIndex = series.dates.lastIndexOf(period.endDate);
+  if (
+    startIndex < 0
+    || endIndex <= startIndex
+    || endIndex - startIndex !== Number(period.returnObservationCount)
+  ) {
+    return { points: [], segments: [], missingCount: 0, missingDates: [], available: false };
+  }
+  const dates = series.dates.slice(startIndex, endIndex + 1);
+  const raw = dates.map((_date, offset) => strictPositiveNav(series.equity?.[startIndex + offset]));
+  const base = raw[0];
+  const terminal = raw.at(-1);
+  if (base === null || terminal === null) {
+    return {
+      points: [],
+      segments: [],
+      missingCount: raw.filter((value) => value === null).length,
+      missingDates: dates.filter((_date, index) => raw[index] === null),
+      available: false,
+    };
+  }
+  const segments = [];
+  let segment = [];
+  let peak = 1;
+  const points = [];
+  const missingDates = [];
+  dates.forEach((date, index) => {
+    const value = raw[index];
+    if (value === null) {
+      missingDates.push(date);
+      if (segment.length) segments.push(segment);
+      segment = [];
+      return;
+    }
+    const normalized = value / base;
+    peak = Math.max(peak, normalized);
+    const point = {
+      date,
+      equity: value,
+      normalized,
+      drawdown: peak > 0 ? normalized / peak - 1 : 0,
+    };
+    points.push(point);
+    segment.push(point);
+  });
+  if (segment.length) segments.push(segment);
+  return {
+    points,
+    segments,
+    missingCount: missingDates.length,
+    missingDates,
+    available: points.length >= 2,
+  };
+}
+
+function formatAxisDate(value) {
+  if (!value) return '-';
+  const parts = String(value).split('-');
+  if (parts.length >= 3) return `${parts[1]}/${parts[2]}`;
+  return String(value);
+}
+
+function formatChartAxisDate(value, mode = 'month') {
+  if (!value) return '-';
+  const parts = String(value).split('-').map((part) => Number(part));
+  if (parts.length < 3 || parts.some((part) => !Number.isFinite(part))) return formatAxisDate(value);
+  const [year, month, day] = parts;
+  if (mode === 'quarter') return `${String(year).slice(2)}년 ${Math.floor((month - 1) / 3) + 1}분기`;
+  if (mode === 'week') return `${month}/${day}`;
+  return `${String(year).slice(2)}.${String(month).padStart(2, '0')}`;
+}
+
+function parseDateString(value) {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function daysBetween(start, end) {
+  const startDate = parseDateString(start);
+  const endDate = parseDateString(end);
+  if (!startDate || !endDate) return 0;
+  return Math.max(0, Math.round((endDate - startDate) / 86400000));
+}
+
+function dateTickKey(year, month, day, mode) {
+  if (mode === 'week') return `${year}-${String(month).padStart(2, '0')}-W${Math.ceil(day / 7)}`;
+  if (mode === 'quarter') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function dateTickMarks(dates) {
+  if (!dates.length) return [];
+  const spanDays = daysBetween(dates[0], dates.at(-1));
+  const mode = spanDays <= 70 ? 'week' : (spanDays <= 420 ? 'month' : 'quarter');
+  const ticks = [];
+  let previousKey = '';
+  dates.forEach((date, index) => {
+    const parts = String(date).split('-').map((part) => Number(part));
+    if (parts.length < 3 || parts.some((part) => !Number.isFinite(part))) return;
+    const [year, month, day] = parts;
+    const key = dateTickKey(year, month, day, mode);
+    if (index === dates.length - 1 && key === previousKey && ticks.length) {
+      ticks[ticks.length - 1] = { index, date, label: formatChartAxisDate(date, mode) };
+      previousKey = key;
+      return;
+    }
+    if (index === 0 || index === dates.length - 1 || key !== previousKey) {
+      if (mode !== 'quarter' || index === 0 || index === dates.length - 1 || [1, 4, 7, 10].includes(month)) {
+        ticks.push({ index, date, label: formatChartAxisDate(date, mode) });
+      }
+    }
+    previousKey = key;
+  });
+  const maxTicks = 12;
+  if (ticks.length <= maxTicks) return ticks;
+  const stride = Math.ceil((ticks.length - 2) / (maxTicks - 2));
+  return ticks.filter((tick, index) => index === 0 || index === ticks.length - 1 || index % stride === 0);
+}
+
+function formatPercentTick(value) {
+  if (!Number.isFinite(Number(value))) return '-';
+  const percent = Number(value) * 100;
+  const decimals = Math.abs(percent) < 10 && Math.abs(percent % 1) > 0.001 ? 1 : 0;
+  return `${percent.toFixed(decimals)}%`;
+}
+
+function niceReturnTicks(minReturn, maxReturn) {
+  let lower = Math.min(Number(minReturn) || 0, 0);
+  let upper = Math.max(Number(maxReturn) || 0, 0);
+  if (Math.abs(upper - lower) < 0.02) {
+    lower -= 0.02;
+    upper += 0.02;
+  }
+  const candidates = [0.01, 0.02, 0.05, 0.10, 0.25, 0.50, 1.0, 2.0, 5.0];
+  let step = candidates.at(-1);
+  for (const candidate of candidates) {
+    const start = Math.floor(lower / candidate) * candidate;
+    const end = Math.ceil(upper / candidate) * candidate;
+    const count = Math.round((end - start) / candidate) + 1;
+    if (count >= 4 && count <= 7) {
+      step = candidate;
+      break;
+    }
+  }
+  const start = Math.floor(lower / step) * step;
+  const end = Math.ceil(upper / step) * step;
+  const ticks = [];
+  for (let value = start; value <= end + step / 2; value += step) {
+    ticks.push(Number(value.toFixed(6)));
+  }
+  return ticks;
+}
+
+const PERFORMANCE_PERIODS = [
+  { key: '1W', label: '최근 1주', tradingDays: 5 },
+  { key: '1M', label: '최근 1개월', tradingDays: 21 },
+  { key: '3M', label: '최근 3개월', tradingDays: 63 },
+  { key: '6M', label: '최근 6개월', tradingDays: 126 },
+  { key: '1Y', label: '최근 1년', tradingDays: 252 },
+  { key: 'YTD', label: 'YTD', ytd: true },
+];
+
+const PERFORMANCE_METRICS = [
+  { key: 'cumulativeReturn', label: '누적 수익률', formatter: formatPercent },
+  { key: 'sharpe', label: '샤프지수', formatter: (value) => formatNumberWithDigits(value, 2) },
+  { key: 'volatility', label: '변동성(표준편차)', formatter: formatPercent },
+  { key: 'maxDrawdown', label: 'MDD', formatter: formatPercent },
+  { key: 'sortino', label: '소르티노 지수', formatter: (value) => formatNumberWithDigits(value, 2) },
+  { key: 'calmar', label: '칼마 지수', formatter: (value) => formatNumberWithDigits(value, 2) },
+  { key: 'cvar', label: 'CVaR(95%)', formatter: formatPercent },
+  { key: 'winRate', label: '일간 승률', formatter: formatPercent },
+];
+
+function formatNumberWithDigits(value, digits = 2) {
+  if (value === Infinity) return '∞';
+  if (value === -Infinity) return '-∞';
+  if (value === null || value === undefined || Number.isNaN(Number(value)) || !Number.isFinite(Number(value))) return '-';
+  return Number(value).toLocaleString('ko-KR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function periodPoints(points, period) {
+  if (!points.length) return [];
+  if (period.ytd) {
+    const endYear = String(points.at(-1).date || '').slice(0, 4);
+    const ytdPoints = points.filter((point) => String(point.date || '').startsWith(endYear));
+    return ytdPoints.length >= 2 ? ytdPoints : points.slice(-Math.min(points.length, 2));
+  }
+  return points.slice(-Math.min(points.length, period.tradingDays + 1));
+}
+
+function returnSeries(points) {
+  const returns = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = Number(points[index - 1].equity);
+    const current = Number(points[index].equity);
+    if (Number.isFinite(previous) && Number.isFinite(current) && previous > 0) {
+      returns.push(current / previous - 1);
+    }
+  }
+  return returns;
+}
+
+function populationStd(values) {
+  if (values.length < 2) return null;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(Math.max(0, variance));
+}
+
+function maxDrawdownFromPoints(points) {
+  let peak = -Infinity;
+  let maxDrawdown = 0;
+  points.forEach((point) => {
+    const equity = Number(point.equity);
+    if (!Number.isFinite(equity)) return;
+    peak = Math.max(peak, equity);
+    if (peak > 0) maxDrawdown = Math.min(maxDrawdown, equity / peak - 1);
+  });
+  return maxDrawdown;
+}
+
+function cvarFromReturns(returns, tail = 0.05) {
+  const clean = returns.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const count = Math.max(1, Math.ceil(clean.length * tail));
+  const tailReturns = clean.slice(0, count);
+  return tailReturns.reduce((sum, value) => sum + value, 0) / tailReturns.length;
+}
+
+function performanceMetrics(points, period) {
+  const slice = periodPoints(points, period);
+  if (slice.length < 2) return null;
+  const returns = returnSeries(slice);
+  if (!returns.length) return null;
+  const first = Number(slice[0].equity);
+  const last = Number(slice.at(-1).equity);
+  const cumulativeReturn = first > 0 ? last / first - 1 : null;
+  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const std = populationStd(returns);
+  const downside = returns.filter((value) => value < 0);
+  const downsideStd = downside.length >= 2 ? populationStd(downside) : null;
+  const annualizedReturn = cumulativeReturn === null || cumulativeReturn <= -1
+    ? null
+    : ((1 + cumulativeReturn) ** (252 / returns.length) - 1);
+  const volatility = std === null ? null : std * Math.sqrt(252);
+  const maxDrawdown = maxDrawdownFromPoints(slice);
+  const winRate = returns.filter((value) => value > 0).length / returns.length;
+  return {
+    cumulativeReturn,
+    sharpe: std && std > 0 ? (mean / std) * Math.sqrt(252) : null,
+    volatility,
+    maxDrawdown,
+    sortino: downside.length === 0 && mean > 0 ? Infinity : (downsideStd && downsideStd > 0 ? (mean / downsideStd) * Math.sqrt(252) : null),
+    calmar: maxDrawdown < 0 && annualizedReturn !== null ? annualizedReturn / Math.abs(maxDrawdown) : null,
+    cvar: cvarFromReturns(returns),
+    winRate,
+  };
+}
+
+function appendSvgText(svg, text, x, y, className, anchor = 'middle') {
+  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  label.textContent = text;
+  label.setAttribute('x', String(x));
+  label.setAttribute('y', String(y));
+  label.setAttribute('class', className);
+  label.setAttribute('text-anchor', anchor);
+  svg.appendChild(label);
+  return label;
+}
+
+function lookbackFilteredPoints(points, months) {
+  if (!points.length) return [];
+  const endDate = parseDateString(points.at(-1).date);
+  if (!endDate) return points;
+  const cutoff = new Date(endDate.getTime());
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - Math.max(1, Number(months) || DASHBOARD_INPUT_DEFAULTS.lookbackMonths));
+  const filtered = points.filter((point) => {
+    const pointDate = parseDateString(point.date);
+    return pointDate && pointDate >= cutoff;
+  });
+  return filtered.length >= 2 ? filtered : points.slice(-Math.min(points.length, 2));
+}
+
+function rebalanceBucket(dateText, frequency) {
+  const parts = String(dateText || '').split('-').map((part) => Number(part));
+  if (parts.length < 3 || parts.some((part) => !Number.isFinite(part))) return String(dateText || '');
+  const [year, month, day] = parts;
+  if (frequency === 'QE') return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
+  if (frequency === 'W') return `${year}-${String(month).padStart(2, '0')}-W${Math.ceil(day / 7)}`;
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+function isScenarioRebalance(points, index, frequency) {
+  if (index <= 0 || index >= points.length) return false;
+  return rebalanceBucket(points[index].date, frequency) !== rebalanceBucket(points[index - 1].date, frequency);
+}
+
+function allocationConcentration(allocation) {
+  const weights = (allocation?.weighted || []).map((row) => Number(row.display_weight) || 0).filter((value) => value > 0);
+  if (!weights.length) return 0;
+  return weights.reduce((sum, value) => sum + value * value, 0);
+}
+
+function adjustedScenarioPointsFromRaw(rawPoints, params, allocation) {
+  if (rawPoints.length < 2) return rawPoints;
+  const hasAllocation = Array.isArray(allocation?.weighted) && allocation.weighted.length > 0;
+  const invested = hasAllocation ? Math.max(0, Math.min(1, Number(allocation?.investedTotal) || 0)) : 1;
+  const topN = Math.max(1, Number(params.topN) || DASHBOARD_INPUT_DEFAULTS.topN);
+  const concentration = hasAllocation ? allocationConcentration(allocation) : 1 / topN;
+  const equalConcentration = 1 / topN;
+  const concentrationTilt = Math.max(-0.5, Math.min(2.5, concentration / Math.max(equalConcentration, 1e-6) - 1));
+  const exposureMultiplier = Math.max(0.05, Math.min(1.45, invested * (1 + 0.10 * concentrationTilt)));
+  const turnoverProxy = Math.max(0, Math.min(2, 0.35 + 0.20 * Math.max(0, concentrationTilt)));
+  const adjusted = [{ ...rawPoints[0], equity: 1, drawdown: 0 }];
+  let equity = 1;
+  let peak = 1;
+  for (let index = 1; index < rawPoints.length; index += 1) {
+    const previous = Number(rawPoints[index - 1].equity);
+    const current = Number(rawPoints[index].equity);
+    let dailyReturn = previous > 0 && Number.isFinite(previous) && Number.isFinite(current)
+      ? current / previous - 1
+      : 0;
+    dailyReturn *= exposureMultiplier;
+    if (isScenarioRebalance(rawPoints, index, params.rebalanceFrequency)) {
+      dailyReturn -= turnoverProxy * params.totalCostRate;
+    }
+    equity *= Math.max(0.0001, 1 + dailyReturn);
+    peak = Math.max(peak, equity);
+    adjusted.push({
+      date: rawPoints[index].date,
+      equity,
+      drawdown: peak > 0 ? equity / peak - 1 : 0,
+      scenario_exposure: exposureMultiplier,
+      scenario_turnover_proxy: turnoverProxy,
+    });
+  }
+  return adjusted;
+}
+
+function scenarioAdjustedSeriesPoints(series, date, params, allocation) {
+  const rawPoints = lookbackFilteredPoints(seriesPointsThroughDate(series, date, 2000), params.lookbackMonths);
+  return adjustedScenarioPointsFromRaw(rawPoints, params, allocation);
+}
+
+function tradingDaysForWindow(run, windowKey) {
+  const period = (run.periods || []).find((item) => item.key === windowKey);
+  const days = Number(period?.trading_days);
+  if (Number.isFinite(days) && days > 0) return Math.round(days);
+  const fallback = { '1W': 5, '1M': 21, '3M': 63, '6M': 126, '1Y': 252 };
+  return fallback[windowKey] || Math.max(21, Math.round((Number(inputScenarioParameters().lookbackMonths) || 12) * 21));
+}
+
+function scenarioLookbackTradingDays(params) {
+  const months = Number(params?.lookbackMonths);
+  if (!Number.isFinite(months) || months <= 0) return null;
+  return Math.max(1, Math.round(months * 21));
+}
+
+function scenarioWindowTradingDays(run, windowKey, params) {
+  const windowDays = tradingDaysForWindow(run, windowKey);
+  const lookbackDays = scenarioLookbackTradingDays(params);
+  return lookbackDays ? Math.max(1, Math.min(windowDays, lookbackDays)) : windowDays;
+}
+
+function scenarioAdjustedWindowPoints(run, factor, date, windowKey, params, allocation) {
+  const series = factorBacktestSeries(run, factor);
+  const rawPoints = lookbackFilteredPoints(seriesPointsThroughDate(series, date, 2000), params.lookbackMonths);
+  if (rawPoints.length < 2) return [];
+  const tradingDays = scenarioWindowTradingDays(run, windowKey, params);
+  const windowPoints = rawPoints.slice(-Math.min(rawPoints.length, tradingDays + 1));
+  return adjustedScenarioPointsFromRaw(windowPoints, params, allocation);
+}
+
+function cumulativeReturnFromPoints(points) {
+  if (!Array.isArray(points) || points.length < 2) return null;
+  const first = Number(points[0].equity);
+  const last = Number(points.at(-1).equity);
+  if (!Number.isFinite(first) || !Number.isFinite(last) || first <= 0) return null;
+  return last / first - 1;
+}
+
+function rawPeriodRows(run, date, windowKey) {
+  const matrix = periodMatrixEntry(run, date, windowKey);
+  if (matrix && Array.isArray(matrix.factors)) {
+    return matrix.factors.map((name, index) => ({
+      factor: name,
+      raw_rank: index + 1,
+      rank: index + 1,
+      period_return: optionalNumber(matrix.returns?.[index]),
+      raw_period_return: optionalNumber(matrix.returns?.[index]),
+      window_label: matrix.window_label || windowKey,
+      factor_count: matrix.factor_count || matrix.factors.length,
+    }));
+  }
+  return (run.factor_period_rankings || [])
+    .filter((row) => row.date === date && row.window === windowKey)
+    .map((row, index) => ({
+      factor: row.factor,
+      raw_rank: row.rank || index + 1,
+      rank: row.rank || index + 1,
+      period_return: optionalNumber(row.period_return),
+      raw_period_return: optionalNumber(row.period_return),
+      window_label: row.window_label || windowKey,
+      factor_count: row.factor_count || null,
+    }));
+}
+
+function scenarioFactorStats(run, date, windowKey, factor, params = inputScenarioParameters()) {
+  const rawStats = periodFactorStats(run, date, windowKey, factor) || { factor, rank: null, period_return: null };
+  const allocation = scenarioAllocationForFactor(run, date, windowKey, factor, params.topN, params.maxWeight).allocation;
+  const points = scenarioAdjustedWindowPoints(run, factor, date, windowKey, params, allocation);
+  const scenarioReturn = cumulativeReturnFromPoints(points);
+  return {
+    ...rawStats,
+    factor,
+    raw_period_return: rawStats?.period_return ?? null,
+    period_return: scenarioReturn ?? rawStats?.period_return ?? null,
+    scenario_adjusted: scenarioReturn !== null,
+    scenario_points: points,
+    scenario_allocation: allocation,
+    scenario_inputs: params,
+  };
+}
+
+function scenarioPeriodRows(run, date, windowKey, params = inputScenarioParameters()) {
+  const rows = rawPeriodRows(run, date, windowKey);
+  const enhanced = rows.map((row) => {
+    const scenario = scenarioFactorStats(run, date, windowKey, row.factor, params);
+    return {
+      ...row,
+      raw_period_return: row.raw_period_return ?? row.period_return,
+      period_return: scenario.period_return,
+      scenario_adjusted: scenario.scenario_adjusted,
+      scenario_points: scenario.scenario_points,
+      scenario_allocation: scenario.scenario_allocation,
+    };
+  });
+  return enhanced
+    .sort((a, b) => {
+      const ar = Number(a.period_return);
+      const br = Number(b.period_return);
+      if (Number.isFinite(ar) && Number.isFinite(br) && ar !== br) return br - ar;
+      if (Number.isFinite(br) !== Number.isFinite(ar)) return Number.isFinite(br) ? 1 : -1;
+      return Number(a.raw_rank || 9999) - Number(b.raw_rank || 9999);
+    })
+    .map((row, index) => ({
+      ...row,
+      rank: index + 1,
+      factor_count: row.factor_count || enhanced.length,
+    }));
+}
+
+function scenarioBestStats(run, date, windowKey, params = inputScenarioParameters()) {
+  return scenarioPeriodRows(run, date, windowKey, params)[0] || periodBestStats(run, date, windowKey);
+}
+
+function chartSeriesModel(points = [], segments = null, extra = {}) {
+  const finitePoints = (points || []).filter((point) => Number.isFinite(point?.normalized));
+  return {
+    points: finitePoints,
+    segments: segments || (finitePoints.length ? [finitePoints] : []),
+    missingCount: 0,
+    missingDates: [],
+    available: finitePoints.length >= 2,
+    ...extra,
+  };
+}
+
+function fullPythonPeriod() {
+  return (state.v4Payload?.performance?.periods || []).find((period) => period?.key === 'FULL') || null;
+}
+
+function appendComparisonSummaryItem(target, titleText, valueText, detailText, className = '') {
+  const item = document.createElement('div');
+  item.className = `comparison-summary-item ${className}`.trim();
+  const title = document.createElement('small');
+  title.textContent = titleText;
+  const value = document.createElement('strong');
+  value.textContent = valueText;
+  const detail = document.createElement('span');
+  detail.textContent = detailText;
+  item.append(title, value, detail);
+  target.appendChild(item);
+}
+
+function renderBacktestComparisonSummary(run, {
+  date,
+  windowKey,
+  factor,
+  best,
+  commonPeriod,
+  selectedModel,
+  bestModel,
+}) {
+  const target = document.querySelector('#backtest-comparison-summary');
+  if (!target) return;
+  target.replaceChildren();
+  const selectedStats = periodFactorStatsIncludingDiagnostic(run, date, windowKey, factor);
+  const windowLabel = selectedStats?.window_label || best?.window_label || windowKey;
+  const canonical = factor === run.summary?.selected_factor;
+  const selectedRankDetail = selectedStats?.rank
+    ? `순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
+    : selectedStats?.diagnostic_fallback && selectedStats?.selection_eligible !== true
+      ? '선정 제외 진단 팩터 · 순위 산정 제외'
+      : '순위 자료 없음';
+  appendComparisonSummaryItem(
+    target,
+    canonical ? '현재 연구 목표 팩터' : '사용자 선택 팩터',
+    factor || '-',
+    `${windowLabel} ${formatPercent(selectedStats?.period_return)} · ${selectedRankDetail}`,
+    'selected',
+  );
+  appendComparisonSummaryItem(
+    target,
+    `${windowLabel} 사후 최고`,
+    best?.factor || '-',
+    best?.factor
+      ? `${formatPercent(best.period_return)} · 선정 적격 ${formatInteger(best.factor_count)}개 중 1위 · 판정일 ${date || '-'}`
+      : '같은 기간의 비교 팩터 자료 없음',
+    'best',
+  );
+  const difference = optionalNumber(selectedStats?.period_return) !== null
+    && optionalNumber(best?.period_return) !== null
+    ? Number(selectedStats.period_return) - Number(best.period_return)
+    : null;
+  appendComparisonSummaryItem(
+    target,
+    '선택 − 기간 최고',
+    difference === null ? '-' : `${difference >= 0 ? '+' : ''}${(difference * 100).toFixed(2)}%p`,
+    factor === best?.factor ? '선택 팩터와 기간 최고가 동일합니다.' : '같은 판정일·같은 기간 누적 수익률 차이',
+  );
+  const gapParts = [];
+  if (selectedModel?.missingCount) gapParts.push(`선택 내부 평가불가 ${formatInteger(selectedModel.missingCount)}일`);
+  if (bestModel?.missingCount && best?.factor !== factor) gapParts.push(`기간 최고 내부 평가불가 ${formatInteger(bestModel.missingCount)}일`);
+  appendComparisonSummaryItem(
+    target,
+    '그래프 평가범위',
+    commonPeriod ? `${commonPeriod.startDate} → ${commonPeriod.endDate}` : `최근 ${inputLookbackMonths()}개월`,
+    `${commonPeriod ? `전체 공통 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률` : '브라우저 민감도'}${gapParts.length ? ` · ${gapParts.join(' · ')}` : ' · 내부 결측 없음'}${commonPeriod && date !== commonPeriod.endDate ? ' · 과거 리더의 이후 성과까지 보는 사후 탐색' : ''}`,
+  );
+}
+
+function renderBacktestChart() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const benchmark = benchmarkBacktestSeries(run);
+  const benchmarks = Array.isArray(run.comparison_benchmark_series) && run.comparison_benchmark_series.length
+    ? run.comparison_benchmark_series
+    : (benchmark ? [benchmark] : []);
+  const params = inputScenarioParameters();
+  const commonPeriod = run.common_evaluation_period;
+  const best = commonPeriod
+    ? periodBestStats(run, date, windowKey)
+    : scenarioBestStats(run, date, windowKey, params);
+  const selectedAllocation = commonPeriod
+    ? null
+    : scenarioAllocationForFactor(run, date, windowKey, factor, params.topN, params.maxWeight).allocation;
+  const selectedProxyPoints = commonPeriod
+    ? []
+    : normalizedLine(scenarioAdjustedSeriesPoints(factorBacktestSeries(run, factor), date, params, selectedAllocation));
+  const selectedModel = commonPeriod
+    ? commonEvaluationSeriesSegments(factorBacktestSeries(run, factor), commonPeriod)
+    : chartSeriesModel(selectedProxyPoints);
+  const selectedSeries = selectedModel.points;
+  const bestAllocation = best?.factor && !commonPeriod
+    ? scenarioAllocationForFactor(run, date, windowKey, best.factor, params.topN, params.maxWeight).allocation
+    : null;
+  const bestProxyPoints = best?.factor && !commonPeriod
+    ? normalizedLine(scenarioAdjustedSeriesPoints(factorBacktestSeries(run, best.factor), date, params, bestAllocation))
+    : [];
+  const bestModel = best?.factor
+    ? (commonPeriod
+      ? commonEvaluationSeriesSegments(factorBacktestSeries(run, best.factor), commonPeriod)
+      : chartSeriesModel(bestProxyPoints))
+    : chartSeriesModel([]);
+  const bestMetricSeries = bestModel.points;
+  const bestSeries = best?.factor && best.factor !== factor ? bestMetricSeries : [];
+  const benchmarkSeriesList = benchmarks.map((series) => ({
+    key: `benchmark-${series.symbol}`,
+    symbol: series.symbol,
+    label: series.label_ko || V4_BENCHMARK_LABELS[series.symbol] || series.symbol,
+    model: commonPeriod
+      ? commonEvaluationSeriesSegments(series, commonPeriod)
+      : chartSeriesModel(normalizedLine(lookbackFilteredPoints(seriesPointsThroughDate(series, date, 2000), params.lookbackMonths))),
+  })).map((series) => ({ ...series, points: series.model.points }));
+  const benchmarkLabels = benchmarkSeriesList.map((series) => series.label).join(' · ');
+  const target = document.querySelector('#backtest-chart');
+  target.replaceChildren();
+  setText(
+    '#backtest-chart-meta',
+    commonPeriod
+      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · Python 전체 공통 평가기간 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률 · 기간 최고 판정 ${date || '-'} ${windowKey} · 기준 1.0 · 프록시 입력 미적용 · 선택 ${factor || '-'}${best?.factor ? ` · 원자료 기간 최고 ${best.factor}` : ''}${benchmarkLabels ? ` · 비교 ${benchmarkLabels}` : ''}${date !== commonPeriod.endDate ? ' · 과거 판정 리더의 이후 성과를 포함한 사후 탐색' : ''}`
+      : `${date || '-'} 기준 · 브라우저 프록시/민감도 뷰 · 최근 ${params.lookbackMonths}개월 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}${benchmarkLabels ? ` · 비교 ${benchmarkLabels}` : ''} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps · 최대 ${formatPercent(params.maxWeight)} · 저장된 팩터 곡선을 현재 비중 집중도와 비용 가정으로 조정`
+  );
+  renderBacktestComparisonSummary(run, {
+    date,
+    windowKey,
+    factor,
+    best,
+    commonPeriod,
+    selectedModel,
+    bestModel,
+  });
+  const performanceSeries = [
+    { key: 'selected', factor, label: `선택 팩터 ${factor || '-'}`, points: selectedSeries },
+    {
+      key: 'best',
+      factor: best?.factor,
+      label: `${best?.window_label || windowKey} 기간 최고 팩터 ${best?.factor || '-'}`,
+      points: bestMetricSeries,
+    },
+    ...benchmarkSeriesList.map((series) => ({
+      key: series.key,
+      symbol: series.symbol,
+      label: series.label,
+      points: series.points,
+    })),
+  ];
+  const allPoints = [...selectedSeries, ...bestSeries, ...benchmarkSeriesList.flatMap((series) => series.points)];
+  if (!allPoints.length) {
+    appendEmpty(
+      '#backtest-chart',
+      commonPeriod
+        ? '선택 팩터·기간 최고 팩터·비교지수 모두 전체 공통 평가기간 누적 성과를 표시할 수 없습니다. 서로의 값으로 대체하지 않습니다.'
+        : '선택 팩터·기간 최고 팩터·비교지수의 최근 백테스트 추이 데이터가 없습니다. 서로의 값으로 대체하지 않습니다.',
+    );
+    renderPerformanceMetricsTable(performanceSeries);
+    return;
+  }
+  const allValues = allPoints.map((point) => point.normalized).filter((value) => Number.isFinite(value));
+  const returnValues = allValues.map((value) => value - 1);
+  const tickReturns = niceReturnTicks(Math.min(...returnValues, 0), Math.max(...returnValues, 0));
+  const minValue = Math.min(...tickReturns) + 1;
+  const maxValue = Math.max(...tickReturns) + 1;
+  const allDates = [...new Set(allPoints.map((point) => point.date).filter(Boolean))].sort();
+  const dateToIndex = new Map(allDates.map((pointDate, index) => [pointDate, index]));
+  const width = 760;
+  const height = 260;
+  const plot = { left: 68, right: 18, top: 18, bottom: 50 };
+  const plotWidth = width - plot.left - plot.right;
+  const plotHeight = height - plot.top - plot.bottom;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute(
+    'aria-label',
+    `선택 팩터, 기간 최고 팩터, ${benchmarkSeriesList.map((series) => series.symbol).join(', ')} 비교지수의 ${commonPeriod ? '전체 공통 평가기간' : '최근 백테스트'} 누적 성과 비교`,
+  );
+  const yFor = (value) => height - plot.bottom - ((value - minValue) / Math.max(0.000001, maxValue - minValue)) * plotHeight;
+  const xFor = (point) => {
+    const index = dateToIndex.get(point.date) ?? 0;
+    return plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+  };
+  tickReturns.forEach((tickReturn) => {
+    const y = yFor(tickReturn + 1);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', String(plot.left));
+    line.setAttribute('x2', String(width - plot.right));
+    line.setAttribute('y1', String(y));
+    line.setAttribute('y2', String(y));
+    line.setAttribute('class', 'line-grid');
+    svg.appendChild(line);
+    appendSvgText(svg, formatPercentTick(tickReturn), plot.left - 9, y + 4, 'axis-label', 'end');
+  });
+  const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  yAxis.setAttribute('x1', String(plot.left));
+  yAxis.setAttribute('x2', String(plot.left));
+  yAxis.setAttribute('y1', String(plot.top));
+  yAxis.setAttribute('y2', String(height - plot.bottom));
+  yAxis.setAttribute('class', 'axis-line');
+  svg.appendChild(yAxis);
+  const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  xAxis.setAttribute('x1', String(plot.left));
+  xAxis.setAttribute('x2', String(width - plot.right));
+  xAxis.setAttribute('y1', String(height - plot.bottom));
+  xAxis.setAttribute('y2', String(height - plot.bottom));
+  xAxis.setAttribute('class', 'axis-line');
+  svg.appendChild(xAxis);
+  dateTickMarks(allDates).forEach((tickMark) => {
+    const { index } = tickMark;
+    const x = plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+    const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    tick.setAttribute('x1', String(x));
+    tick.setAttribute('x2', String(x));
+    tick.setAttribute('y1', String(height - plot.bottom));
+    tick.setAttribute('y2', String(height - plot.bottom + 5));
+    tick.setAttribute('class', 'axis-line');
+    svg.appendChild(tick);
+    appendSvgText(svg, tickMark.label, x, height - plot.bottom + 19, 'axis-label');
+  });
+  appendSvgText(svg, 'X축: 날짜', plot.left + plotWidth / 2, height - 5, 'axis-title');
+  const yTitle = appendSvgText(svg, 'Y축: 누적 성과', 13, plot.top + plotHeight / 2, 'axis-title');
+  yTitle.setAttribute('transform', `rotate(-90 13 ${plot.top + plotHeight / 2})`);
+  const toPolyline = (points) => points.map((point) => {
+    const x = xFor(point);
+    const y = yFor(point.normalized);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const appendLine = (points, className) => {
+    if (!points.length) return;
+    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    polyline.setAttribute('points', toPolyline(points));
+    polyline.setAttribute('class', `line-path ${className}`);
+    svg.appendChild(polyline);
+  };
+  selectedModel.segments.forEach((segment) => appendLine(segment, 'selected'));
+  if (best?.factor !== factor) bestModel.segments.forEach((segment) => appendLine(segment, 'best'));
+  benchmarkSeriesList.forEach((series) => {
+    series.model.segments.forEach((segment) => appendLine(segment, benchmarkPaletteClass(series.symbol)));
+  });
+  target.appendChild(svg);
+
+  const legend = document.createElement('div');
+  legend.className = 'line-legend';
+  const pythonFull = fullPythonPeriod();
+  const selectedFull = pythonFull?.factors?.[factor];
+  const bestFull = best?.factor ? pythonFull?.factors?.[best.factor] : null;
+  const selectedReturn = pythonPerformanceMetric(selectedFull, 'cumulativeReturn')
+    ?? (selectedSeries.length ? selectedSeries.at(-1)?.normalized - 1 : null);
+  const bestReturn = pythonPerformanceMetric(bestFull, 'cumulativeReturn')
+    ?? (bestMetricSeries.length ? bestMetricSeries.at(-1)?.normalized - 1 : null);
+  const selectedDrawdown = pythonPerformanceMetric(selectedFull, 'maxDrawdown');
+  const bestDrawdown = pythonPerformanceMetric(bestFull, 'maxDrawdown');
+  const selectedLegend = document.createElement('span');
+  const selectedDot = document.createElement('span');
+  selectedDot.className = 'legend-dot selected';
+  selectedLegend.appendChild(selectedDot);
+  selectedLegend.append(`선택 팩터 ${factor}: 누적 ${formatPercent(selectedReturn)} · MDD ${formatPercent(selectedDrawdown)}${selectedModel.missingCount ? ` · 내부 평가불가 ${formatInteger(selectedModel.missingCount)}일` : ''}${!selectedModel.available ? ' · 그래프 선 없음' : ''}`);
+  legend.appendChild(selectedLegend);
+  if (best?.factor && best.factor !== factor) {
+    const bestLegend = document.createElement('span');
+    const bestDot = document.createElement('span');
+    bestDot.className = 'legend-dot best';
+    bestLegend.appendChild(bestDot);
+    bestLegend.append(`${best?.window_label || windowKey} 최고 ${best.factor}: 누적 ${formatPercent(bestReturn)} · MDD ${formatPercent(bestDrawdown)}${bestModel.missingCount ? ` · 내부 평가불가 ${formatInteger(bestModel.missingCount)}일` : ''}${!bestModel.available ? ' · 그래프 선 없음' : ''}`);
+    legend.appendChild(bestLegend);
+  } else if (best?.factor === factor) {
+    const sameLegend = document.createElement('span');
+    sameLegend.className = 'same-series-note';
+    sameLegend.textContent = `선택 팩터 = ${best?.window_label || windowKey} 기간 최고 · 동일 선 1개`;
+    legend.appendChild(sameLegend);
+  }
+  benchmarkSeriesList.forEach((series) => {
+    const source = pythonFull?.benchmarks?.[series.symbol];
+    const benchmarkReturn = pythonPerformanceMetric(source, 'cumulativeReturn')
+      ?? (series.points.length ? series.points.at(-1)?.normalized - 1 : null);
+    const benchmarkDrawdown = pythonPerformanceMetric(source, 'maxDrawdown');
+    const benchmarkLegend = document.createElement('span');
+    const benchmarkDot = document.createElement('span');
+    benchmarkDot.className = `legend-dot ${benchmarkPaletteClass(series.symbol)}`;
+    benchmarkLegend.appendChild(benchmarkDot);
+    benchmarkLegend.append(`${series.label}: 누적 ${formatPercent(benchmarkReturn)} · MDD ${formatPercent(benchmarkDrawdown)}${series.model.missingCount ? ` · 내부 평가불가 ${formatInteger(series.model.missingCount)}일` : ''}${!series.model.available ? ' · 그래프 선 없음' : ''}`);
+    legend.appendChild(benchmarkLegend);
+  });
+  target.appendChild(legend);
+  renderPerformanceMetricsTable(performanceSeries);
+}
+
+function pythonPerformanceSource(period, series) {
+  if (series.symbol) return period.benchmarks?.[series.symbol] || null;
+  if (series.factor) return period.factors?.[series.factor] || null;
+  return null;
+}
+
+function pythonPerformanceMetric(source, key) {
+  if (!source || source.available === false) return null;
+  const aliases = {
+    volatility: 'annualizedVolatility',
+    cvar: 'cvar5',
+  };
+  const value = source[aliases[key] || key];
+  return Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
+  target.replaceChildren();
+  const availableSeries = (seriesList || []).filter(
+    (series) => (series.factor || series.symbol) && series.symbol !== '^IXIC',
+  );
+  const heading = document.createElement('div');
+  heading.className = 'performance-metrics-heading';
+  const headingText = document.createElement('div');
+  const title = document.createElement('h4');
+  title.textContent = '기간별 Python 성과 지표 비교';
+  const note = document.createElement('p');
+  note.id = 'python-performance-metrics-note';
+  note.textContent = '1주·1개월·3개월·6개월·1년·YTD·전체 공통 평가기간의 Python 원자료입니다. 누적 수익률은 표시된 시작·종료 NAV endpoint 기준이며, 내부 가격 공백이 있는 경우 일간 위험지표의 실제 관측 수와 exact 여부를 카드에 따로 표시합니다. 선택 팩터는 현재 선택 정책의 비용 차감 전략, SPY·QQQ는 조정가격 보유 성과입니다. 브라우저는 숫자를 재계산하거나 프록시 입력을 적용하지 않습니다.';
+  headingText.append(title, note);
+  heading.appendChild(headingText);
+  target.appendChild(heading);
+
+  const grid = document.createElement('div');
+  grid.className = 'performance-period-grid';
+  periods.forEach((period) => {
+    const card = document.createElement('section');
+    card.className = 'performance-period-card';
+    const periodTitle = document.createElement('h5');
+    periodTitle.textContent = period.label || period.key;
+    card.appendChild(periodTitle);
+    const periodMeta = document.createElement('p');
+    periodMeta.className = 'performance-period-meta';
+    periodMeta.textContent = `${period.startDate || '-'} → ${period.endDate || '-'} · ${formatInteger(period.returnObservationCount)}개 수익률`;
+    card.appendChild(periodMeta);
+
+    const qualityRows = availableSeries.map((series) => ({
+      series,
+      source: pythonPerformanceSource(period, series),
+    }));
+    const partial = qualityRows.filter(({ source }) => source?.available === true && source.riskMetricsExact === false);
+    const unavailable = qualityRows.filter(({ source }) => !source || source.available === false);
+    if (partial.length || unavailable.length) {
+      const quality = document.createElement('p');
+      quality.className = 'performance-quality-note';
+      const parts = [];
+      partial.forEach(({ series, source }) => {
+        parts.push(`${series.factor || series.symbol}: 누적 endpoint 정확 · 일간 위험 ${formatInteger(source.riskObservationCount)}/${formatInteger(source.requiredReturnCount)} 관측`);
+      });
+      unavailable.forEach(({ series, source }) => {
+        parts.push(`${series.factor || series.symbol}: 자료 없음${source?.unavailableReason ? ` (${source.unavailableReason})` : ''}`);
+      });
+      quality.textContent = parts.join(' · ');
+      card.appendChild(quality);
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'performance-table-wrap';
+    wrap.setAttribute('role', 'region');
+    wrap.setAttribute('tabindex', '0');
+    wrap.setAttribute('aria-label', `${period.label || period.key} Python 성과 지표 표`);
+    wrap.setAttribute('aria-describedby', 'python-performance-metrics-note');
+    const table = document.createElement('table');
+    table.className = 'performance-table';
+    table.setAttribute('aria-label', `${period.label || period.key} 선택 팩터, 기간 최고 팩터, SPY, QQQ 성과 비교`);
+    const thead = document.createElement('thead');
+    const header = document.createElement('tr');
+    appendHeader(header, '지표');
+    availableSeries.forEach((series) => {
+      const th = document.createElement('th');
+      th.setAttribute('scope', 'col');
+      const label = document.createElement('span');
+      const seriesClass = series.symbol === 'SPY'
+        ? 'benchmark-spy'
+        : (series.symbol === 'QQQ' ? 'benchmark-qqq' : series.key);
+      label.className = `series-name ${seriesClass}`;
+      const role = document.createElement('strong');
+      role.textContent = series.symbol || (series.key === 'selected' ? '선택 팩터' : '선택 기간 최고');
+      const identity = document.createElement('small');
+      identity.textContent = series.factor || (series.label && series.label !== series.symbol ? series.label : '조정가격 보유');
+      label.title = series.label || `${role.textContent} ${identity.textContent}`;
+      label.append(role, identity);
+      th.appendChild(label);
+      header.appendChild(th);
+    });
+    thead.appendChild(header);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    PERFORMANCE_METRICS.forEach((metric) => {
+      const tr = document.createElement('tr');
+      appendRowHeader(tr, metric.label);
+      availableSeries.forEach((series) => {
+        const source = pythonPerformanceSource(period, series);
+        const value = pythonPerformanceMetric(source, metric.key);
+        const signedMetric = ['cumulativeReturn', 'maxDrawdown', 'cvar'].includes(metric.key);
+        const className = value === null ? 'neutral' : (signedMetric ? classForNumber(value) : '');
+        const td = document.createElement('td');
+        td.className = className;
+        td.textContent = value === null ? '-' : metric.formatter(value);
+        if (source?.available === false && source.unavailableReason) td.title = source.unavailableReason;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+    grid.appendChild(card);
+  });
+  target.appendChild(grid);
+}
+
+function renderPerformanceMetricsTable(seriesList) {
+  const target = document.querySelector('#performance-metrics-table');
+  if (!target) return;
+  const pythonPeriods = state.v4Payload?.performance?.periods;
+  if (Array.isArray(pythonPeriods) && pythonPeriods.length) {
+    renderPythonPerformanceMetricsTable(target, seriesList, pythonPeriods);
+    return;
+  }
+  target.replaceChildren();
+  const availableSeries = (seriesList || []).filter((series) => Array.isArray(series.points) && series.points.length >= 2);
+  if (!availableSeries.length) {
+    appendEmpty('#performance-metrics-table', '성과 지표를 계산할 수 있는 누적 성과 데이터가 없습니다.');
+    return;
+  }
+
+  const heading = document.createElement('div');
+  heading.className = 'performance-metrics-heading';
+  const headingText = document.createElement('div');
+  const title = document.createElement('h4');
+  title.textContent = '기간별 프록시 성과 지표 비교';
+  const note = document.createElement('p');
+  note.id = 'proxy-performance-metrics-note';
+  note.textContent = '각 기간 카드에서 같은 지표를 비교합니다. 선택/기간 최고 팩터 값은 새 백엔드 재백테스트가 아니라 저장된 누적성과에 현재 입력값을 반영한 브라우저 프록시입니다. CVaR은 최악 5% 일간 손실 평균입니다. 실제 일별 구성종목 재매매 결과로 해석하지 마세요.';
+  headingText.append(title, note);
+  heading.appendChild(headingText);
+  target.appendChild(heading);
+
+  const metricCache = new Map(availableSeries.map((series) => [
+    series.key,
+    new Map(PERFORMANCE_PERIODS.map((period) => [period.key, performanceMetrics(series.points, period)])),
+  ]));
+  const shortSeriesLabel = (series) => ({
+    selected: '선택 팩터',
+    best: '기간 최고',
+    benchmark: '나스닥',
+  })[series.key] || series.label;
+
+  const grid = document.createElement('div');
+  grid.className = 'performance-period-grid';
+  PERFORMANCE_PERIODS.forEach((period) => {
+    const card = document.createElement('section');
+    card.className = 'performance-period-card';
+    const periodTitle = document.createElement('h5');
+    periodTitle.textContent = period.label;
+    card.appendChild(periodTitle);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'performance-table-wrap';
+    wrap.setAttribute('role', 'region');
+    wrap.setAttribute('tabindex', '0');
+    wrap.setAttribute('aria-label', `${period.label} 프록시 성과 지표 표`);
+    wrap.setAttribute('aria-describedby', 'proxy-performance-metrics-note');
+    const table = document.createElement('table');
+    table.className = 'performance-table';
+    table.setAttribute('aria-label', `${period.label} 선택 팩터, 기간 최고 팩터, 나스닥 벤치마크 성과 지표 비교`);
+    const thead = document.createElement('thead');
+    const header = document.createElement('tr');
+    appendHeader(header, '지표');
+    availableSeries.forEach((series) => {
+      const th = document.createElement('th');
+      th.setAttribute('scope', 'col');
+      const label = document.createElement('span');
+      label.className = `series-name ${series.key}`;
+      label.textContent = shortSeriesLabel(series);
+      th.appendChild(label);
+      header.appendChild(th);
+    });
+    thead.appendChild(header);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    PERFORMANCE_METRICS.forEach((metric) => {
+      const tr = document.createElement('tr');
+      appendCell(tr, metric.label, { strong: true });
+      availableSeries.forEach((series) => {
+        const metrics = metricCache.get(series.key)?.get(period.key);
+        const value = metrics?.[metric.key];
+        const signedMetric = ['cumulativeReturn', 'maxDrawdown', 'cvar'].includes(metric.key);
+        const className = signedMetric && Number.isFinite(Number(value)) ? classForNumber(value) : '';
+        appendCell(tr, metric.formatter(value), { className });
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+    grid.appendChild(card);
+  });
+  target.appendChild(grid);
+}
+
+function normalizeDailyActualRows(sourceRows, sourceMeta = {}) {
+  return (sourceRows || [])
+    .map((row, index) => {
+      if (Array.isArray(row)) {
+        return {
+          date: sourceMeta.date || '-',
+          window: sourceMeta.window || '-',
+          windowLabel: sourceMeta.window_label || sourceMeta.window || '-',
+          factor: sourceMeta.factor || '-',
+          rank: index + 1,
+          symbol: row[0],
+          actualWeight: Number(row[1]),
+          score: Number(row[2]),
+          weightDate: sourceMeta.weight_date || sourceMeta.date || '-',
+          scoreDate: sourceMeta.score_date || sourceMeta.date || '-',
+          source: sourceMeta.weight_source || '백테스트 일별 보유 비중',
+        };
+      }
+      return {
+        date: row.date || sourceMeta.date || '-',
+        window: row.window || sourceMeta.window || null,
+        windowLabel: row.window_label || sourceMeta.window_label || row.window || null,
+        factor: row.factor || sourceMeta.factor || '-',
+        rank: row.rank || index + 1,
+        symbol: row.symbol,
+        actualWeight: Number(row.default_weight ?? row.weight),
+        score: Number(row.score),
+        weightDate: row.weight_date || sourceMeta.weight_date || row.date || sourceMeta.date || '-',
+        scoreDate: row.score_date || sourceMeta.score_date || row.date || sourceMeta.date || '-',
+        executionDate: row.execution_date || sourceMeta.execution_date || null,
+        executionStatus: row.execution_status || sourceMeta.execution_status || null,
+        valuationAvailable: (row.valuation_available ?? sourceMeta.valuation_available) !== false,
+        cashWeight: optionalNumber(row.cash_weight ?? sourceMeta.cash_weight),
+        weightTiming: row.weight_timing || sourceMeta.weight_timing || null,
+        weightingPolicyId: row.weighting_policy_id || sourceMeta.weighting_policy_id || null,
+        historySource: row.history_source || sourceMeta.history_source || null,
+        source: row.weight_source || sourceMeta.weight_source || '백테스트 일별 보유 비중',
+      };
+    })
+    .filter((row) => row.symbol && Number.isFinite(row.actualWeight) && row.actualWeight > 0)
+    .sort((a, b) => (
+      String(b.date).localeCompare(String(a.date))
+      || Number(a.rank || 9999) - Number(b.rank || 9999)
+      || Number(b.actualWeight) - Number(a.actualWeight)
+    ));
+}
+
+function selectedDailyWeightRows(run, date, windowKey, factor) {
+  const canonicalFactor = run.summary?.selected_factor;
+  const canonicalTarget = run.current_research_target || {};
+  const factorTarget = run.factor_current_research_targets?.[factor];
+  const target = factorTarget?.factor === factor
+    ? factorTarget
+    : (factor === canonicalFactor && canonicalTarget.factor === factor
+      ? canonicalTarget
+      : {
+      factor,
+      status: 'unavailable_factor_target',
+      signalDate: null,
+      cashWeight: null,
+      weights: [],
+      reasons: ['factor_portfolio_unavailable'],
+    });
+  const historyMeta = run.factor_holding_histories?.[factor]
+    || (factor === canonicalFactor ? run.backtest_holding_history : null);
+  let sessions = (historyMeta?.sessions || [])
+    .filter((session) => String(session.date || '') <= String(date || '9999-99-99'))
+    .sort((left, right) => String(right.date || '').localeCompare(String(left.date || '')))
+    .slice(0, 21)
+    .map((session) => {
+      const rows = normalizeDailyActualRows(session.weights || [], {
+        date: session.date,
+        weight_date: session.date,
+        score_date: session.lastSignalDate,
+        execution_date: session.lastExecutionDate,
+        execution_status: session.executionStatus,
+        cash_weight: session.cashWeight,
+        weight_timing: session.weightTiming,
+        factor,
+        weighting_policy_id: historyMeta?.weightingPolicyId,
+        weight_source: historyMeta?.sourceKind === 'legacy_backtest_held_fallback'
+          ? '실제 백테스트 보유 fallback'
+          : '실제 백테스트 보유 이력',
+        history_source: historyMeta?.sourceKind,
+      });
+      return {
+        date: session.date,
+        valuationAvailable: session.valuationAvailable !== false,
+        lastSignalDate: session.lastSignalDate,
+        lastExecutionDate: session.lastExecutionDate,
+        executionStatus: session.executionStatus,
+        cashWeight: optionalNumber(session.cashWeight) ?? 0,
+        weightTiming: session.weightTiming || historyMeta?.weightTiming,
+        rows,
+      };
+    });
+
+  if (!sessions.length) {
+    const historyRows = (run.holdings || []).filter((row) => (
+      row.factor === factor
+      && (!row.window || row.window === windowKey)
+      && String(row.date || '') <= String(date || '9999-99-99')
+    ));
+    const historyDates = [...new Set(historyRows.map((row) => row.date).filter(Boolean))]
+      .sort((left, right) => String(right).localeCompare(String(left)))
+      .slice(0, 21);
+    sessions = historyDates.map((day) => {
+      const rows = normalizeDailyActualRows(historyRows.filter((row) => row.date === day));
+      const first = rows[0] || {};
+      return {
+        date: day,
+        lastSignalDate: first.scoreDate,
+        lastExecutionDate: first.executionDate,
+        executionStatus: first.executionStatus,
+        valuationAvailable: first.valuationAvailable !== false,
+        cashWeight: first.cashWeight ?? 0,
+        weightTiming: first.weightTiming,
+        rows,
+      };
+    });
+  }
+
+  const targetRows = target.factor === factor && target.status === 'available'
+    ? (target.weights || []).filter((row) => row.symbol && Number.isFinite(Number(row.targetWeight)))
+    : [];
+  const rows = sessions.flatMap((session) => session.rows);
+  return {
+    rows,
+    sessions,
+    targetRows,
+    sourceKind: historyMeta?.sourceKind || (sessions.length ? 'historical_holdings' : 'factor_history_unavailable'),
+    dateCount: sessions.length,
+    exactDate: sessions.some((session) => session.date === date),
+    canonicalFactor,
+    historyMeta,
+    target,
+  };
+}
+
+function renderDailyWeightsAnalysis() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const {
+    rows,
+    sessions,
+    targetRows,
+    sourceKind,
+    dateCount,
+    historyMeta,
+    target,
+    canonicalFactor,
+  } = selectedDailyWeightRows(run, date, windowKey, factor);
+
+  setText(
+    '#daily-weight-analysis-note',
+    sourceKind === 'factor_history_unavailable'
+      ? `${factor || '-'}의 검증된 실제 백테스트 보유 이력을 불러오지 못했습니다. ${target.status === 'available'
+        ? `${target.signalDate || '-'} 신호의 같은 팩터 현재 연구 목표 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목은 과거 보유와 구분해 현재 목표 전용 행으로 표시합니다.`
+        : target.status === 'unavailable' && Number.isFinite(Number(target.cashWeight))
+          ? `같은 팩터 목표는 실패-폐쇄 상태이며 주식 목표를 '-'로, 현금 목표 ${formatPercent(target.cashWeight)}를 명시합니다${target.reasons?.length ? ` (${target.reasons.join(', ')})` : ''}.`
+          : '다른 팩터의 이력이나 현재 연구 목표로 대체하지 않습니다.'}`
+      : sourceKind === 'legacy_backtest_held_fallback'
+      ? `${factor || '-'} × ${historyMeta?.weightingPolicyId || '-'} · 과거 21일 계약이 없는 이전 결과이므로 실제 backtestHeldPortfolio 한 날짜만 표시합니다. 신호일은 목표를 계산한 종가, 체결일은 다음 거래일 종가 처리일이며, ${target.status === 'available' ? `${target.signalDate || '-'} 신호의 같은 팩터 현재 연구 목표 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목` : '같은 팩터의 현재 연구 목표는 자료 없음'}을 별도 열로 구분합니다.`
+      : sessions.length
+      ? `${factor || '-'} × ${historyMeta?.weightingPolicyId || '-'} · ${dateCount}개 실제 백테스트 보유 세션을 최신순으로 표시합니다. 신호일은 목표를 계산한 종가, 체결일은 다음 거래일 종가 처리일, 보유 기준일은 종가 체결 처리 완료 후 확정된 비중(weightTiming: ${historyMeta?.weightTiming || '-'})입니다. ${target.status === 'available' ? `현재 연구 목표는 ${target.signalDate || '-'} 신호의 같은 팩터 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목 · 투자 ${formatPercent(target.concentration?.investedWeight ?? (1 - Number(target.cashWeight || 0)))} · 현금 ${formatPercent(target.cashWeight)} · 유효 종목수 ${formatNumber(target.concentration?.effectiveNames)}이며 과거 보유가 아닙니다.` : `같은 팩터의 현재 연구 목표는 사용할 수 없습니다${target.reasons?.length ? ` (${target.reasons.join(', ')})` : ''}. 다른 팩터 목표로 대체하지 않습니다.`}`
+      : `${factor || '-'}의 실제 백테스트 보유 이력이 없습니다. ${target.status === 'available' ? `${target.signalDate || '-'} 신호의 같은 팩터 현재 연구 목표만 확인할 수 있습니다.` : '다른 팩터의 현재 연구 목표를 복제하지 않습니다.'}`,
+  );
+
+  const table = document.querySelector('#daily-weights-table');
+  const thead = document.querySelector('#daily-weights-table thead');
+  const tbody = document.querySelector('#daily-weights-table tbody');
+  if (!table || !thead || !tbody) return;
+
+  renderDailyWeightsTable(thead, tbody, {
+    sessions,
+    targetRows,
+    target,
+    sourceKind,
+    factor,
+    canonicalFactor,
+  });
+}
+
+function dailyWeightSymbols(sessions, targetRows) {
+  return [
+    ...new Set([
+      ...(sessions || []).flatMap((session) => session.rows || []).map((row) => row.symbol).filter(Boolean),
+      ...(targetRows || []).map((row) => row.symbol).filter(Boolean),
+    ]),
+  ];
+}
+
+function renderDailyWeightsTable(thead, tbody, {
+  sessions,
+  targetRows,
+  target,
+  sourceKind,
+  factor,
+  canonicalFactor,
+}) {
+  tbody.replaceChildren();
+  const targetBySymbol = new Map(targetRows.map((row) => [String(row.symbol), row]));
+  const symbols = dailyWeightSymbols(sessions, targetRows);
+  const headerRow = document.createElement('tr');
+  appendHeaderCell(headerRow, '보유 기준일');
+  appendHeaderCell(headerRow, '신호일 · 체결일');
+  symbols.forEach((symbol) => {
+    appendHeaderCell(headerRow, `${symbol} 백테스트 보유`);
+    appendHeaderCell(headerRow, `${symbol} 현재 연구 목표`);
+  });
+  appendHeaderCell(headerRow, '현금 백테스트 보유');
+  appendHeaderCell(headerRow, '현금 현재 연구 목표');
+  thead.replaceChildren(headerRow);
+
+  if (!sessions.length) {
+    const exactTarget = target?.factor === factor
+      && ['available', 'unavailable'].includes(target?.status)
+      && Number.isFinite(Number(target?.cashWeight));
+    if (exactTarget) {
+      const tr = document.createElement('tr');
+      appendCell(tr, target.signalDate || target.asOf || '현재 목표', { strong: true });
+      appendCurrentTargetTimingCell(tr, target);
+      symbols.forEach((symbol) => {
+        const targetRow = target.status === 'available'
+          ? (targetBySymbol.get(String(symbol)) || {
+            symbol,
+            targetWeight: 0,
+            targetState: 'not_selected',
+          })
+          : null;
+        appendWeightMatrixCells(tr, null, targetRow);
+      });
+      appendWeightMatrixCells(
+        tr,
+        null,
+        {
+          symbol: '현금',
+          targetWeight: Number(target.cashWeight),
+          targetState: target.status === 'unavailable' ? 'fail_closed' : 'cash',
+        },
+      );
+      tbody.appendChild(tr);
+      return;
+    }
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = Math.max(symbols.length * 2 + 4, 4);
+    td.textContent = `선택한 ${factor || '-'} 팩터에는 검증된 실제 보유 이력이 없습니다. 같은 팩터의 현재 연구 목표도 없어 다른 팩터 값으로 대체하지 않습니다.`;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+
+  sessions
+    .sort((left, right) => String(right.date).localeCompare(String(left.date)))
+    .forEach((session) => {
+      const tr = document.createElement('tr');
+      appendCell(tr, session.date);
+      appendHoldingTimingCell(tr, session);
+      const bySymbol = new Map(session.rows.map((row) => [String(row.symbol), row]));
+      symbols.forEach((symbol) => {
+        const exactTarget = targetBySymbol.get(String(symbol));
+        const completeTargetRow = target.status === 'available'
+          ? (exactTarget || {
+            symbol,
+            targetWeight: 0,
+            targetState: 'not_selected',
+          })
+          : null;
+        appendWeightMatrixCells(tr, bySymbol.get(symbol), completeTargetRow);
+      });
+      appendWeightMatrixCells(
+        tr,
+        { symbol: '현금', actualWeight: optionalNumber(session.cashWeight) ?? 0, source: '백테스트 현금' },
+        ['available', 'unavailable'].includes(target.status) && Number.isFinite(Number(target.cashWeight))
+          ? {
+            symbol: '현금',
+            targetWeight: Number(target.cashWeight),
+            targetState: target.status === 'unavailable' ? 'fail_closed' : 'cash',
+          }
+          : null,
+      );
+      tbody.appendChild(tr);
+    });
+}
+
+function appendCurrentTargetTimingCell(tr, target) {
+  const td = document.createElement('td');
+  td.className = 'holding-timing-cell';
+  const signal = document.createElement('strong');
+  signal.textContent = `현재 목표 신호 ${target.signalDate || target.asOf || '-'}`;
+  const execution = document.createElement('small');
+  execution.textContent = target.status === 'unavailable'
+    ? '실패-폐쇄 · 주식 0% · 현금 보존'
+    : '다음 가능 세션 종가 체결 가정 · 과거 보유 아님';
+  td.append(signal, execution);
+  tr.appendChild(td);
+}
+
+function appendHoldingTimingCell(tr, session) {
+  const td = document.createElement('td');
+  td.className = 'holding-timing-cell';
+  const signal = document.createElement('strong');
+  signal.textContent = `신호 ${session.lastSignalDate || '-'}`;
+  const execution = document.createElement('small');
+  execution.textContent = `체결 ${session.lastExecutionDate || '-'} · ${humanExecutionStatus(session.executionStatus)}${session.valuationAvailable === false ? ' · 평가 불가' : ''}`;
+  td.append(signal, execution);
+  tr.appendChild(td);
+}
+
+function humanExecutionStatus(value) {
+  const labels = {
+    none: '기존 보유 유지',
+    executed: '리밸런싱 체결',
+    executed_partial_unpriceable_targets: '일부 종목 제외 후 체결',
+    blocked_missing_held_quote: '보유종목 시세 누락으로 체결 차단',
+    blocked_all_targets_unpriceable: '목표종목 전부 가격 불가로 체결 차단',
+    legacy_valued_holding: '이전 결과의 평가 완료 보유',
+    valuation_unavailable: '이전 결과 평가 불가',
+  };
+  return labels[value] || value || '체결 상태 없음';
+}
+
+function appendHeaderCell(tr, text) {
+  const th = document.createElement('th');
+  th.setAttribute('scope', 'col');
+  th.textContent = text;
+  tr.appendChild(th);
+}
+
+function appendWeightMatrixCells(tr, row, targetRow = null) {
+  const actual = document.createElement('td');
+  actual.className = 'weight-matrix-cell';
+  if (row && row.actualWeight !== null) {
+    const primary = document.createElement('strong');
+    primary.textContent = formatPercent(row.actualWeight);
+    const secondary = document.createElement('small');
+    secondary.textContent = row.source || (row.scoreDate ? `신호일 ${row.scoreDate}` : '저장 비중');
+    actual.title = `${row.symbol || ''} ${row.scoreDate ? `신호일 ${row.scoreDate}` : ''}`.trim();
+    actual.append(primary, secondary);
+  } else {
+    actual.textContent = '-';
+  }
+  tr.appendChild(actual);
+
+  const target = document.createElement('td');
+  target.className = 'weight-matrix-cell';
+  const targetWeight = Number(targetRow?.targetWeight);
+  if (Number.isFinite(targetWeight) && targetWeight >= 0) {
+    const primary = document.createElement('strong');
+    primary.textContent = formatPercent(targetWeight);
+    const secondary = document.createElement('small');
+    const parts = [];
+    if (row && row.actualWeight !== null) parts.push(`보유 대비 ${formatPercent(targetWeight - row.actualWeight)}`);
+    if (Number.isFinite(Number(targetRow?.factorScore))) parts.push(`신호 ${formatNumber(targetRow.factorScore)}`);
+    if (targetRow?.targetState === 'not_selected') parts.push('현재 목표 미편입');
+    if (targetRow?.targetState === 'fail_closed') parts.push('실패-폐쇄 현금');
+    secondary.textContent = parts.join(' · ') || '현재 Python 연구 목표';
+    target.append(primary, secondary);
+  } else {
+    target.textContent = '-';
+  }
+  tr.appendChild(target);
+}
+
+function parseSelectedFactorMethod(factor, option = {}) {
+  const text = String(factor || '');
+  const override = FACTOR_METHOD_OVERRIDES[text] || null;
+  const category = humanFactorCategory(override?.category || option.category || 'unknown');
+  const base = {
+    category,
+    formulaLabel: override?.formula || '팩터별 가격/거래량·재무 신호 산식',
+    lookback: '팩터명 또는 카탈로그 정의 구간',
+    skip: '팩터별 정의에 따름',
+    score: override
+      ? `${text} 원자료 산식은 ${override.formula}입니다. 각 종목에 같은 산식을 적용한 뒤 점수가 높은 순서로 후보를 정렬합니다.`
+      : '종목별 가격 기반 신호를 계산한 뒤 값이 큰 순서로 순위를 매깁니다.',
+    caveat: override
+      ? `${override.description} 검증 메모: ${override.validation}`
+      : option.description_ko || option.description || '세부 설명 정보가 제한적이므로 팩터명과 카테고리 기반으로 해석합니다.',
+  };
+  let match = text.match(/^mom_(\d+)_(\d+)$/);
+  if (match) {
+    const lookback = Number(match[1]);
+    const skip = Number(match[2]);
+    return {
+      ...base,
+      formulaLabel: override?.formula || `score_i = P_i(t-${skip}m) / P_i(t-${lookback + skip}m) - 1`,
+      lookback: `최근 ${skip}개월을 제외한 직전 ${lookback}개월 가격 변화`,
+      skip: `${skip}개월 스킵/제외`,
+      score: `각 종목 i에 대해 최근 ${skip}개월을 제외한 직전 ${lookback}개월 누적수익률을 계산합니다. 즉 대략 P_i(t-${skip}m) / P_i(t-${lookback + skip}m) - 1이며, 값이 큰 종목이 상위 모멘텀 후보입니다.`,
+      caveat: `${base.caveat} 최근 과열/단기 반전 오염을 줄이기 위해 가장 최근 ${skip}개월은 점수 계산 구간에서 제외합니다.`,
+    };
+  }
+  match = text.match(/^mom_(\d+)m$/);
+  if (match) {
+    const lookback = Number(match[1]);
+    return {
+      ...base,
+      formulaLabel: override?.formula || `score_i = P_i(t) / P_i(t-${lookback}m) - 1`,
+      lookback: `${lookback}개월 가격 변화`,
+      skip: '명시적 스킵 없음',
+      score: `각 종목의 최근 ${lookback}개월 누적수익률을 계산하고 높은 순서로 정렬합니다. 원자료 산식은 조정종가 기준 가격 변화율입니다.`,
+      caveat: `${base.caveat} 단순 기간 모멘텀은 빠른 추세를 직접 보지만 단기 과열과 회전율에 더 민감할 수 있습니다.`,
+    };
+  }
+  match = text.match(/^mom_(\d+)d$/);
+  if (match) {
+    const days = Number(match[1]);
+    return {
+      ...base,
+      formulaLabel: override?.formula || `score_i = P_i(t) / P_i(t-${days}d) - 1`,
+      lookback: `${days}거래일`,
+      skip: '명시적 스킵 없음',
+      score: `최근 ${days}거래일 내외의 단기 가격 변화를 비교해 단기 모멘텀이 강한 종목을 위로 정렬합니다.`,
+      caveat: `${base.caveat} 단기 모멘텀 팩터는 회전율과 반전 위험이 커서 비용/슬리피지 민감도를 함께 봐야 합니다.`,
+    };
+  }
+  match = text.match(/^accel_(\d+)m_vs_(\d+)m$/);
+  if (match) {
+    return {
+      ...base,
+      formulaLabel: override?.formula || `${match[1]}개월 모멘텀 - ${match[2]}개월 모멘텀`,
+      lookback: `${match[1]}개월과 ${match[2]}개월 수익률 비교`,
+      skip: '팩터 정의의 skip 값 적용',
+      score: `짧은 기간 모멘텀이 긴 기간 모멘텀보다 얼마나 개선됐는지 계산합니다. 값이 클수록 최근 리더십이 가속된 종목입니다.`,
+      caveat: `${base.caveat} 가속도 계열은 추세 변화 속도를 보므로 단순 장기 모멘텀보다 노이즈에 민감할 수 있습니다.`,
+    };
+  }
+  match = text.match(/^high_(\d+)w$/);
+  if (match) {
+    return {
+      ...base,
+      formulaLabel: override?.formula || `score_i = P_i(t) / rolling_high_${match[1]}w - 1`,
+      lookback: `${match[1]}주 고점/현재가 비교`,
+      skip: '명시적 스킵 없음',
+      score: `현재 가격이 ${match[1]}주 고점에 얼마나 가까운지로 추세 지속성을 평가합니다. 0에 가까울수록 고점 근접도가 높습니다.`,
+      caveat: `${base.caveat} 고점 근접 팩터는 강한 추세를 빠르게 포착하지만 추세 말기 변동성에 유의해야 합니다.`,
+    };
+  }
+  match = text.match(/^breakout_(\d+)d$/);
+  if (match) {
+    return {
+      ...base,
+      formulaLabel: override?.formula || `score_i = P_i(t) / prior_high_${match[1]}d - 1 + 확인 모멘텀`,
+      lookback: `${match[1]}거래일 가격 범위`,
+      skip: '명시적 스킵 없음',
+      score: `최근 ${match[1]}거래일 가격 범위에서 상단 돌파/근접 정도와 확인 모멘텀을 함께 평가합니다.`,
+      caveat: `${base.caveat} 돌파 팩터는 추세 시작을 포착하려 하지만 false breakout과 비용 민감도가 있습니다.`,
+    };
+  }
+  if (text.includes('winsorized') || text.includes('gap_resistant') || text.includes('jump_excluded') || text.includes('median_return')) {
+    return {
+      ...base,
+      lookback: '주로 63~252거래일 견고화 구간',
+      score: `${base.score} 급등락·단일 점프·극단 일수익률 영향을 줄이는 견고화 처리를 포함합니다.`,
+      caveat: `${base.caveat} 견고화 계열은 한두 번의 급등락에 덜 끌려가지만, 실제 급격한 추세 전환을 일부 늦게 반영할 수 있습니다.`,
+    };
+  }
+  if (text.includes('risk') || text.includes('vol') || text.includes('ulcer') || text.includes('drawdown') || text.includes('tail')) {
+    return {
+      ...base,
+      lookback: '모멘텀 구간과 63~252거래일 위험 구간',
+      score: `${base.score} 상승률을 변동성, 낙폭, 하방위험, 좌측 꼬리위험 같은 위험 지표로 보정합니다.`,
+      caveat: `${base.caveat} 위험조정 계열은 단순 수익률보다 안정성을 선호하지만 강한 고변동 추세를 낮게 볼 수 있습니다.`,
+    };
+  }
+  if (text.includes('ma_') || text.includes('trend') || text.includes('range_position') || text.includes('price_vs_ma')) {
+    return {
+      ...base,
+      lookback: '20~252거래일 추세·이동평균·가격 범위 구간',
+      score: `${base.score} 이동평균 기울기, 추세 정렬, 가격 범위 내 위치 등을 이용해 추세 품질을 평가합니다.`,
+      caveat: `${base.caveat} 추세 품질 계열은 방향성과 지속성을 함께 보지만 횡보장에서는 신호가 둔화될 수 있습니다.`,
+    };
+  }
+  if (text.includes('relative_strength') || text.includes('residual') || text.includes('excess_ir') || text.includes('up_down_capture')) {
+    return {
+      ...base,
+      lookback: '주로 126~252거래일 횡단면/시장상대 구간',
+      score: `${base.score} 동일 후보군 또는 시장 프록시 대비 초과 성과·상대 순위·상승/하락 참여도를 비교합니다.`,
+      caveat: `${base.caveat} 상대강도 계열은 후보군 구성과 시장 프록시 변화에 민감하므로 단독 투자 결론보다 비교 진단으로 보세요.`,
+    };
+  }
+  return base;
+}
+
+function appendMethodItem(target, label, value) {
+  const item = document.createElement('div');
+  item.className = 'method-item';
+  const strong = document.createElement('strong');
+  strong.textContent = label;
+  const small = document.createElement('small');
+  small.textContent = textValue(value);
+  item.append(strong, small);
+  target.appendChild(item);
+}
+
+function renderSelectedFactorMethod() {
+  const run = currentRun();
+  const factor = selectedFactor();
+  const params = inputScenarioParameters();
+  const option = factorOptions(run).find((item) => item.factor === factor) || {};
+  const method = parseSelectedFactorMethod(factor, option);
+  setText('#selected-factor-method-title', factor || '-');
+  setText('#selected-factor-method-badge', `${method.category} · 브라우저 시나리오 설명`);
+  setText(
+    '#selected-factor-method-summary',
+    `${factor || '-'}: ${method.score} 화면 비교는 최근 ${params.lookbackMonths}개월, 상위 ${params.topN}개, 종목당 최대 ${formatPercent(params.maxWeight)}, ${rebalanceFrequencyLabel(params.rebalanceFrequency)}, 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps를 적용한 브라우저 시나리오/민감도 프록시입니다.`,
+  );
+  const steps = document.querySelector('#selected-factor-method-steps');
+  if (steps) {
+    steps.replaceChildren();
+    appendMethodItem(steps, '팩터 분류', method.category);
+    appendMethodItem(steps, '핵심 산식', method.formulaLabel);
+    appendMethodItem(steps, '관찰 구간', method.lookback);
+    appendMethodItem(steps, '최근 구간 제외', method.skip);
+    appendMethodItem(steps, '비중 적용', `점수 상위 ${params.topN}개를 점수 비례로 배분하고 종목당 ${formatPercent(params.maxWeight)} 상한을 적용합니다.`);
+    appendMethodItem(steps, '성과 적용', `저장된 팩터 누적성과를 비중 집중도와 ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 비용 프록시로 조정합니다.`);
+  }
+  setText(
+    '#selected-factor-method-note',
+    `${method.caveat} 입력값은 저장된 점수/비중 스냅샷과 팩터 누적성과를 다시 해석합니다.`,
+  );
+}
+
+function renderPeriodRankingTable() {
+  const run = currentRun();
+  const date = selectedDate();
+  const windowKey = selectedWindow();
+  const factor = selectedFactor();
+  const params = inputScenarioParameters();
+  let rows = scenarioPeriodRows(run, date, windowKey, params);
+  const selectedRow = rows.find((row) => row.factor === factor);
+  rows = rows.slice(0, 40);
+  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
+  const tbody = document.querySelector('#period-ranking-table tbody');
+  tbody.replaceChildren();
+  rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    appendCell(tr, `${row.window_label || windowKey} · 시나리오`);
+    appendCell(tr, row.factor, { strong: row.factor === factor });
+    appendCell(tr, `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(row.raw_period_return)}` : ''}`, { className: classForNumber(row.period_return) });
+    appendCell(tr, row.rank);
+    tbody.appendChild(tr);
+  });
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.textContent = '선택한 기준일과 기간에 팩터 랭킹 자료가 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+}
+
+const V4_EXPLORATION_PERIODS = [
+  { key: '1M', label: '최근 1개월', trading_days: 21 },
+  { key: '3M', label: '최근 3개월', trading_days: 63 },
+  { key: '6M', label: '최근 6개월', trading_days: 126 },
+  { key: '1Y', label: '최근 1년', trading_days: 252 },
+];
+
+const V4_BENCHMARK_LABELS = {
+  SPY: 'SPY · S&P 500 ETF',
+  '^IXIC': '나스닥 종합지수',
+  QQQ: 'QQQ · 나스닥 100 ETF',
+};
+
+function v4CurveValue(curve, index) {
+  const value = Number(curve?.[index]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function v4CurveReturn(curve, endIndex, tradingDays) {
+  const startIndex = endIndex - tradingDays;
+  if (startIndex < 0) return null;
+  const start = v4CurveValue(curve, startIndex);
+  const end = v4CurveValue(curve, endIndex);
+  return start && end ? end / start - 1 : null;
+}
+
+function v4DrawdownSeries(curve) {
+  let peak = null;
+  return (curve || []).map((raw) => {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    peak = peak === null ? value : Math.max(peak, value);
+    return peak > 0 ? value / peak - 1 : 0;
+  });
+}
+
+function v4BenchmarkCurves(payload) {
+  const performance = payload.performance || {};
+  const curves = performance.benchmarkCurves && typeof performance.benchmarkCurves === 'object'
+    ? { ...performance.benchmarkCurves }
+    : {};
+  const primary = payload.data?.benchmark || payload.config?.benchmark || 'SPY';
+  if (!curves[primary] && Array.isArray(performance.benchmarkCurve)) {
+    curves[primary] = performance.benchmarkCurve;
+  }
+  const requestedOrder = [
+    primary,
+    payload.data?.chartBenchmark || payload.config?.chart_benchmark,
+    ...(payload.data?.additionalComparisonBenchmarks || payload.config?.additional_comparison_benchmarks || []),
+    'SPY',
+    '^IXIC',
+    'QQQ',
+  ].filter(Boolean);
+  return [...new Set(requestedOrder)]
+    .filter((symbol) => Array.isArray(curves[symbol]))
+    .map((symbol) => ({ symbol, curve: curves[symbol] }));
+}
+
+function v4BacktestSeries(factor, curve, dates) {
+  return {
+    factor,
+    dates: [...dates],
+    equity: [...curve],
+    drawdown: v4DrawdownSeries(curve),
+  };
+}
+
+function v4ExplorationPeriodData(payload, factors, dates) {
+  const curves = payload.performance?.factorCurves || {};
+  const startIndex = Math.max(0, dates.length - 90);
+  const factorPeriodMatrix = [];
+  const factorLeaders = [];
+  for (let endIndex = startIndex; endIndex < dates.length; endIndex += 1) {
+    V4_EXPLORATION_PERIODS.forEach((period) => {
+      const ranked = factors
+        .map((factor) => ({
+          factor,
+          period_return: v4CurveReturn(curves[factor], endIndex, period.trading_days),
+        }))
+        .filter((row) => Number.isFinite(row.period_return))
+        .sort((left, right) => right.period_return - left.period_return || left.factor.localeCompare(right.factor));
+      if (!ranked.length) return;
+      factorPeriodMatrix.push({
+        date: dates[endIndex],
+        window: period.key,
+        window_label: period.label,
+        factors: ranked.map((row) => row.factor),
+        returns: ranked.map((row) => row.period_return),
+      });
+      factorLeaders.push({
+        date: dates[endIndex],
+        window: period.key,
+        window_label: period.label,
+        best_factor: ranked[0].factor,
+        best_return: ranked[0].period_return,
+        factor_count: ranked.length,
       });
     });
   }
+  return { factorPeriodMatrix, factorLeaders };
+}
 
-  function svgPath(values, x, y) {
-    let path = "";
-    let active = false;
-    values.forEach((value, index) => {
-      if (!finite(value)) {
-        active = false;
+function v4CategorySummary(definitions) {
+  const counts = new Map();
+  definitions.forEach((definition) => {
+    const category = definition.category || 'unknown';
+    if (!counts.has(category)) counts.set(category, []);
+    counts.get(category).push(definition.factor);
+  });
+  return [...counts.entries()]
+    .map(([category, factors]) => ({
+      category,
+      factor_count: factors.length,
+      avg_mean_rank_ic: null,
+      avg_positive_ic_rate: null,
+      example_factors: factors.slice(0, 3).join(', '),
+    }))
+    .sort((left, right) => right.factor_count - left.factor_count || left.category.localeCompare(right.category));
+}
+
+function v4FactorDiagnostics(payload) {
+  const diagnostics = payload.factorDiagnostics || {};
+  const scope = diagnostics.scope || {};
+  const rankIc = diagnostics.rankIc || {};
+  const redundancy = diagnostics.redundancy || {};
+  const rankRows = (rankIc.rows || []).map((row) => ({
+    rank: row.rank,
+    factor: row.factor,
+    category: row.category,
+    available: row.available === true,
+    unavailable_reason: row.unavailableReason,
+    horizon_days: row.horizonSessions,
+    observations: row.observations,
+    mean_rank_ic: optionalNumber(row.mean),
+    median_rank_ic: optionalNumber(row.median),
+    standard_deviation: optionalNumber(row.standardDeviation),
+    positive_ic_rate: optionalNumber(row.positiveRate),
+    start_date: row.startDate,
+    end_date: row.endDate,
+    minimum_security_count: optionalNumber(row.minimumSecurityCount),
+    average_security_count: optionalNumber(row.averageSecurityCount),
+    maximum_security_count: optionalNumber(row.maximumSecurityCount),
+    latest_finite_count: optionalNumber(row.latestFiniteCount),
+  }));
+  const redundancyRows = (redundancy.rows || []).map((row) => ({
+    rank: row.rank,
+    factor: row.factor,
+    category: row.category,
+    available: row.available === true,
+    unavailable_reason: row.unavailableReason,
+    nearest_factor: row.nearestFactor,
+    signed_rank_corr: optionalNumber(row.signedCorr),
+    abs_rank_corr: optionalNumber(row.absCorr),
+    valid_peer_count: optionalNumber(row.validPeerCount),
+    high_corr_peer_count: optionalNumber(row.highCorrPeerCount),
+    common_security_count: optionalNumber(row.commonSecurityCount),
+    latest_finite_count: optionalNumber(row.latestFiniteCount),
+    diagnostic_date: redundancy.diagnosticDate,
+  }));
+  return {
+    scope_note_ko: `독립 팩터 ${formatInteger(scope.independentFactorCount)}개를 비교하며 호환 alias ${formatInteger(scope.diagnosticAliasCount)}개는 순위를 중복시키지 않도록 제외합니다. Forward Rank-IC는 신호일 t의 횡단면 순위와 ${formatInteger(rankIc.horizonSessions)}세션 후 조정종가 수익률의 Spearman 상관입니다. 최근 최대 ${formatInteger(rankIc.maximumSignalSessions)}개 신호일을 사용한 중첩 일별 동일표본 탐색 진단이므로 독립 표본 유의성이나 미래 성과 보장이 아닙니다.`,
+    category_summary: (diagnostics.categorySummary || []).map((row) => ({
+      category: row.category,
+      factor_count: row.factorCount,
+      available_rank_ic_factor_count: row.availableRankIcFactorCount,
+      avg_mean_rank_ic: optionalNumber(row.averageMeanRankIc),
+      avg_positive_ic_rate: optionalNumber(row.averagePositiveRate),
+      avg_max_abs_rank_corr: optionalNumber(row.averageMaxAbsCorr),
+      high_corr_factor_count: row.highCorrFactorCount,
+      example_factors: Array.isArray(row.exampleFactors) ? row.exampleFactors.join(', ') : '-',
+    })),
+    rank_ic_horizon_days: rankIc.horizonSessions,
+    rank_ic_requested_sessions: rankIc.requestedSignalSessions,
+    rank_ic_overlapping: rankIc.overlapping === true,
+    rank_ic_method: rankIc.method,
+    rank_ic_rows: rankRows,
+    rank_ic_top: rankRows.slice(0, 10),
+    redundancy_threshold_abs: redundancy.thresholdAbs,
+    redundancy_method: redundancy.method,
+    redundancy_date: redundancy.diagnosticDate,
+    redundancy_pair_count: redundancy.eligiblePairCount,
+    redundancy_high_pair_count: redundancy.highRedundancyPairCount,
+    redundancy_rows: redundancyRows,
+    redundancy_top: redundancyRows.slice(0, 10),
+    redundancy_pairs: (redundancy.topPairs || []).map((row) => ({
+      rank: row.rank,
+      left_factor: row.leftFactor,
+      right_factor: row.rightFactor,
+      signed_rank_corr: optionalNumber(row.signedCorr),
+      abs_rank_corr: optionalNumber(row.absCorr),
+      common_security_count: optionalNumber(row.commonSecurityCount),
+    })),
+    aliases: scope.aliases || [],
+  };
+}
+
+function v4PriceSourceCounts(payload) {
+  return (payload.priceSources || []).reduce((counts, row) => {
+    const source = row.price_source || 'unknown';
+    counts[source] = (counts[source] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function v4SourceHealth(payload) {
+  return (payload.sourceHealth || []).map((row) => ({
+    ...row,
+    row_count: row.records ?? row.returned_price_symbols ?? row.requested_price_symbols ?? null,
+  }));
+}
+
+function v4SelectionEligibility(payload, factors) {
+  const selectedPolicy = payload.selectedWeightingPolicy;
+  const selectedPolicyRows = (payload.factorPolicyRanking || []).filter((row) => (
+    (row.policy_id || row.weightingPolicyId) === selectedPolicy
+  ));
+  const byFactor = new Map(selectedPolicyRows.map((row) => [row.factor, row]));
+  const eligible = factors.filter((factor) => byFactor.get(factor)?.selection_eligible === true);
+  if (eligible.length) return { eligible, byFactor };
+  const canonical = factors.includes(payload.selectedFactor) ? [payload.selectedFactor] : [];
+  return { eligible: canonical.length ? canonical : [...factors], byFactor };
+}
+
+function bytesToHex(bytes) {
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256Hex(bytes) {
+  requireCondition(globalThis.crypto?.subtle, '브라우저 SHA-256 검증 기능을 사용할 수 없습니다.');
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return bytesToHex(digest);
+}
+
+async function canonicalSha256(value) {
+  return sha256Hex(new TextEncoder().encode(canonicalString(value)));
+}
+
+async function validateIdentityDigest(identity, label) {
+  const canonical = typeof identity?.canonicalKeyPartsJson === 'string'
+    ? identity.canonicalKeyPartsJson
+    : canonicalString(identity?.keyParts);
+  const bytes = new TextEncoder().encode(canonical);
+  requireCondition(
+    await sha256Hex(bytes) === identity?.resultKey,
+    `${label} resultKey가 canonical keyParts SHA-256과 다릅니다.`,
+  );
+}
+
+async function fetchJson(url, label, reference, fetchImpl = globalThis.fetch) {
+  requireCondition(typeof fetchImpl === 'function', `${label} fetch 기능을 사용할 수 없습니다.`);
+  const response = await fetchImpl(url, { cache: 'no-store' });
+  if (!response?.ok) throw new Error(`${label} HTTP ${response?.status ?? 'unknown'}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (reference !== undefined) {
+    requireCondition(isRecord(reference), `${label} artifact reference가 없습니다.`);
+    requireCondition(
+      bytes.byteLength === Number(reference.bytes),
+      `${label} byte count가 manifest와 다릅니다.`,
+    );
+    requireCondition(
+      await sha256Hex(bytes) === reference.sha256,
+      `${label} SHA-256이 manifest와 다릅니다.`,
+    );
+  }
+  try {
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch (error) {
+    throw new Error(`${label} JSON이 잘못되었습니다: ${error.message}`);
+  }
+}
+
+async function fetchLocalApiJson(path, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const url = new URL(path, `${LOCAL_API_BASE_URL}/`).href;
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      cache: 'no-store',
+      method: options.method || 'GET',
+      headers: {
+        Accept: 'application/json',
+        ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(options.body === undefined ? {} : { body: canonicalString(options.body) }),
+    });
+  } catch (error) {
+    throw new Error(`로컬 API(${LOCAL_API_BASE_URL})에 연결할 수 없습니다: ${error.message}`);
+  }
+  let body;
+  try {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch (error) {
+    throw new Error(`로컬 API 응답 JSON이 잘못되었습니다: ${error.message}`);
+  }
+  if (!response.ok) {
+    const detail = body?.error?.message || `HTTP ${response.status}`;
+    throw new Error(`로컬 API가 실행을 거절했습니다: ${detail}`);
+  }
+  return { statusCode: response.status, body };
+}
+
+function waitForPoll() {
+  return new Promise((resolve) => window.setTimeout(resolve, LOCAL_API_POLL_INTERVAL_MS));
+}
+
+async function resolveLocalApiResult(submission, token, options = {}) {
+  if (submission.statusCode === 200) return submission.body;
+  requireCondition(
+    submission.statusCode === 202
+      && validSha256(submission.body?.resultKey)
+      && typeof submission.body?.statusUrl === 'string',
+    '로컬 API 제출 응답 계약이 잘못되었습니다.',
+  );
+  const fetchStatus = options.fetchStatus || ((path) => fetchLocalApiJson(path));
+  const wait = options.wait || waitForPoll;
+  const isCurrent = options.isCurrent || (() => token === state.loadToken);
+  const onStatus = options.onStatus || ((status, resultKey) => {
+    setInputStatus(`로컬 Python 분석 ${status} · ${resultKey.slice(0, 12)}…`, 'pending');
+  });
+  let statusUrl = submission.body.statusUrl;
+  while (isCurrent()) {
+    const statusResponse = await fetchStatus(statusUrl);
+    const status = statusResponse.body;
+    requireCondition(
+      status.resultKey === submission.body.resultKey,
+      '로컬 API status resultKey가 제출 결과와 다릅니다.',
+    );
+    if (status.status === 'complete') {
+      requireCondition(isRecord(status.result), '완료된 로컬 API status에 canonical 결과가 없습니다.');
+      return status.result;
+    }
+    if (status.status === 'failed') {
+      throw new Error(`로컬 Python 분석 실패: ${status.error?.message || '원인 미표기'}`);
+    }
+    requireCondition(
+      status.status === 'queued' || status.status === 'running',
+      '로컬 API job status가 잘못되었습니다.',
+    );
+    onStatus(status.status, submission.body.resultKey);
+    await wait();
+    statusUrl = status.statusUrl || statusUrl;
+  }
+  throw new Error('다른 결과 로드가 시작되어 로컬 API 표시를 취소했습니다.');
+}
+
+async function loadV4FactorHoldingHistorySidecar(
+  payload,
+  fetchImpl = globalThis.fetch,
+  baseUrl = null,
+) {
+  const manifest = validateFactorHoldingHistorySidecarManifest(payload);
+  if (manifest.storage === 'embedded') {
+    requireCondition(globalThis.crypto?.subtle, '팩터별 보유 이력 sidecar SHA-256을 검증할 수 없습니다.');
+    const encoded = new TextEncoder().encode(canonicalString(manifest.data));
+    requireCondition(
+      encoded.byteLength === manifest.bytes,
+      '팩터별 보유 이력 embedded sidecar 크기가 manifest와 다릅니다.',
+    );
+    requireCondition(
+      await sha256Hex(encoded) === manifest.sha256,
+      '팩터별 보유 이력 embedded sidecar SHA-256이 manifest와 다릅니다.',
+    );
+    return validateFactorHoldingHistorySidecarData(payload, manifest.data);
+  }
+  requireCondition(
+    manifest.storage === 'external' && requiredText(manifest.path) && typeof fetchImpl === 'function',
+    '팩터별 보유 이력 external sidecar loader 계약이 잘못되었습니다.',
+  );
+
+  const requestUrl = baseUrl ? new URL(manifest.path, baseUrl).href : manifest.path;
+  const response = await fetchImpl(requestUrl, { cache: 'no-store' });
+  if (!response?.ok) throw new Error('팩터별 실제 보유 이력 sidecar를 불러오지 못했습니다.');
+  const encoded = await response.arrayBuffer();
+  if (encoded.byteLength !== Number(manifest.bytes)) {
+    throw new Error('팩터별 실제 보유 이력 sidecar 크기가 manifest와 다릅니다.');
+  }
+  if (!globalThis.crypto?.subtle) {
+    throw new Error('팩터별 실제 보유 이력 sidecar SHA-256을 검증할 수 없습니다.');
+  }
+  const digest = bytesToHex(await globalThis.crypto.subtle.digest('SHA-256', encoded));
+  if (digest !== manifest.sha256) {
+    throw new Error('팩터별 실제 보유 이력 sidecar SHA-256이 manifest와 다릅니다.');
+  }
+  const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded));
+  if (
+    data?.contract !== manifest.contract
+    || data?.contractVersion !== manifest.contractVersion
+    || data?.resultKey !== payload.resultKey
+    || data?.selectedWeightingPolicy !== payload.selectedWeightingPolicy
+  ) {
+    throw new Error('팩터별 실제 보유 이력 sidecar provenance가 현재 결과와 다릅니다.');
+  }
+  return validateFactorHoldingHistorySidecarData(payload, data);
+}
+
+async function attachFactorHoldingHistorySidecar(payload, options = {}) {
+  try {
+    payload.__factorHoldingHistorySidecarData = await loadV4FactorHoldingHistorySidecar(
+      payload,
+      options.fetchImpl || globalThis.fetch,
+      options.pageUrl || null,
+    );
+    payload.__factorHoldingHistorySidecarError = null;
+  } catch (error) {
+    payload.__factorHoldingHistorySidecarData = null;
+    payload.__factorHoldingHistorySidecarError = String(error?.message || error);
+  }
+  return payload;
+}
+
+async function loadStaticEntryData(entry, options = {}) {
+  const manifestUrl = options.manifestUrl || state.manifestUrl;
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  requireCondition(manifestUrl, '정적 grid manifest URL이 없습니다.');
+  const detailUrl = new URL(entry.detail.path, manifestUrl).href;
+  const summaryUrl = new URL(entry.summary.path, manifestUrl).href;
+  const [payload, summary] = await Promise.all([
+    fetchJson(detailUrl, 'detail', entry.detail, fetchImpl),
+    fetchJson(summaryUrl, 'summary', entry.summary, fetchImpl),
+  ]);
+  await validateIdentityDigest(entry.identity, 'manifest/detail/summary');
+  const selected = await validateResult(entry, payload, summary);
+  await attachFactorHoldingHistorySidecar(payload, {
+    fetchImpl,
+    pageUrl: options.pageUrl || (typeof window !== 'undefined' ? window.location.href : null),
+  });
+  return { payload, summary, selected, detailUrl, summaryUrl };
+}
+
+function v4FactorHoldingHistory(payload, factor) {
+  const sidecar = payload.__factorHoldingHistorySidecarData
+    || payload.factorHoldingHistorySidecar?.data;
+  const factorHistory = sidecar?.factors?.[factor];
+  const dates = Array.isArray(sidecar?.dates) ? sidecar.dates : [];
+  const symbols = Array.isArray(sidecar?.symbols) ? sidecar.symbols : [];
+  if (
+    !factorHistory
+    || factorHistory.factor !== factor
+    || factorHistory.weightingPolicyId !== payload.selectedWeightingPolicy
+    || factorHistory.resultKey !== payload.resultKey
+    || !Array.isArray(factorHistory.sessions)
+    || factorHistory.sessions.length !== dates.length
+  ) return null;
+
+  const sessions = factorHistory.sessions.map((session, sessionIndex) => ({
+    date: dates[sessionIndex],
+    valuationAvailable: session.valuationAvailable === true,
+    cashWeight: optionalNumber(session.cashWeight) ?? 0,
+    executionStatus: session.executionStatus || null,
+    lastSignalDate: session.lastSignalDate || null,
+    lastExecutionDate: session.lastExecutionDate || null,
+    weightTiming: sidecar.weightTiming,
+    weights: (session.weights || []).map((pair, rank) => {
+      const dictionaryRow = symbols[pair?.[0]];
+      return {
+        rank: rank + 1,
+        symbol: dictionaryRow?.[0],
+        name: dictionaryRow?.[1],
+        weight: Number(pair?.[1]),
+      };
+    }).filter((row) => row.symbol && row.name && Number.isFinite(row.weight) && row.weight > 0),
+  }));
+  const rows = sessions.flatMap((session) => session.weights.map((row) => ({
+    date: session.date,
+    weight_date: session.date,
+    score_date: session.lastSignalDate,
+    execution_date: session.lastExecutionDate,
+    execution_status: session.executionStatus,
+    valuation_available: session.valuationAvailable,
+    cash_weight: session.cashWeight,
+    weight_timing: sidecar.weightTiming,
+    factor,
+    weighting_policy_id: factorHistory.weightingPolicyId,
+    rank: row.rank,
+    symbol: row.symbol,
+    name: row.name,
+    weight: row.weight,
+    default_weight: row.weight,
+    score: null,
+    weight_source: '실제 백테스트 보유 이력 sidecar',
+    history_source: 'factor_backtest_holding_history_sidecar',
+  })));
+  return {
+    contractVersion: sidecar.contractVersion,
+    factor,
+    weightingPolicyId: factorHistory.weightingPolicyId,
+    weightTiming: sidecar.weightTiming,
+    sourceKind: 'factor_backtest_holding_history_sidecar',
+    startDate: sidecar.startDate,
+    endDate: sidecar.endDate,
+    sessionCount: sessions.length,
+    sessions,
+    rows,
+  };
+}
+
+function v4HoldingHistory(payload, asOf) {
+  const history = payload.selectedBacktestHoldingHistory;
+  const historyObject = history && !Array.isArray(history) ? history : {};
+  let sessions = Array.isArray(history)
+    ? history
+    : (Array.isArray(historyObject.sessions) ? historyObject.sessions : []);
+  let sourceKind = 'selected_backtest_holding_history';
+  let factor = historyObject.factor || payload.selectedFactor;
+  let policy = historyObject.weightingPolicyId || payload.selectedWeightingPolicy;
+  let weightTiming = historyObject.weightTiming || 'last_complete_close_after_execution_processing';
+
+  if (!sessions.length) {
+    const held = payload.backtestHeldPortfolio;
+    if (held && Array.isArray(held.weights)) {
+      sessions = [{
+        date: held.asOf || asOf,
+        valuationAvailable: held.valuationAvailable !== false,
+        lastSignalDate: held.lastSignalDate,
+        lastExecutionDate: held.lastExecutionDate,
+        executionStatus: held.valuationAvailable === false ? 'valuation_unavailable' : 'legacy_valued_holding',
+        cashWeight: held.cashWeight,
+        weights: held.weights,
+      }];
+      sourceKind = 'legacy_backtest_held_fallback';
+      factor = held.factor || factor;
+      policy = held.weightingPolicyId || policy;
+    }
+  }
+
+  const normalizedSessions = sessions
+    .map((session) => {
+      const date = session.date || session.asOf || session.valuationDate || session.weightDate;
+      const normalizedWeights = (session.weights || session.holdings || [])
+        .map((row, index) => ({
+          rank: row.rank || index + 1,
+          symbol: row.symbol,
+          name: row.name,
+          weight: Number(row.weight),
+          factorScore: optionalNumber(row.factorScore ?? row.score),
+        }))
+        .filter((row) => row.symbol && Number.isFinite(row.weight) && row.weight > 0)
+        .sort((left, right) => Number(left.rank) - Number(right.rank) || String(left.symbol).localeCompare(String(right.symbol)));
+      return {
+        date,
+        valuationAvailable: session.valuationAvailable !== false,
+        lastSignalDate: session.lastSignalDate || session.signalDate || null,
+        lastExecutionDate: session.lastExecutionDate || session.executionDate || null,
+        executionStatus: session.executionStatus || null,
+        cashWeight: optionalNumber(session.cashWeight) ?? 0,
+        weightTiming: session.weightTiming || weightTiming,
+        weights: normalizedWeights,
+      };
+    })
+    .filter((session) => session.date)
+    .sort((left, right) => String(right.date).localeCompare(String(left.date)))
+    .slice(0, 21);
+
+  const rows = normalizedSessions.flatMap((session) => session.weights.map((row) => ({
+    date: session.date,
+    weight_date: session.date,
+    score_date: session.lastSignalDate,
+    execution_date: session.lastExecutionDate,
+    execution_status: session.executionStatus,
+    valuation_available: session.valuationAvailable,
+    cash_weight: session.cashWeight,
+    weight_timing: session.weightTiming,
+    factor,
+    weighting_policy_id: policy,
+    rank: row.rank,
+    symbol: row.symbol,
+    name: row.name,
+    weight: row.weight,
+    default_weight: row.weight,
+    score: row.factorScore,
+    weight_source: sourceKind === 'legacy_backtest_held_fallback'
+      ? '실제 백테스트 보유 fallback'
+      : '실제 백테스트 보유 이력',
+    history_source: sourceKind,
+  })));
+
+  return {
+    contractVersion: historyObject.contractVersion || (sourceKind === 'legacy_backtest_held_fallback' ? 'legacy' : 1),
+    factor,
+    weightingPolicyId: policy,
+    weightTiming,
+    sourceKind,
+    startDate: historyObject.startDate || normalizedSessions.at(-1)?.date || null,
+    endDate: historyObject.endDate || normalizedSessions[0]?.date || null,
+    sessionCount: normalizedSessions.length,
+    sessions: normalizedSessions,
+    rows,
+  };
+}
+
+function v4CurrentResearchTargetFromPortfolio(portfolio, factor, asOf, selectedPolicy) {
+  const target = portfolio || {};
+  return {
+    factor,
+    weightingPolicyId: target.weightingPolicyId || selectedPolicy,
+    status: target.status,
+    signalDate: target.signalDate || asOf,
+    asOf: target.asOf || asOf,
+    selectedSecurityCount: optionalNumber(target.selectedSecurityCount) ?? 0,
+    eligibleSecurityCount: optionalNumber(target.eligibleSecurityCount),
+    cashWeight: optionalNumber(target.cashWeight) ?? 0,
+    concentration: isRecord(target.concentration) ? { ...target.concentration } : null,
+    reasons: Array.isArray(target.reasons) ? [...target.reasons] : [],
+    weights: (target.weights || []).map((row, index) => ({
+      rank: row.rank || index + 1,
+      symbol: row.symbol,
+      name: row.name,
+      targetWeight: Number(row.weight),
+      factorScore: optionalNumber(row.factorScore),
+    })).filter((row) => row.symbol && Number.isFinite(row.targetWeight) && row.targetWeight > 0),
+  };
+}
+
+function v4CurrentResearchTarget(payload, asOf) {
+  return v4CurrentResearchTargetFromPortfolio(
+    payload.currentResearchTarget,
+    payload.selectedFactor,
+    asOf,
+    payload.selectedWeightingPolicy,
+  );
+}
+
+function adaptSchemaV4Payload(payload) {
+  const performance = payload.performance || {};
+  const dates = Array.isArray(performance.dates) ? performance.dates : [];
+  const commonEvaluationPeriod = v4CommonEvaluationPeriod(payload);
+  const definitions = Array.isArray(payload.factorDefinitions) ? payload.factorDefinitions : [];
+  const definitionByFactor = new Map(definitions.map((definition) => [definition.factor, definition]));
+  const factorCurves = performance.factorCurves || {};
+  const factors = Object.keys(factorCurves)
+    .filter((factor) => Array.isArray(factorCurves[factor]) && factorCurves[factor].length === dates.length)
+    .sort();
+  const { eligible: rankedFactors, byFactor: selectionEligibilityByFactor } = v4SelectionEligibility(payload, factors);
+  const { factorPeriodMatrix, factorLeaders } = v4ExplorationPeriodData(payload, rankedFactors, dates);
+  const asOf = payload.data?.asOf || dates.at(-1) || '-';
+  const target = payload.currentResearchTarget || {};
+  const holdingHistory = v4HoldingHistory(payload, asOf);
+  const factorHoldingHistories = {};
+  factors.forEach((factor) => {
+    const history = v4FactorHoldingHistory(payload, factor);
+    if (history) factorHoldingHistories[factor] = history;
+  });
+  factorHoldingHistories[payload.selectedFactor] = holdingHistory;
+  const portfolios = payload.factorPortfolios || {};
+  const factorCurrentResearchTargets = Object.fromEntries(factors.map((factor) => [
+    factor,
+    v4CurrentResearchTargetFromPortfolio(
+      portfolios[factor],
+      factor,
+      asOf,
+      payload.selectedWeightingPolicy,
+    ),
+  ]));
+  const currentResearchTarget = factorCurrentResearchTargets[payload.selectedFactor]
+    || v4CurrentResearchTarget(payload, asOf);
+  const factorScoreSnapshots = [];
+  const factorWeightSnapshots = [];
+  const holdings = holdingHistory.rows;
+  const availableDatesByFactor = {};
+
+  factors.forEach((factor) => {
+    const portfolio = portfolios[factor];
+    const weights = Array.isArray(portfolio?.weights) ? portfolio.weights : [];
+    availableDatesByFactor[factor] = factorHoldingHistories[factor]?.sessions
+      ?.map((session) => session.date)
+      .filter(Boolean) || [asOf];
+    if (!weights.length) return;
+    factorScoreSnapshots.push({
+      date: asOf,
+      score_date: portfolio.signalDate || asOf,
+      factor,
+      score_scope: 'schema_v4_current_python_portfolio_top_constituents',
+      eligibility_filter_applied: true,
+      snapshot_complete: false,
+      stored_row_count: weights.length,
+      raw_available_count: weights.length,
+      upstream_final_eligible_count: portfolio.eligibleSecurityCount,
+      rows: weights.map((row) => ({ symbol: row.symbol, score: row.factorScore })),
+    });
+    V4_EXPLORATION_PERIODS.forEach((period) => {
+      const rows = weights.map((row) => ({
+        symbol: row.symbol,
+        weight: row.weight,
+        default_weight: row.weight,
+        score: row.factorScore,
+        rank: row.rank,
+        date: asOf,
+        weight_date: asOf,
+        score_date: portfolio.signalDate || asOf,
+        factor,
+        window: period.key,
+        window_label: period.label,
+        weight_source: `Python ${portfolio.weightingPolicyId || payload.selectedWeightingPolicy}`,
+      }));
+      factorWeightSnapshots.push({
+        date: asOf,
+        weight_date: asOf,
+        score_date: portfolio.signalDate || asOf,
+        factor,
+        window: period.key,
+        window_label: period.label,
+        weight_source: `Python ${portfolio.weightingPolicyId || payload.selectedWeightingPolicy}`,
+        rows,
+      });
+    });
+  });
+
+  const benchmarkSeries = v4BenchmarkCurves(payload).map(({ symbol, curve }) => ({
+    symbol,
+    label_ko: V4_BENCHMARK_LABELS[symbol] || symbol,
+    dates: [...dates],
+    equity: [...curve],
+    drawdown: v4DrawdownSeries(curve),
+  }));
+  const legacyBenchmark = benchmarkSeries.find((series) => series.symbol === '^IXIC')
+    || benchmarkSeries.find((series) => series.symbol === 'SPY')
+    || benchmarkSeries[0]
+    || null;
+  const latestWeights = Array.isArray(target.weights) ? target.weights : [];
+  const investedWeight = latestWeights.reduce((sum, row) => sum + (Number(row.weight) || 0), 0);
+  const selectedDefinition = definitionByFactor.get(payload.selectedFactor) || {};
+  const qualityRows = Array.isArray(payload.quality) ? payload.quality : [];
+  const candidateQualityRows = qualityRows.filter((row) => row?.role === 'candidate');
+  const freshCandidateRows = candidateQualityRows.filter((row) => String(row?.last_date || '') === String(asOf));
+  const freshPriceRatio = candidateQualityRows.length
+    ? freshCandidateRows.length / candidateQualityRows.length
+    : null;
+  const selectedPolicy = payload.weightingPolicyRegistry?.policies?.[payload.selectedWeightingPolicy] || {};
+  const summary = {
+    run_timestamp_utc: payload.generatedAtUtc,
+    data_as_of: asOf,
+    provider: payload.data?.provider || payload.data?.sourceLabel,
+    selected_factor: payload.selectedFactor,
+    selected_reason: payload.selectedReason,
+    recommendation_status: 'current_live_with_limitations_research_only',
+    recommendation_output_label: 'Research signals (not tradable)',
+    fresh_live_data_available: payload.data?.mode === 'live_market',
+    decision_support_tier: 'research_signals',
+    execution_limitations: ['research_only', 'not_investment_recommendation', ...(payload.researchScope?.limitations || [])],
+    tradability_blockers: ['research_only', 'not_investment_recommendation'],
+    default_top_n: payload.config?.top_n || 20,
+    default_max_weight: payload.config?.max_weight || 0.1,
+    benchmark: payload.data?.benchmark || payload.config?.benchmark || 'SPY',
+    chart_benchmark: payload.data?.chartBenchmark || payload.config?.chart_benchmark || '^IXIC',
+    chart_benchmark_symbol: payload.data?.chartBenchmark || payload.config?.chart_benchmark || '^IXIC',
+    chart_benchmark_price_available: benchmarkSeries.some((series) => series.symbol === '^IXIC'),
+    universe_profile: payload.config?.universe_profile || 'large_liquid',
+    factor_selection_mode: 'joint_factor_policy_absolute_guardrails',
+    candidate_universe_size: payload.data?.requestedCandidateCount,
+    eligible_price_universe_size: payload.data?.analyzedSecurityCount,
+    liquidity_eligible_universe_size: payload.data?.latestEligibleSecurityCount,
+    factor_count: factors.length,
+    factor_library_scope: 'price_momentum_only',
+    recommendation_output_key: 'research_signals',
+    recommendation_output_available: false,
+    tradable_output_available: false,
+    current_recommendations_available: false,
+    tradable_recommendations_available: false,
+    research_only: true,
+    fail_closed: true,
+    fail_closed_reasons: ['research_only', 'not_investment_recommendation'],
+    same_run_factor_selection_blocked_for_tradable: true,
+    same_sample_selection_blocked_for_tradable: true,
+    recommendation_weighting_method: payload.selectedWeightingPolicy,
+    recommendation_weight_sum: investedWeight,
+    recommendation_cash_weight: Number(target.cashWeight) || 0,
+    validation_selected_factor: payload.selectedFactor,
+    selected_factor_selection_source: 'python_joint_factor_policy_grid',
+    selected_policy_label: selectedPolicy.label || payload.selectedWeightingPolicy,
+  };
+
+  const priceCounts = v4PriceSourceCounts(payload);
+  const latestOutputRows = latestWeights.map((row, index) => ({
+    rank: row.rank || index + 1,
+    symbol: row.symbol,
+    score: row.factorScore,
+    weight: row.weight,
+    pre_cap_weight: row.preCapWeight ?? row.weight,
+    weighting_method: payload.selectedWeightingPolicy,
+    signal_date: target.signalDate || asOf,
+    selected_factor: payload.selectedFactor,
+  }));
+
+  const run = {
+    schema_version: 4,
+    generated_at_utc: payload.generatedAtUtc,
+    source_json: 'schema-v4 canonical result adapted for the 2026-07-10 interface',
+    summary,
+    periods: V4_EXPLORATION_PERIODS,
+    factor_options: factors.map((factor) => {
+      const definition = definitionByFactor.get(factor) || {};
+      return {
+        factor,
+        category: definition.category || 'unknown',
+        description: definition.description || '팩터 설명 정보가 없습니다.',
+        description_ko: definition.description || '팩터 설명 정보가 없습니다.',
+        formula: definition.formula,
+        validation: definition.validation_notes,
+        selection_eligible: selectionEligibilityByFactor.get(factor)?.selection_eligible === true,
+        selection_status: selectionEligibilityByFactor.get(factor)?.selection_status || 'diagnostic_only',
+      };
+    }),
+    factor_period_matrix: factorPeriodMatrix,
+    factor_period_rankings: [],
+    factor_leaders: factorLeaders,
+    factor_backtest_series: factors.map((factor) => v4BacktestSeries(factor, factorCurves[factor], dates)),
+    benchmark_backtest_series: legacyBenchmark,
+    comparison_benchmark_series: benchmarkSeries,
+    common_evaluation_period: commonEvaluationPeriod,
+    factor_score_snapshots: factorScoreSnapshots,
+    factor_weight_snapshots: factorWeightSnapshots,
+    holdings,
+    backtest_holding_history: holdingHistory,
+    backtest_holding_sessions: holdingHistory.sessions,
+    factor_holding_histories: factorHoldingHistories,
+    current_research_target: currentResearchTarget,
+    factor_current_research_targets: factorCurrentResearchTargets,
+    latest_output_rows: latestOutputRows,
+    scenario_available_dates: [asOf],
+    scenario_available_dates_by_factor: availableDatesByFactor,
+    history_payload_type: 'full',
+    history_compaction_note_ko: null,
+    tradability_gate: [
+      { key: 'actual_market', passed: payload.data?.mode === 'live_market', label_ko: '실제 시장 데이터', description_ko: '합성 데이터가 아닌 제공자 조정가격을 사용합니다.' },
+      { key: 'broad_universe', passed: Number(payload.data?.analyzedSecurityCount) >= 2700, label_ko: '2,700개 이상 전체 후보 분석', description_ko: `${formatInteger(payload.data?.analyzedSecurityCount)}개 종목을 분석했습니다.` },
+      { key: 'canonical_target', passed: target.status === 'available', label_ko: 'Python 현재 연구 목표', description_ko: `${payload.selectedFactor} × ${payload.selectedWeightingPolicy}` },
+      { key: 'research_only', passed: false, label_ko: '매매 권고 게이트', description_ko: '동일 표본 설명 연구이며 실제 주문·투자 권고가 아닙니다.' },
+    ],
+    data_quality_summary: {
+      candidate_universe_size: payload.data?.requestedCandidateCount,
+      eligible_price_universe_size: payload.data?.analyzedSecurityCount,
+      liquidity_eligible_universe_size: payload.data?.latestEligibleSecurityCount,
+      fetched_price_symbol_count: payload.data?.providerReturnedCandidateCount,
+      excluded_symbols: Math.max(0, Number(payload.data?.requestedCandidateCount || 0) - Number(payload.data?.latestEligibleSecurityCount || 0)),
+      price_coverage_ratio: Number(payload.data?.providerReturnedCandidateCount || 0) / Math.max(1, Number(payload.data?.requestedCandidateCount || 1)),
+      provider_returned_symbol_count: payload.data?.providerReturnedCandidateCount,
+      provider_requested_symbol_count: payload.data?.requestedCandidateCount,
+      model_price_universe_ratio: Number(payload.data?.analyzedSecurityCount || 0) / Math.max(1, Number(payload.data?.requestedCandidateCount || 1)),
+      eligible_price_ratio: Number(payload.data?.analyzedSecurityCount || 0) / Math.max(1, Number(payload.data?.requestedCandidateCount || 1)),
+      liquidity_eligible_ratio: Number(payload.data?.latestEligibleSecurityCount || 0) / Math.max(1, Number(payload.data?.requestedCandidateCount || 1)),
+      fresh_price_ratio: freshPriceRatio,
+      fresh_price_rows: freshCandidateRows.length,
+      price_quality_rows: candidateQualityRows.length,
+      data_as_of: asOf,
+      provider: payload.data?.provider || payload.data?.sourceLabel,
+      source_health: v4SourceHealth(payload),
+      price_source_counts: priceCounts,
+      data_quality_status_counts: {
+        pass: candidateQualityRows.filter((row) => row.eligible_latest === true).length,
+        excluded: candidateQualityRows.filter((row) => row.eligible_latest !== true).length,
+        benchmark_comparator_only: qualityRows.filter((row) => row.role !== 'candidate').length,
+      },
+      latest_eligibility_exclusion_counts: payload.data?.latestEligibilityExclusionCounts || null,
+      exclusion_counts_may_overlap: payload.data?.funnel?.exclusionCountsMayOverlap === true,
+      liquidity_status_counts: {
+        pass: payload.data?.latestEligibleSecurityCount,
+        fail: Math.max(0, Number(payload.data?.analyzedSecurityCount || 0) - Number(payload.data?.latestEligibleSecurityCount || 0)),
+      },
+      final_eligibility_status_counts: {
+        pass: payload.data?.latestEligibleSecurityCount,
+        fail: Math.max(0, Number(payload.data?.analyzedSecurityCount || 0) - Number(payload.data?.latestEligibleSecurityCount || 0)),
+      },
+      capacity_status_counts: null,
+      capacity_status_note: '미평가 · 공개 payload에는 주문 규모·시장 충격·참여율을 반영한 체결 용량 모델이 없습니다.',
+    },
+    factor_diagnostics: payload.factorDiagnostics
+      ? v4FactorDiagnostics(payload)
+      : {
+        scope_note_ko: `독립 팩터 ${formatInteger(payload.meta?.independentFactorCount)}개와 호환 alias ${formatInteger(payload.meta?.aliasFactorCount)}개를 네 가지 비중 정책에서 비교합니다. 이 이전 결과에는 Forward Rank-IC와 중복도 계약이 없어 값을 만들거나 추정하지 않습니다.`,
+        category_summary: v4CategorySummary(definitions),
+        rank_ic_rows: [],
+        rank_ic_top: [],
+        redundancy_rows: [],
+        redundancy_top: [],
+        redundancy_pairs: [],
+      },
+    notes_ko: [
+      `선택 조합: ${payload.selectedFactor} × ${payload.selectedWeightingPolicy}`,
+      `공동 선택 점수는 Python에서 계산되며 브라우저 기간 비교와 별개입니다.`,
+      selectedDefinition.description || '',
+    ].filter(Boolean),
+  };
+
+  return {
+    schema_version: 1,
+    generated_at_utc: payload.generatedAtUtc,
+    title: '모멘텀 팩터 데일리 대시보드',
+    latest_run_index: 0,
+    runs: [run],
+  };
+}
+
+const CANONICAL_COMPONENTS = [
+  ['cagr_score', 'CAGR', 'component-cagr'],
+  ['calmar_score', 'Calmar', 'component-calmar'],
+  ['max_drawdown_score', 'MDD 방어', 'component-drawdown'],
+  ['sharpe_score', 'Sharpe', 'component-sharpe'],
+  ['sortino_score', 'Sortino', 'component-sortino'],
+  ['stability_score', '안정성', 'component-stability'],
+];
+
+function canonicalPolicyLabel(payload, policyId) {
+  return payload.weightingPolicyRegistry?.policies?.[policyId]?.label || policyId || '-';
+}
+
+function canonicalPolicyClass(policyId) {
+  return CHART_PALETTE_CLASS_MAP.policies[policyId]
+    || `policy-${String(policyId || 'unavailable').replaceAll('_', '-')}`;
+}
+
+function canonicalSelectionStatusClass(status) {
+  return CHART_PALETTE_CLASS_MAP.statuses[status]
+    || CHART_PALETTE_CLASS_MAP.statuses.default;
+}
+
+function canonicalSelectionStatusLabel(status) {
+  const labels = {
+    eligible: '선정 적격',
+    data_excluded: '데이터 조건 미충족',
+    extreme_event_excluded: '극단사건 가드레일 제외',
+  };
+  return labels[status] || '상태 미확인';
+}
+
+function canonicalExclusionReasonLabel(code) {
+  const labels = {
+    terminal_nav_unavailable: '최종 NAV 평가 불가(선정 제외·진단용)',
+    duplicate_alias: '독립 팩터와 중복된 호환 alias(선정 제외·진단용)',
+    extreme_event: '극단사건 가드레일 미충족(선정 제외·진단용)',
+    security_day_contribution: '단일 종목·일 기여도 가드레일 미충족',
+    ending_nav_unavailable: '최종 NAV 평가 불가(선정 제외·진단용)',
+    policy_input_unavailable: '비중 정책 입력 불충분(선정 제외·진단용)',
+    insufficient_history: '공통 비교 이력 부족(선정 제외·진단용)',
+  };
+  return labels[code] || '기타 데이터·가드레일 조건 미충족(선정 제외·진단용)';
+}
+
+function canonicalRankingStatusText(row) {
+  if (row?.selected === true) return '선택';
+  const status = canonicalSelectionStatusLabel(row?.selection_status);
+  const reasonCodes = Array.isArray(row?.exclusion_reason_codes)
+    ? [...new Set(row.exclusion_reason_codes.filter(Boolean))]
+    : [];
+  const reasons = reasonCodes.map(canonicalExclusionReasonLabel);
+  if (reasons.length) return `${status} · ${reasons.join(' · ')}`;
+  if (row?.comparison_status === 'available') return status;
+  if (row?.selection_status) return status;
+  return '상태 미확인';
+}
+
+function canonicalGridAccounting(payload) {
+  const accounting = payload?.gridAccounting || {};
+  const independentFactorCount = Number(accounting.independentFactorCount) || 0;
+  const policyCount = Number(accounting.policyCount) || 0;
+  const expectedIndependentPairCount = Number(accounting.expectedIndependentPairCount)
+    || independentFactorCount * policyCount;
+  const evaluatedIndependentPairCount = Number(accounting.evaluatedIndependentPairCount)
+    || expectedIndependentPairCount;
+  const availableIndependentPairCount = Number(accounting.availableIndependentPairCount) || 0;
+  const excludedIndependentPairCount = Number(accounting.excludedIndependentPairCount) || 0;
+  const commonComparableFactorCount = Number(accounting.commonComparableFactorCount) || 0;
+  const diagnosticAliasFactorCount = Number(accounting.diagnosticAliasFactorCount) || 0;
+  const diagnosticAliasPairCount = Number(accounting.diagnosticAliasPairCount) || 0;
+  const missingIndependentPairCount = Number(accounting.missingIndependentPairCount) || 0;
+  const totalOutputRowCount = Array.isArray(payload?.factorPolicyRanking)
+    ? payload.factorPolicyRanking.length
+    : evaluatedIndependentPairCount + diagnosticAliasPairCount;
+  return {
+    independentFactorCount,
+    policyCount,
+    expectedIndependentPairCount,
+    evaluatedIndependentPairCount,
+    availableIndependentPairCount,
+    excludedIndependentPairCount,
+    commonComparableFactorCount,
+    diagnosticAliasFactorCount,
+    diagnosticAliasPairCount,
+    missingIndependentPairCount,
+    totalOutputRowCount,
+  };
+}
+
+function canonicalSelectedRow(payload) {
+  return (payload.factorPolicyRanking || []).find((row) => row.selected === true)
+    || (payload.factorPolicyRanking || []).find((row) => (
+      row.factor === payload.selectedFactor && row.policy_id === payload.selectedWeightingPolicy
+    ))
+    || null;
+}
+
+function appendCanonicalBar(target, options) {
+  const row = document.createElement(options.interactive ? 'button' : 'div');
+  row.className = `canonical-bar-row ${options.className || ''} ${options.selected ? 'is-selected' : ''}`.trim();
+  if (options.interactive) {
+    row.type = 'button';
+    row.setAttribute('aria-pressed', String(Boolean(options.selected)));
+    row.addEventListener('click', options.onClick);
+  }
+  const label = document.createElement('span');
+  label.className = 'canonical-bar-label';
+  label.textContent = options.label;
+  if (options.detail) {
+    const detail = document.createElement('small');
+    detail.textContent = options.detail;
+    label.appendChild(detail);
+  }
+  const track = document.createElement('span');
+  track.className = 'bar-track';
+  const fill = document.createElement('span');
+  fill.className = 'bar-fill';
+  fill.style.width = `${Math.max(0, Math.min(100, Number(options.width) || 0)).toFixed(2)}%`;
+  track.appendChild(fill);
+  const value = document.createElement('strong');
+  value.textContent = options.valueLabel;
+  row.append(label, track, value);
+  target.appendChild(row);
+}
+
+function canonicalSelectFactor(factor) {
+  const selector = document.querySelector('#factor-select');
+  if (!selector || !Array.from(selector.options).some((option) => option.value === factor)) return;
+  const preferredDate = selectedDate();
+  selector.value = factor;
+  state.hasUserSelectedFactor = true;
+  syncFactorDependentControls(currentRun(), factor, preferredDate);
+  renderAll();
+  document.querySelector('#visual-dashboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function populateCanonicalPolicyFilter(payload) {
+  const selector = document.querySelector('#joint-policy-filter');
+  if (!selector) return;
+  const previous = selector.value || 'all';
+  selector.replaceChildren();
+  const all = document.createElement('option');
+  all.value = 'all';
+  all.textContent = '전체 정책';
+  selector.appendChild(all);
+  Object.keys(payload.weightingPolicyRegistry?.policies || {}).forEach((policyId) => {
+    const option = document.createElement('option');
+    option.value = policyId;
+    option.textContent = canonicalPolicyLabel(payload, policyId);
+    selector.appendChild(option);
+  });
+  selector.value = Array.from(selector.options).some((option) => option.value === previous) ? previous : 'all';
+}
+
+function canonicalFilteredRanking(payload) {
+  const policy = document.querySelector('#joint-policy-filter')?.value || 'all';
+  const search = String(document.querySelector('#joint-factor-search')?.value || '').trim().toLowerCase();
+  return (payload.factorPolicyRanking || [])
+    .filter((row) => policy === 'all' || row.policy_id === policy)
+    .filter((row) => !search || `${row.factor} ${row.category || ''}`.toLowerCase().includes(search))
+    .sort((left, right) => (
+      Number(left.rank ?? Number.MAX_SAFE_INTEGER) - Number(right.rank ?? Number.MAX_SAFE_INTEGER)
+      || Number(right.selection_score ?? -Infinity) - Number(left.selection_score ?? -Infinity)
+      || String(left.factor).localeCompare(String(right.factor))
+      || String(left.policy_id).localeCompare(String(right.policy_id))
+    ));
+}
+
+function renderCanonicalAllocation(payload) {
+  const target = payload.currentResearchTarget || {};
+  const rows = Array.isArray(target.weights) ? target.weights : [];
+  const chart = document.querySelector('#canonical-allocation-chart');
+  const tbody = document.querySelector('#canonical-allocation-table tbody');
+  chart.replaceChildren();
+  tbody.replaceChildren();
+  const maxWeight = Math.max(...rows.map((row) => Number(row.weight) || 0), Number(target.cashWeight) || 0, 0.01);
+  rows.forEach((row) => {
+    appendCanonicalBar(chart, {
+      label: row.symbol,
+      detail: row.name || `팩터 점수 ${formatNumber(row.factorScore)}`,
+      width: Number(row.weight) / maxWeight * 100,
+      valueLabel: formatPercent(row.weight),
+      className: `${canonicalPolicyClass(target.weightingPolicyId)} ${CHART_PALETTE_CLASS_MAP.bars.focal}`,
+    });
+    const tr = document.createElement('tr');
+    appendCell(tr, row.rank);
+    appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, row.name || '-');
+    appendCell(tr, formatNumber(row.factorScore));
+    appendCell(tr, formatPercent(row.weight), { className: 'positive' });
+    appendCell(tr, formatNumber(row.rawPolicyScore));
+    appendCell(tr, row.capBinding ? '상한 적용' : '상한 미적용');
+    tbody.appendChild(tr);
+  });
+  if (Number(target.cashWeight) > 0) {
+    appendCanonicalBar(chart, {
+      label: '현금 / 미사용',
+      detail: 'Python residual cash',
+      width: Number(target.cashWeight) / maxWeight * 100,
+      valueLabel: formatPercent(target.cashWeight),
+      className: `neutral ${CHART_PALETTE_CLASS_MAP.bars.neutralOpen}`,
+    });
+  }
+  if (!rows.length) appendEmpty('#canonical-allocation-chart', '현재 Python 연구 목표 종목이 없습니다.');
+  setText('#canonical-allocation-meta', `${canonicalPolicyLabel(payload, target.weightingPolicyId)} · ${formatInteger(rows.length)}개 · 상한 ${formatPercent(payload.config?.max_weight)}`);
+}
+
+function renderCanonicalRanking(payload) {
+  const rows = canonicalFilteredRanking(payload);
+  const accounting = canonicalGridAccounting(payload);
+  const chart = document.querySelector('#joint-ranking-chart');
+  const tbody = document.querySelector('#joint-ranking-table tbody');
+  chart.replaceChildren();
+  tbody.replaceChildren();
+  setText(
+    '#joint-ranking-scope',
+    `전체 출력 ${formatInteger(accounting.totalOutputRowCount)}행 · 독립 ${formatInteger(accounting.expectedIndependentPairCount)}쌍 + 호환 alias ${formatInteger(accounting.diagnosticAliasPairCount)}쌍`,
+  );
+  setText(
+    '#joint-ranking-title',
+    `독립 ${formatInteger(accounting.expectedIndependentPairCount)}쌍 중 비교 가능 ${formatInteger(accounting.availableIndependentPairCount)}쌍 랭킹 · 제외 ${formatInteger(accounting.excludedIndependentPairCount)}쌍 진단`,
+  );
+  setText(
+    '#joint-ranking-scope-note',
+    `공통 조건으로 완전 비교 가능한 독립 팩터는 ${formatInteger(accounting.commonComparableFactorCount)}/${formatInteger(accounting.independentFactorCount)}개이며 네 정책의 ${formatInteger(accounting.availableIndependentPairCount)}쌍만 상대 순위를 가집니다. 나머지 독립 ${formatInteger(accounting.excludedIndependentPairCount)}쌍은 선정 제외 진단이고, 호환 alias ${formatInteger(accounting.diagnosticAliasPairCount)}쌍은 독립 비교 집계와 분리됩니다. 따라서 전체 ${formatInteger(accounting.totalOutputRowCount)}행이 모두 완전 비교 가능한 단일 순위라는 뜻이 아닙니다.`,
+  );
+  const chartRows = rows.filter((row) => finite(row.selection_score)).slice(0, 12);
+  const maxScore = Math.max(...chartRows.map((row) => Number(row.selection_score) || 0), 1);
+  chartRows.forEach((row) => {
+    appendCanonicalBar(chart, {
+      label: row.factor,
+      detail: `${canonicalPolicyLabel(payload, row.policy_id)} · ${canonicalRankingStatusText(row)} · 동일 표본 상대 합성 점수`,
+      width: Number(row.selection_score) / maxScore * 100,
+      valueLabel: `${formatNumber(row.selection_score)} / 100`,
+      className: `${canonicalPolicyClass(row.policy_id)} ${canonicalSelectionStatusClass(row.selection_status)}`,
+      selected: row.selected === true,
+      interactive: true,
+      onClick: () => canonicalSelectFactor(row.factor),
+    });
+  });
+  rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    if (row.selected === true) tr.className = 'is-selected';
+    appendCell(tr, row.rank ?? '-');
+    appendCell(tr, row.factor, { strong: row.selected === true });
+    appendCell(tr, humanFactorCategory(row.category));
+    appendCell(tr, canonicalPolicyLabel(payload, row.policy_id));
+    appendCell(
+      tr,
+      finite(row.selection_score) ? `${formatNumber(row.selection_score)} / 100` : '-',
+      { className: finite(row.selection_score) ? 'positive' : 'neutral' },
+    );
+    appendCell(tr, formatPercent(row.cagr), { className: classForNumber(row.cagr) });
+    appendCell(tr, formatNumber(row.sharpe), { className: classForNumber(row.sharpe) });
+    appendCell(tr, formatPercent(row.max_drawdown), { className: Number(row.max_drawdown) < 0 ? 'negative' : 'neutral' });
+    appendCell(tr, canonicalRankingStatusText(row));
+    tbody.appendChild(tr);
+  });
+  if (!rows.length) {
+    appendEmpty('#joint-ranking-chart', '필터 조건에 맞는 팩터×정책 조합이 없습니다.');
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 9;
+    td.textContent = '필터 조건에 맞는 조합이 없습니다.';
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  setText(
+    '#joint-ranking-meta',
+    `독립 ${formatInteger(accounting.expectedIndependentPairCount)}쌍: 비교 가능 ${formatInteger(accounting.availableIndependentPairCount)} · 제외 ${formatInteger(accounting.excludedIndependentPairCount)} · 공통 비교 팩터 ${formatInteger(accounting.commonComparableFactorCount)}개 · alias ${formatInteger(accounting.diagnosticAliasPairCount)}쌍 · 현재 표시 ${formatInteger(rows.length)} · 막대 ${formatInteger(chartRows.length)}`,
+  );
+}
+
+function renderCanonicalComponents(payload, selected) {
+  const target = document.querySelector('#canonical-component-chart');
+  target.replaceChildren();
+  CANONICAL_COMPONENTS.forEach(([key, label, className]) => {
+    const value = Number(selected?.[key]);
+    appendCanonicalBar(target, {
+      label,
+      detail: `가중치 ${formatPercent(selected?.[key.replace('_score', '_weight')])}`,
+      width: Number.isFinite(value) ? value : 0,
+      valueLabel: Number.isFinite(value) ? formatNumber(value) : '-',
+      className: `${className} ${CHART_PALETTE_CLASS_MAP.bars.component}`,
+    });
+  });
+  setText(
+    '#canonical-selection-reason',
+    `${payload.selectedReason || '선택 근거 미표기'} · 동일 표본 상대 합성 점수는 비교 가능한 조합 내부의 percentile 기반 ${formatNumber(selected?.selection_score)} / 100이며 절대 신뢰도나 미래 성공 확률이 아닙니다. 브라우저 기간 비교와 달리 Python 팩터×정책 grid의 절대 가드레일 통과 조합만 선정 대상으로 합니다. 이미 보유 중 발생한 극단 움직임은 발생 이후 전략 수익률에 인과적으로 반영하지만, 종료일 보유 종목을 가격 평가하지 못해 최종 NAV가 없는 조합은 수익률 크기와 무관하게 선정에서 제외하고 진단용으로만 남깁니다.`,
+  );
+}
+
+function renderCanonicalPolicies(payload) {
+  const target = document.querySelector('#canonical-policy-cards');
+  target.replaceChildren();
+  const diagnostics = new Map((payload.policyDiagnostics || []).map((row) => [row.policy_id, row]));
+  Object.entries(payload.weightingPolicyRegistry?.policies || {}).forEach(([policyId, policy]) => {
+    const row = diagnostics.get(policyId) || {};
+    const item = document.createElement('div');
+    item.className = `mini-item ${policyId === payload.selectedWeightingPolicy ? 'is-selected' : ''}`;
+    const title = document.createElement('strong');
+    title.textContent = `${policy.label || policyId}${policyId === payload.selectedWeightingPolicy ? ' · 선택' : ''}`;
+    const detail = document.createElement('small');
+    detail.textContent = `${policy.description || ''} · CAGR 중앙값 ${formatPercent(row.cagr)} · Sharpe 중앙값 ${formatNumber(row.sharpe)} · 회전율 ${formatNumber(row.annualized_turnover)}`;
+    item.append(title, detail);
+    target.appendChild(item);
+  });
+  setText('#canonical-policy-meta', `${formatInteger(Object.keys(payload.weightingPolicyRegistry?.policies || {}).length)}개 정책 · ${payload.weightingPolicyRegistry?.registryVersion || '-'}`);
+}
+
+function renderCanonicalGuardrails(payload, selected) {
+  const target = document.querySelector('#canonical-guardrail-list');
+  target.replaceChildren();
+  const statusFields = Object.entries(selected || {})
+    .filter(([key, value]) => key.startsWith('guardrail_') && typeof value === 'boolean')
+    .sort(([left], [right]) => left.localeCompare(right));
+  statusFields.forEach(([key, passed]) => {
+    const item = document.createElement('div');
+    item.className = `gate-item ${passed ? 'pass' : 'block'}`;
+    const title = document.createElement('strong');
+    title.textContent = `${passed ? '통과' : '미통과'} · ${key.replace('guardrail_', '').replaceAll('_', ' ')}`;
+    const detail = document.createElement('small');
+    detail.textContent = passed ? 'Python 절대 가드레일 검증값' : '해당 조합의 위반 또는 제외 사유를 확인하세요.';
+    item.append(title, detail);
+    target.appendChild(item);
+  });
+  if (!statusFields.length) appendEmpty('#canonical-guardrail-list', '가드레일 세부 상태가 없습니다.');
+  const profile = payload.selectionDecision?.guardrailProfile;
+  setText('#canonical-guardrail-meta', `${profile?.id || payload.selectionMethod?.guardrailVersion || '-'} · ${formatInteger(profile?.rules?.length || 0)}개 규칙`);
+}
+
+function renderCanonicalDataContract(payload) {
+  const target = document.querySelector('#canonical-data-contract');
+  target.replaceChildren();
+  const pairs = [
+    ['요청 후보', formatInteger(payload.data?.requestedCandidateCount)],
+    ['제공자 반환', formatInteger(payload.data?.providerReturnedCandidateCount)],
+    ['실제 분석', formatInteger(payload.data?.analyzedSecurityCount)],
+    ['최신 적격', formatInteger(payload.data?.latestEligibleSecurityCount)],
+    ['가격 기준', payload.data?.priceBasis || '-'],
+    ['거래량 기준', payload.data?.volumeBasis || '-'],
+    ['결과 생성', formatKoreanDateTime(payload.generatedAtUtc)],
+    ['연구 상태', payload.researchScope?.evidenceStatus || '-'],
+  ];
+  pairs.forEach(([label, value]) => appendDefinition(target, label, value));
+  setText('#canonical-result-key', payload.resultKey || '-');
+  document.querySelector('#canonical-result-key').title = payload.resultKey || '-';
+}
+
+function canonicalRequestedThroughText(payload) {
+  const data = payload?.data || {};
+  const asOf = typeof data.asOf === 'string' && data.asOf ? data.asOf : null;
+  const requestedThrough = typeof data.requestedThrough === 'string' && data.requestedThrough
+    ? data.requestedThrough
+    : null;
+  const source = data.sourceLabel || data.provider || '-';
+  if (!asOf || !requestedThrough) {
+    return `${source} · 요청 종료일 또는 실제 기준일 미표기`;
+  }
+  if (requestedThrough === asOf) {
+    return `${source} · 요청 종료(requestedThrough) ${requestedThrough} = 실제 최신 완료 거래일(asOf) ${asOf}`;
+  }
+  const requestedDate = parseDateString(requestedThrough);
+  const asOfDate = parseDateString(asOf);
+  if (!requestedDate || !asOfDate || requestedDate < asOfDate) {
+    return `${source} · 요청 종료(requestedThrough) ${requestedThrough} / 실제 기준일(asOf) ${asOf} · 일자 provenance 확인 필요`;
+  }
+  const weekend = requestedDate && [0, 6].includes(requestedDate.getUTCDay());
+  const reason = weekend
+    ? '요청 종료일이 주말이므로 직전 미국 거래일 종가를 사용'
+    : '요청 종료일이 미국 휴장일이거나 아직 완료되지 않은 거래일이므로 직전 완료 거래일 종가를 사용';
+  return `${source} · 요청 종료(requestedThrough) ${requestedThrough} / 실제 최신 완료 거래일(asOf) ${asOf} · ${reason}`;
+}
+
+function canonicalCountDefinitions(payload) {
+  const data = payload?.data || {};
+  const pieces = [];
+  if (integer(data.requestedCandidateCount)) {
+    pieces.push(`요청(requested) ${formatInteger(data.requestedCandidateCount)}=현재 유니버스 후보`);
+  }
+  if (integer(data.providerReturnedCandidateCount)) {
+    pieces.push(`제공자 반환 ${formatInteger(data.providerReturnedCandidateCount)}=가격 열 반환`);
+  }
+  if (integer(data.analyzedSecurityCount)) {
+    pieces.push(`분석(analyzed) ${formatInteger(data.analyzedSecurityCount)}=가격 분석 가능`);
+  }
+  if (integer(data.latestEligibleSecurityCount)) {
+    pieces.push(`최신 적격(latest eligible) ${formatInteger(data.latestEligibleSecurityCount)}=현재 편입 필터 모두 통과`);
+  }
+  return pieces.length ? pieces.join(' · ') : '유니버스 카운트 정의를 확인할 수 없습니다.';
+}
+
+function canonicalUniverseScopeEvidence(payload) {
+  const rows = Array.isArray(payload?.sourceHealth) ? payload.sourceHealth : [];
+  const evidence = rows.find((row) => (
+    isRecord(row)
+    && typeof row.point_in_time_universe === 'boolean'
+  )) || rows.find((row) => (
+    isRecord(row)
+    && (row.universe_provenance || row.universe_source_mode || row.universe_profile)
+  )) || null;
+  const limitations = Array.isArray(payload?.researchScope?.limitations)
+    ? payload.researchScope.limitations.filter((value) => typeof value === 'string' && value.trim())
+    : [];
+  const survivorshipLimitation = limitations.find((value) => (
+    value.includes('현재 상장')
+    || value.includes('역사적 구성종목')
+    || value.includes('상장폐지')
+    || value.toLowerCase().includes('ticker reuse')
+  )) || null;
+  const currentListed = Boolean(survivorshipLimitation?.includes('현재 상장'));
+  const pointInTime = typeof evidence?.point_in_time_universe === 'boolean'
+    ? evidence.point_in_time_universe
+    : null;
+  const scope = [
+    currentListed ? '현재 상장 종목 중심' : null,
+    pointInTime === true
+      ? 'Point-in-time 유니버스'
+      : (pointInTime === false ? 'Point-in-time 유니버스 아님' : '유니버스 시점성 미확인'),
+  ].filter(Boolean).join(' · ');
+  const provenance = [
+    evidence?.source ? `source ${evidence.source}` : null,
+    evidence?.status ? `status ${evidence.status}` : null,
+    evidence?.universe_provenance ? `provenance ${evidence.universe_provenance}` : null,
+    evidence?.universe_source_mode ? `mode ${evidence.universe_source_mode}` : null,
+    evidence?.universe_profile ? `profile ${evidence.universe_profile}` : null,
+    integer(evidence?.records) ? `${formatInteger(evidence.records)} records` : null,
+  ].filter(Boolean).join(' · ');
+  return {
+    scope,
+    evidence: [survivorshipLimitation, provenance].filter(Boolean).join(' · ')
+      || '유니버스 provenance와 생존편향 한계가 payload에 없습니다.',
+    pointInTime,
+    currentListed,
+    sourceRow: evidence,
+    limitation: survivorshipLimitation,
+  };
+}
+
+function renderCanonicalResearch() {
+  const payload = state.v4Payload;
+  if (!payload) return;
+  const target = payload.currentResearchTarget || {};
+  const selected = canonicalSelectedRow(payload);
+  const invested = (target.weights || []).reduce((sum, row) => sum + (Number(row.weight) || 0), 0);
+  setText('#canonical-asof', payload.data?.asOf || '-');
+  setText('#canonical-source', canonicalRequestedThroughText(payload));
+  setText('#canonical-analyzed', `${formatInteger(payload.data?.analyzedSecurityCount)}개`);
+  setText('#canonical-funnel', canonicalCountDefinitions(payload));
+  setText('#canonical-factor', payload.selectedFactor || '-');
+  setText('#canonical-factor-score', `동일 표본 상대 합성 점수 ${formatNumber(selected?.selection_score)} / 100 · 절대 신뢰도 아님`);
+  setText('#canonical-policy', canonicalPolicyLabel(payload, payload.selectedWeightingPolicy));
+  setText('#canonical-policy-version', `${payload.selectedWeightingPolicy || '-'} · v${payload.weightingPolicyRegistry?.policies?.[payload.selectedWeightingPolicy]?.version || '-'}`);
+  setText('#canonical-invested', formatPercent(invested));
+  setText('#canonical-cash', `현금 ${formatPercent(target.cashWeight)} · ${formatInteger(target.selectedSecurityCount)}개 종목`);
+  const universeScope = canonicalUniverseScopeEvidence(payload);
+  setText('#canonical-universe-scope', universeScope.scope);
+  setText('#canonical-universe-evidence', universeScope.evidence);
+  renderCanonicalAllocation(payload);
+  renderCanonicalRanking(payload);
+  renderCanonicalComponents(payload, selected);
+  renderCanonicalPolicies(payload);
+  renderCanonicalGuardrails(payload, selected);
+  renderCanonicalDataContract(payload);
+}
+
+function bindCanonicalControls() {
+  const policy = document.querySelector('#joint-policy-filter');
+  const search = document.querySelector('#joint-factor-search');
+  if (policy && policy.dataset.bound !== 'true') {
+    policy.dataset.bound = 'true';
+    policy.addEventListener('change', () => renderCanonicalRanking(state.v4Payload));
+  }
+  if (search && search.dataset.bound !== 'true') {
+    search.dataset.bound = 'true';
+    search.addEventListener('input', () => renderCanonicalRanking(state.v4Payload));
+  }
+}
+
+function renderAll() {
+  if (!state.data) return;
+  syncTopNAvailability(currentRun(), selectedFactor());
+  renderSummary();
+  renderDiagnostics();
+  renderSelectedFactorMethod();
+  renderFactorReturnChart();
+  renderBacktestChart();
+  renderWindowComparisonChart();
+  renderLeaderTrendChart();
+  renderWeightChart();
+  renderEnsembleWeightChart();
+  renderCurrentOutputTable();
+  renderFactorTable();
+  renderHoldingsTable();
+  renderDailyWeightsAnalysis();
+  renderPeriodRankingTable();
+  renderCanonicalResearch();
+}
+
+function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
+  if (!state.data) {
+    setStatusMessage('데이터를 불러오는 중입니다. 입력값은 데이터 로딩 후 반영됩니다.');
+    return;
+  }
+  setStatusMessage(message);
+  window.setTimeout(() => {
+    renderAll();
+  }, 160);
+}
+
+function presetDisplayName(presetId) {
+  const labels = {
+    latest: '최신 기본 preset',
+    'latest-top20': '최신 기준 · Top 20',
+    'latest-top30': '최신 기준 · Top 30',
+    'prior-seven-sessions-top20': '직전 7개 완료 세션 · Top 20',
+  };
+  return labels[presetId] || presetId || '정적 preset';
+}
+
+function populateResultOptions(manifest) {
+  const select = document.querySelector('#run-select');
+  select.replaceChildren();
+  manifest.entries.forEach((entry) => {
+    const option = document.createElement('option');
+    const market = entry.identity?.keyParts?.marketSnapshot || {};
+    const inputs = entry.normalizedInputs || {};
+    option.value = entry.resultKey;
+    option.textContent = [
+      presetDisplayName(entry.presetId),
+      `실제 기준일 ${market.dataAsOf || inputs.effective_end_date || inputs.end_date || '-'}`,
+      `Top ${inputs.top_n ?? '-'}`,
+    ].join(' · ');
+    select.appendChild(option);
+  });
+  select.value = manifest.defaultResultKey;
+  select.disabled = manifest.entries.length <= 1;
+}
+
+function fillCanonicalForm(entry, normalizedInputs = entry.normalizedInputs, researchInputs = null) {
+  INPUT_FIELDS.forEach((field) => {
+    const element = document.querySelector(`#${field.id}`);
+    if (element && Object.prototype.hasOwnProperty.call(normalizedInputs, field.key)) {
+      element.value = serializeInputValue(field, normalizedInputs[field.key]);
+    }
+  });
+  const evaluationYears = document.querySelector('#input-evaluation-years');
+  if (!evaluationYears) return;
+  if (integer(researchInputs?.evaluationYears)) {
+    evaluationYears.value = String(researchInputs.evaluationYears);
+  } else if (finite(normalizedInputs.evaluation_window_days)) {
+    evaluationYears.value = String(Number(normalizedInputs.evaluation_window_days) / 252);
+  }
+}
+
+function readCanonicalFormRequest() {
+  const selectedResultKey = document.querySelector('#run-select')?.value;
+  const baseEntry = entryByResultKey(state.manifest, selectedResultKey)
+    || state.baseEntry
+    || entryByResultKey(state.manifest, state.manifest.defaultResultKey);
+  if (!baseEntry) throw new Error(LOCAL_API_REQUIRED);
+  const requestedInputs = cloneJson(baseEntry.normalizedInputs);
+  INPUT_FIELDS.forEach((field) => {
+    const element = document.querySelector(`#${field.id}`);
+    requireCondition(element, `canonical 입력 control이 없습니다: ${field.id}`);
+    requestedInputs[field.key] = parseInputValue(field, element.value);
+  });
+  const evaluationYears = Number(document.querySelector('#input-evaluation-years')?.value);
+  if (!Number.isInteger(evaluationYears) || evaluationYears < 1 || evaluationYears > 10) {
+    throw new Error('평가 기간(년)은 1–10 정수여야 합니다.');
+  }
+  if (Number(requestedInputs.evaluation_window_days) !== evaluationYears * 252) {
+    throw new Error('평가 기간(년)과 거래일 창이 다릅니다.');
+  }
+  if (Number(requestedInputs.top_n) < 1 || Number(requestedInputs.top_n) > 50) {
+    throw new Error('Top-N은 1–50 정수여야 합니다.');
+  }
+  applyResearchInputDependencies(requestedInputs);
+  return {
+    baseEntry,
+    requestedInputs,
+    entry: resolveExactEntry(state.manifest, requestedInputs),
+  };
+}
+
+function updateLocation(mode, resultKey, normalizedInputs) {
+  const presetId = entryByResultKey(state.manifest, resultKey)?.presetId || null;
+  const next = `${window.location.pathname}${searchForRequest(
+    resultKey,
+    normalizedInputs,
+    presetId,
+  )}${window.location.hash}`;
+  if (mode === 'push') window.history.pushState({ resultKey }, '', next);
+  if (mode === 'replace') window.history.replaceState({ resultKey }, '', next);
+}
+
+function setInputStatus(message, tone = 'ok') {
+  const status = document.querySelector('#input-status');
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
+}
+
+function resultSourceLabel(source) {
+  if (source === 'local_api') return '로컬 API 계산 결과';
+  if (source === 'static_grid') return '검증된 정적 preset';
+  return '결과 없음';
+}
+
+function setResultSource(source, resultKey = null) {
+  state.resultSource = source;
+  const sourceElement = document.querySelector('#result-source');
+  const keyElement = document.querySelector('#result-key');
+  if (sourceElement) {
+    sourceElement.textContent = resultSourceLabel(source);
+    sourceElement.dataset.source = source || 'none';
+  }
+  if (keyElement) {
+    keyElement.textContent = resultKey || '-';
+    keyElement.title = resultKey || '';
+  }
+}
+
+function showUnavailable(message, requestedInputs = null, baseEntry = null) {
+  state.loadToken += 1;
+  document.body.classList.add('result-unavailable');
+  state.data = null;
+  state.v4Payload = null;
+  state.summary = null;
+  state.entry = null;
+  state.baseEntry = baseEntry || state.baseEntry;
+  setResultSource(null);
+  setInputStatus(message, 'error');
+  if (baseEntry && requestedInputs) fillCanonicalForm(baseEntry, requestedInputs);
+  const statusCard = document.querySelector('#run-status');
+  if (statusCard) {
+    statusCard.replaceChildren();
+    statusCard.textContent = `검증 실패 · 이전 결과를 숨겼습니다. ${message}`;
+    statusCard.removeAttribute('aria-busy');
+    statusCard.classList.remove('is-updating');
+  }
+}
+
+function showLoading(message) {
+  setStatusMessage(message);
+  setInputStatus(message, 'pending');
+}
+
+function showResult() {
+  document.body.classList.remove('result-unavailable');
+}
+
+function installValidatedPayload({
+  entry,
+  baseEntry = entry,
+  payload,
+  summary = null,
+  source,
+}) {
+  const adapted = adaptSchemaV4Payload(payload);
+  requireCondition(
+    adapted?.schema_version === 1 && Array.isArray(adapted.runs) && adapted.runs.length === 1,
+    '지원하지 않는 대시보드 adapter 결과입니다.',
+  );
+  state.entry = entry;
+  state.baseEntry = baseEntry;
+  state.summary = summary;
+  state.v4Payload = payload;
+  state.data = adapted;
+  state.activeRunIndex = Number.isInteger(adapted.latest_run_index)
+    ? adapted.latest_run_index
+    : 0;
+  state.hasUserSelectedFactor = false;
+  fillControls();
+  populateCanonicalPolicyFilter(payload);
+  bindCanonicalControls();
+  fillCanonicalForm(baseEntry, entry.normalizedInputs, payload.researchInputs);
+  setResultSource(source, entry.resultKey);
+  renderAll();
+  showResult();
+}
+
+async function loadEntry(entry, options = {}) {
+  const token = ++state.loadToken;
+  showLoading('manifest의 선택된 Python detail/summary를 검증해 불러오는 중입니다...');
+  try {
+    const loaded = await loadStaticEntryData(entry, {
+      manifestUrl: state.manifestUrl,
+      pageUrl: window.location.href,
+    });
+    if (token !== state.loadToken) return;
+    installValidatedPayload({
+      entry,
+      payload: loaded.payload,
+      summary: loaded.summary,
+      source: 'static_grid',
+    });
+    if (options.historyMode) {
+      updateLocation(options.historyMode, entry.resultKey, entry.normalizedInputs);
+    }
+    const sidecarNote = loaded.payload.__factorHoldingHistorySidecarError
+      ? ` · 팩터별 보유 이력은 검증 실패로 canonical 선택 팩터만 표시: ${loaded.payload.__factorHoldingHistorySidecarError}`
+      : '';
+    setInputStatus(
+      `정확히 일치하는 검증된 정적 preset을 열었습니다: ${entry.resultKey.slice(0, 12)}…${sidecarNote}`,
+      loaded.payload.__factorHoldingHistorySidecarError ? 'pending' : 'ok',
+    );
+  } catch (error) {
+    if (token !== state.loadToken) return;
+    showUnavailable(
+      `결과를 표시할 수 없습니다: ${error.message}`,
+      entry.normalizedInputs,
+      entry,
+    );
+    console.error(error);
+  }
+}
+
+async function loadLocalApiResult(requestedInputs, baseEntry, options = {}) {
+  const token = ++state.loadToken;
+  const researchInputs = researchInputsFromNormalizedInputs(requestedInputs);
+  if (options.historyMode) {
+    updateLocation(options.historyMode, baseEntry.resultKey, requestedInputs);
+  }
+  showLoading('로컬 Python API에서 실제시장 2,700개 이상 전체 grid를 계산하는 중입니다...');
+  setInputStatus(
+    `로컬 API(${LOCAL_API_BASE_URL})에 canonical ResearchInputs를 제출하는 중입니다.`,
+    'pending',
+  );
+  try {
+    const submission = await fetchLocalApiJson('/api/runs', {
+      method: 'POST',
+      body: researchInputs,
+    });
+    const payload = await resolveLocalApiResult(submission, token);
+    if (token !== state.loadToken) return;
+    const identity = payload.resultIdentity;
+    const normalizedInputs = identity?.keyParts?.normalizedInputs;
+    requireCondition(
+      isRecord(identity) && isRecord(normalizedInputs),
+      '로컬 API 결과 identity가 없습니다.',
+    );
+    const entry = {
+      resultKey: payload.resultKey,
+      normalizedInputs,
+      identity,
+    };
+    await validateIdentityDigest(identity, 'local API detail');
+    await validateResult(entry, payload, null, {
+      source: 'local_api',
+      expectedResearchInputs: researchInputs,
+    });
+    await attachFactorHoldingHistorySidecar(payload, {
+      pageUrl: window.location.href,
+    });
+    if (token !== state.loadToken) return;
+    installValidatedPayload({
+      entry,
+      baseEntry,
+      payload,
+      source: 'local_api',
+    });
+    updateLocation('replace', baseEntry.resultKey, normalizedInputs);
+    setInputStatus(
+      `로컬 API가 검증된 새 Python 결과를 열었습니다: ${payload.resultKey.slice(0, 12)}…`,
+      'ok',
+    );
+  } catch (error) {
+    if (token !== state.loadToken) return;
+    showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`, requestedInputs, baseEntry);
+    console.error(error);
+  }
+}
+
+function bindBrowserContractControls() {
+  if (state.browserControlsBound) return;
+  state.browserControlsBound = true;
+  document.querySelector('#run-select').addEventListener('change', (event) => {
+    const entry = entryByResultKey(state.manifest, event.target.value);
+    if (!entry) {
+      showUnavailable('선택한 정적 preset이 manifest에 없습니다.');
+      return;
+    }
+    state.hasUserSelectedFactor = false;
+    fillCanonicalForm(entry);
+    loadEntry(entry, { historyMode: 'push' });
+  });
+  document.querySelector('#input-evaluation-years').addEventListener('change', (event) => {
+    if (finite(event.target.value)) {
+      document.querySelector('#input-evaluation-window-days').value = String(
+        Math.round(Number(event.target.value) * 252),
+      );
+    }
+  });
+  document.querySelector('#input-evaluation-window-days').addEventListener('change', (event) => {
+    if (finite(event.target.value)) {
+      document.querySelector('#input-evaluation-years').value = String(
+        Number(event.target.value) / 252,
+      );
+    }
+  });
+  document.querySelector('#research-input-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    try {
+      const request = readCanonicalFormRequest();
+      if (request.entry) {
+        loadEntry(request.entry, { historyMode: 'push' });
         return;
       }
-      path += `${active ? "L" : "M"}${x(index).toFixed(2)},${y(Number(value)).toFixed(2)} `;
-      active = true;
-    });
-    return path.trim();
-  }
-
-  function renderPerformanceChart(row) {
-    const performance = state.payload.performance;
-    if (row.policy_id !== performance.weightingPolicyId) {
-      $("#performance-chart").innerHTML = '<p class="empty-row">이 조합의 성과 곡선은 현재 정적 detail에 포함되지 않았습니다. 브라우저가 다른 정책의 곡선을 추정하지 않습니다.</p>';
-      return;
-    }
-    const factorValues = performance.factorCurves[row.factor] || [];
-    const benchmarkValues = Array.isArray(performance.benchmarkCurve) ? performance.benchmarkCurve : [];
-    const all = [...factorValues, ...benchmarkValues].filter(finite).map(Number);
-    if (!all.length) {
-      $("#performance-chart").innerHTML = '<p class="empty-row">Python payload에 표시할 성과 곡선이 없습니다.</p>';
-      return;
-    }
-    const width = 900;
-    const height = 350;
-    const margin = { top: 24, right: 24, bottom: 40, left: 58 };
-    const count = Math.max(factorValues.length, benchmarkValues.length, 2);
-    let min = Math.min(...all);
-    let max = Math.max(...all);
-    if (min === max) { min -= 0.1; max += 0.1; }
-    const padding = (max - min) * 0.08;
-    min -= padding;
-    max += padding;
-    const x = (index) => margin.left + index / (count - 1) * (width - margin.left - margin.right);
-    const y = (value) => margin.top + (max - value) / (max - min) * (height - margin.top - margin.bottom);
-    const ticks = Array.from({ length: 5 }, (_, index) => min + (max - min) * index / 4);
-    const grid = ticks.map((value) => `
-      <line x1="${margin.left}" x2="${width - margin.right}" y1="${y(value)}" y2="${y(value)}" class="chart-grid-line" />
-      <text x="${margin.left - 10}" y="${y(value) + 4}" text-anchor="end" class="chart-axis-label">${fmtNumber(value, 2)}</text>`).join("");
-    const dates = performance.dates || [];
-    $("#performance-chart").innerHTML = `
-      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(row.factor)} 누적 성과">
-        ${grid}
-        <path d="${svgPath(benchmarkValues, x, y)}" class="chart-line-benchmark" />
-        <path d="${svgPath(factorValues, x, y)}" class="chart-line-factor" />
-        <text x="${margin.left}" y="${height - 10}" class="chart-axis-label">${escapeHtml(dates[0] || "")}</text>
-        <text x="${width - margin.right}" y="${height - 10}" text-anchor="end" class="chart-axis-label">${escapeHtml(dates.at(-1) || "")}</text>
-      </svg>
-      <div class="chart-legend"><span class="legend-key">${escapeHtml(row.factor)} · ${escapeHtml(policyLabel(state.payload, row.policy_id))}</span><span class="legend-key benchmark">${escapeHtml(state.payload.data.benchmark)}</span></div>`;
-  }
-
-  function renderFactorDetail() {
-    const row = detailRankingRow();
-    if (!row) return;
-    const definition = definitionFor(row.factor);
-    $("#detail-title").textContent = `${row.factor} × ${policyLabel(state.payload, row.policy_id)}`;
-    $("#factor-formula").textContent = definition.formula || definition.definition || "정의 미표기";
-    $("#factor-description").textContent = definition.description || "설명 미표기";
-    $("#factor-category").textContent = row.category || definition.category || "other";
-    const metrics = [
-      ["선택 점수", fmtNumber(row.selection_score, 1), "Python joint score"],
-      ["기본 합성", fmtNumber(row.base_composite_score, 1), "절대 guardrail 전"],
-      ["CAGR", fmtPercent(row.cagr), "비용 차감"],
-      ["Sharpe", fmtNumber(row.sharpe), "exact daily risk"],
-      ["Sortino", fmtNumber(row.sortino), "하방 위험"],
-      ["Calmar", fmtNumber(row.calmar), "CAGR / |MDD|"],
-      ["MDD", fmtPercent(row.max_drawdown), "최대 낙폭"],
-      ["회전율", fmtPercent(row.annualized_turnover), "Python 연환산"],
-      ["비용 drag", fmtPercent(row.annualized_cost_drag), "Python 연환산"],
-    ];
-    $("#factor-metrics").innerHTML = metrics.map(([label, value, context]) => `<article class="metric-card"><span>${label}</span><strong>${value}</strong><small>${context}</small></article>`).join("");
-    const scoreWeights = state.payload.selectionMethod.weights || {};
-    $("#component-bars").innerHTML = Object.entries(COMPONENT_LABELS).map(([key, label]) => {
-      const score = row[`${key}_score`];
-      const weight = Number(scoreWeights[key] || 0);
-      return `
-        <div class="component-row">
-          <div class="component-label"><span>${label}</span><span>${fmtNumber(score, 1)} × ${fmtPercent(weight, 0)}</span></div>
-          <span class="bar-track"><span class="bar-fill" style="width:${finite(score) ? Math.max(0, Math.min(100, Number(score))) : 0}%"></span></span>
-        </div>`;
-    }).join("");
-    renderPerformanceChart(row);
-    renderRiskDiagnostics();
-  }
-
-  function renderRiskDiagnostics() {
-    const payload = state.payload;
-    const row = detailRankingRow();
-    if (!row) return;
-    const isSelectedPair = row.selected === true
-      && row.factor === payload.selectedFactor
-      && row.policy_id === payload.selectedWeightingPolicy;
-    const diagnostics = isSelectedPair ? (payload.contributionDiagnostics || {}) : {};
-    const event = diagnostics.maxExactSingleSessionSecurityContribution || {};
-    const profile = payload.selectionDecision?.guardrailProfile || {};
-    const leaveOne = isSelectedPair && Array.isArray(diagnostics.topLeaveOneSecurity) ? diagnostics.topLeaveOneSecurity : [];
-    const statusCounts = payload.factorPolicyRanking.reduce((counts, item) => {
-      const status = item.selection_status || item.comparison_status || "unknown";
-      counts[status] = (counts[status] || 0) + 1;
-      return counts;
-    }, {});
-    const excludedCount = Object.entries(statusCounts)
-      .filter(([status]) => status !== "eligible")
-      .reduce((sum, [, count]) => sum + count, 0);
-    $("#risk-status-badge").textContent = `${row.selection_status || "미표기"} · 제외 ${fmtCount(excludedCount)}개`;
-    const riskMetrics = [
-      ["단일 종목·세션 기여", fmtPercent(row.max_abs_security_day_contribution, 2), isSelectedPair ? `${event.symbol || "—"} · ${event.date || "날짜 미표기"}` : "현재 상세 조합 scalar"],
-      ["종목 절대기여 점유율", fmtPercent(row.max_security_absolute_contribution_share, 2), isSelectedPair ? (diagnostics.largestAbsoluteContributionSecurity?.symbol || "—") : "현재 상세 조합 scalar"],
-      ["Leave-one CAGR 변화", fmtPercent(row.max_abs_leave_one_security_cagr_delta, 2), isSelectedPair ? (diagnostics.maxLeaveOneSecurity?.symbol || "—") : "현재 상세 조합 scalar"],
-      ["절대기여 HHI", fmtNumber(row.absolute_contribution_hhi, 4), isSelectedPair ? `${fmtCount(diagnostics.observedReturnCount)}개 관측수익 보존` : "현재 상세 조합 scalar"],
-      ["극단 이벤트 제외", fmtCount(statusCounts.extreme_event_excluded || 0), `전체 ${fmtCount(payload.factorPolicyRanking.length)}개 행`],
-      ["귀속 잔차 최대", fmtNumber(row.attribution_max_residual, 8), isSelectedPair ? (diagnostics.attributionMethod || "—") : (row.contribution_attribution_method || "—")],
-    ];
-    $("#risk-metrics").innerHTML = riskMetrics.map(([label, value, context]) => `<article class="metric-card"><span>${escapeHtml(label)}</span><strong>${value}</strong><small>${escapeHtml(context)}</small></article>`).join("");
-
-    $("#guardrail-profile-label").textContent = `${profile.id || "—"} · ${profile.policyNeutral ? "정책 중립" : "정책별"} · ${profile.extremeEventAction || "—"}`;
-    $("#guardrail-rules-table tbody").innerHTML = (profile.rules || []).map((rule) => {
-      const threshold = String(rule.unit || "").includes("fraction") ? fmtPercent(rule.threshold, 2) : fmtNumber(rule.threshold, 4);
-      return `<tr><td><strong>${escapeHtml(rule.id)}</strong></td><td>${escapeHtml(rule.metric)}</td><td>${escapeHtml(rule.operator)} ${threshold}</td><td>${escapeHtml(rule.unit || "—")}</td></tr>`;
-    }).join("");
-
-    const breaches = [
-      ...rowReasonCodes(row),
-    ];
-    const statusItems = [
-      ["상세 조합", `${row.factor} × ${row.policy_id}`],
-      ["선택 상태", row.selection_status || row.comparison_status || "—"],
-      ["절대 가드레일", row.absolute_guardrail_pass === true ? "통과" : "미통과"],
-      ["기여도 가드레일", row.contribution_guardrail_pass === true ? "통과" : "미통과"],
-      ["위반·제외 사유", breaches.length ? [...new Set(breaches)].join(" · ") : "없음"],
-      ["이벤트 처리", `${profile.extremeEventAction || "—"} · penalty ${fmtNumber(row.extreme_event_penalty_points, 1)}`],
-      ["상태별 행 수", Object.entries(statusCounts).map(([status, count]) => `${status} ${count}`).join(" · ")],
-    ];
-    $("#guardrail-status").innerHTML = statusItems.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
-
-    $("#max-event-scope").textContent = isSelectedPair ? "선택 조합 관측 결과 · ticker/date 하드코딩 없음" : "선택 조합에서만 상세 이벤트 제공";
-    $("#leave-one-scope").textContent = isSelectedPair ? "선택 조합 · 재최적화 없이 실현 기여 제거" : "현재 행은 scalar 민감도만 제공";
-    const eventItems = isSelectedPair ? [
-      ["종목 / 종료일", `${event.symbol || "—"} / ${event.date || "—"}`],
-      ["관측 구간", `${event.intervalStart || "—"} → ${event.date || "—"} · ${fmtCount(event.returnIntervalSessions)}세션`],
-      ["시작 비중", fmtPercent(event.startWeight, 2)],
-      ["종목 수익", fmtPercent(event.securityReturn, 2)],
-      ["포트폴리오 기여", fmtPercent(event.contribution, 2)],
-      ["당일 포트폴리오 수익", fmtPercent(event.portfolioReturn, 2)],
-      ["관측수익 보존", diagnostics.observedReturnsPreserved === true ? "예" : "아니오"],
-    ] : [
-      ["상세 범위", "이벤트 ticker/date와 leave-one 목록은 canonical selected pair에만 포함됩니다."],
-      ["현재 행 단일 기여", fmtPercent(row.max_abs_security_day_contribution, 2)],
-      ["현재 행 leave-one 변화", fmtPercent(row.max_abs_leave_one_security_cagr_delta, 2)],
-    ];
-    $("#max-event-contract").innerHTML = eventItems.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
-    $("#leave-one-table tbody").innerHTML = leaveOne.map((item) => `
-      <tr>
-        <td><strong>${escapeHtml(item.symbol || "—")}</strong></td>
-        <td>${fmtPercent(item.baseCagr, 2)}</td>
-        <td>${fmtPercent(item.leaveOneCagr, 2)}</td>
-        <td>${fmtPercent(item.absoluteCagrDelta, 2)}</td>
-        <td>${escapeHtml(item.method || "—")}${item.reoptimized === false ? " · frozen" : ""}</td>
-      </tr>`).join("") || `<tr><td colspan="5">${isSelectedPair ? "Python payload에 leave-one 진단이 없습니다." : "현재 행은 factorPolicyRanking의 leave-one scalar만 표시합니다."}</td></tr>`;
-  }
-
-  function renderDataScope() {
-    const payload = state.payload;
-    const data = payload.data;
-    $("#flow-requested").textContent = fmtCount(data.requestedCandidateCount);
-    $("#flow-returned").textContent = fmtCount(data.providerReturnedCandidateCount);
-    $("#flow-analyzed").textContent = fmtCount(data.analyzedSecurityCount);
-    $("#flow-eligible").textContent = fmtCount(data.latestEligibleSecurityCount);
-    const priceSourceCounts = payload.priceSources.reduce((counts, row) => {
-      const source = String(row.price_source || "unknown");
-      counts[source] = (counts[source] || 0) + 1;
-      return counts;
-    }, {});
-    const sourceStatusCounts = payload.sourceHealth.reduce((counts, row) => {
-      const status = String(row.status || "unknown");
-      counts[status] = (counts[status] || 0) + 1;
-      return counts;
-    }, {});
-    const compactCounts = (counts) => Object.entries(counts)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, count]) => `${key}:${fmtCount(count)}`)
-      .join(" · ");
-    const items = [
-      ["요청 종료일", data.requestedThrough || "—"],
-      ["실제 기준일", data.asOf],
-      ["관측 시작", data.startDate],
-      ["거래일 수", fmtCount(data.observations)],
-      ["제공자", data.provider || "—"],
-      ["종목별 가격 출처", compactCounts(priceSourceCounts)],
-      ["수집 상태", compactCounts(sourceStatusCounts)],
-      ["가격 기준", data.priceBasis || "—"],
-      ["거래량 기준", data.volumeBasis || "—"],
-      ["입력 SHA-256", formatDigestMap(data.inputSha256)],
-    ];
-    $("#data-contract").innerHTML = items.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
-    const limitations = payload.researchScope?.limitations || [];
-    $("#limitations-list").innerHTML = limitations.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-    const notes = Array.isArray(data.notes) ? data.notes.join(" · ") : "";
-    $("#data-note").textContent = `${modeLabel(data.mode)} · ${evidenceLabel(payload.researchScope?.evidenceStatus)}${notes ? ` · ${notes}` : ""}`;
-  }
-
-  function renderMethodology() {
-    const payload = state.payload;
-    const method = payload.selectionMethod;
-    const accounting = payload.gridAccounting || {};
-    $("#method-description").textContent = `${fmtCount(accounting.availableIndependentPairCount)}개 유효 독립 팩터×정책 조합을 하나의 Python 점수표에서 직접 비교했습니다. 정책별 집계는 선택에 사용하지 않는 진단 정보입니다.`;
-    $("#method-decision").textContent = `${method.version} · ${method.guardrailVersion} · 신호 ${method.signalTiming} → 체결 ${method.executionTiming} → 첫 수익 ${method.returnExposureStarts} · 최소 ${fmtCount(method.minimumObservations)} 관측.`;
-    $("#method-weights").innerHTML = Object.entries(method.weights || {}).map(([key, weight]) => `
-      <div class="method-weight">
-        <span>${COMPONENT_LABELS[key] || key}</span>
-        <span class="bar-track"><span class="bar-fill" style="width:${Number(weight) * 100}%"></span></span>
-        <strong>${fmtPercent(weight, 0)}</strong>
-      </div>`).join("");
-  }
-
-  function renderAll() {
-    renderOverview();
-    renderAllocation();
-    renderPolicies();
-    renderFactorFilters();
-    renderFactorComparison();
-    renderFactorDetail();
-    renderDataScope();
-    renderMethodology();
-  }
-
-  async function sha256Hex(bytes) {
-    requireCondition(globalThis.crypto?.subtle, "브라우저 SHA-256 검증 기능을 사용할 수 없습니다.");
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
-  }
-
-  async function canonicalSha256(value) {
-    return sha256Hex(new TextEncoder().encode(canonicalString(value)));
-  }
-
-  async function validateIdentityDigest(identity, label) {
-    const canonical = typeof identity.canonicalKeyPartsJson === "string"
-      ? identity.canonicalKeyPartsJson
-      : canonicalString(identity.keyParts);
-    const bytes = new TextEncoder().encode(canonical);
-    requireCondition(await sha256Hex(bytes) === identity.resultKey, `${label} resultKey가 canonical keyParts SHA-256과 다릅니다.`);
-  }
-
-  async function fetchJson(url, label, reference) {
-    const response = await fetch(url, { cache: "no-store" });
-    if (!response.ok) throw new Error(`${label} HTTP ${response.status}`);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (reference !== undefined) {
-      requireCondition(isRecord(reference), `${label} artifact reference가 없습니다.`);
-      requireCondition(bytes.byteLength === reference.bytes, `${label} byte count가 manifest와 다릅니다.`);
-      requireCondition(await sha256Hex(bytes) === reference.sha256, `${label} SHA-256이 manifest와 다릅니다.`);
-    }
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  }
-
-  async function fetchLocalApiJson(path, options = {}) {
-    const url = new URL(path, `${LOCAL_API_BASE_URL}/`).href;
-    let response;
-    try {
-      response = await fetch(url, {
-        cache: "no-store",
-        method: options.method || "GET",
-        headers: {
-          Accept: "application/json",
-          ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(options.body === undefined ? {} : { body: canonicalString(options.body) }),
+      const apiRequest = localApiRequestFromStaticState(
+        state.manifest,
+        request.requestedInputs,
+      );
+      loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
+        historyMode: 'push',
       });
     } catch (error) {
-      throw new Error(`로컬 API(${LOCAL_API_BASE_URL})에 연결할 수 없습니다: ${error.message}`);
+      showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`);
     }
-    let body;
-    try {
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-    } catch (error) {
-      throw new Error(`로컬 API 응답 JSON이 잘못되었습니다: ${error.message}`);
-    }
-    if (!response.ok) {
-      const detail = body?.error?.message || `HTTP ${response.status}`;
-      throw new Error(`로컬 API가 실행을 거절했습니다: ${detail}`);
-    }
-    return { statusCode: response.status, body };
-  }
+  });
+  document.querySelector('#reset-default-inputs').addEventListener('click', () => {
+    const entry = entryByResultKey(state.manifest, state.manifest.defaultResultKey);
+    requireCondition(entry, 'manifest 기본 entry가 없습니다.');
+    fillCanonicalForm(entry);
+    loadEntry(entry, { historyMode: 'push' });
+  });
+  window.addEventListener('popstate', () => loadFromLocation());
+}
 
-  function waitForPoll() {
-    return new Promise((resolve) => setTimeout(resolve, LOCAL_API_POLL_INTERVAL_MS));
-  }
-
-  async function resolveLocalApiResult(submission, token) {
-    if (submission.statusCode === 200) return submission.body;
-    requireCondition(
-      submission.statusCode === 202
-        && validSha256(submission.body?.resultKey)
-        && typeof submission.body?.statusUrl === "string",
-      "로컬 API 제출 응답 계약이 잘못되었습니다.",
-    );
-    let statusUrl = submission.body.statusUrl;
-    while (token === state.loadToken) {
-      const statusResponse = await fetchLocalApiJson(statusUrl);
-      const status = statusResponse.body;
-      requireCondition(status.resultKey === submission.body.resultKey, "로컬 API status resultKey가 제출 결과와 다릅니다.");
-      if (status.status === "complete") {
-        requireCondition(isRecord(status.result), "완료된 로컬 API status에 canonical 결과가 없습니다.");
-        return status.result;
-      }
-      if (status.status === "failed") {
-        throw new Error(`로컬 Python 분석 실패: ${status.error?.message || "원인 미표기"}`);
-      }
-      requireCondition(status.status === "queued" || status.status === "running", "로컬 API job status가 잘못되었습니다.");
-      setInputStatus(`로컬 Python 분석 ${status.status} · ${submission.body.resultKey.slice(0, 12)}…`, "pending");
-      await waitForPoll();
-      statusUrl = status.statusUrl || statusUrl;
-    }
-    throw new Error("다른 결과 로드가 시작되어 로컬 API 표시를 취소했습니다.");
-  }
-
-  async function loadLocalApiResult(requestedInputs, baseEntry, options = {}) {
-    const token = ++state.loadToken;
-    const researchInputs = researchInputsFromNormalizedInputs(requestedInputs);
-    if (options.historyMode) updateLocation(options.historyMode, baseEntry.resultKey, requestedInputs);
-    showLoading("로컬 Python API에서 실제시장 2,700+ 전체 grid를 계산하는 중…");
-    setInputStatus(`로컬 API(${LOCAL_API_BASE_URL})에 canonical 입력을 제출하는 중입니다.`, "pending");
-    try {
-      const submission = await fetchLocalApiJson("/api/runs", {
-        method: "POST",
-        body: researchInputs,
-      });
-      const payload = await resolveLocalApiResult(submission, token);
-      if (token !== state.loadToken) return;
-      const identity = payload.resultIdentity;
-      const normalizedInputs = identity?.keyParts?.normalizedInputs;
-      requireCondition(isRecord(identity) && isRecord(normalizedInputs), "로컬 API 결과 identity가 없습니다.");
-      const entry = {
-        resultKey: payload.resultKey,
-        normalizedInputs,
-        identity,
-      };
-      await validateIdentityDigest(identity, "local API detail");
-      const selected = await validateResult(entry, payload, null, {
-        source: "local_api",
-        expectedResearchInputs: researchInputs,
-      });
-      state.entry = entry;
-      state.payload = payload;
-      state.summary = null;
-      state.detailPairKey = pairKey(selected);
-      state.category = "all";
-      state.search = "";
-      fillForm(baseEntry, normalizedInputs, payload.researchInputs);
-      $("#result-key").textContent = payload.resultKey;
-      setResultSource("local_api");
-      updateLocation("replace", baseEntry.resultKey, normalizedInputs);
-      renderAll();
-      showResult();
-      setInputStatus(`로컬 API가 새 Python 결과를 계산했습니다: ${payload.resultKey.slice(0, 12)}…`, "ok");
-    } catch (error) {
-      if (token !== state.loadToken) return;
-      showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`, requestedInputs, baseEntry);
-      console.error(error);
-    }
-  }
-
-  async function loadEntry(entry, options = {}) {
-    const token = ++state.loadToken;
-    showLoading("manifest의 정확한 Python detail/summary를 불러오는 중…");
-    const detailUrl = new URL(entry.detail.path, state.manifestUrl).href;
-    const summaryUrl = new URL(entry.summary.path, state.manifestUrl).href;
-    try {
-      const [payload, summary] = await Promise.all([
-        fetchJson(detailUrl, "detail", entry.detail),
-        fetchJson(summaryUrl, "summary", entry.summary),
-      ]);
-      if (token !== state.loadToken) return;
-      await validateIdentityDigest(entry.identity, "manifest/detail/summary");
-      const selected = await validateResult(entry, payload, summary);
-      state.entry = entry;
-      state.payload = payload;
-      state.summary = summary;
-      state.detailPairKey = pairKey(selected);
-      state.category = "all";
-      state.search = "";
-      fillForm(entry, entry.normalizedInputs, payload.researchInputs);
-      $("#result-key").textContent = entry.resultKey;
-      setResultSource("static_grid");
-      renderAll();
-      showResult();
-      setInputStatus(`정확히 일치하는 사전 계산 결과를 열었습니다: ${entry.resultKey.slice(0, 12)}…`, "ok");
-      if (options.historyMode) updateLocation(options.historyMode, entry.resultKey, entry.normalizedInputs);
-    } catch (error) {
-      if (token !== state.loadToken) return;
-      showUnavailable(`결과를 표시할 수 없습니다: ${error.message}`, entry.normalizedInputs, entry);
-      console.error(error);
-    }
-  }
-
-  function bindControls() {
-    if (state.controlsBound) return;
-    state.controlsBound = true;
-    $("#input-result-key").addEventListener("change", (event) => {
-      const entry = entryByResultKey(state.manifest, event.target.value);
-      if (entry) {
-        fillForm(entry);
-        setInputStatus("스냅샷 입력을 채웠습니다. 적용 버튼을 눌러 정확한 결과를 여세요.", "pending");
-      }
-    });
-    $("#input-evaluation-years").addEventListener("change", (event) => {
-      if (finite(event.target.value)) $("#input-evaluation-window-days").value = String(Math.round(Number(event.target.value) * 252));
-    });
-    $("#input-evaluation-window-days").addEventListener("change", (event) => {
-      if (finite(event.target.value)) $("#input-evaluation-years").value = (Number(event.target.value) / 252).toFixed(2).replace(/\.00$/, "");
-    });
-    $("#research-input-form").addEventListener("submit", (event) => {
-      event.preventDefault();
-      try {
-        const request = readFormRequest();
-        if (!request.entry) {
-          const apiRequest = localApiRequestFromStaticState(state.manifest, request.requestedInputs);
-          loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, { historyMode: "push" });
-          return;
+function bindDashboardControls() {
+  if (state.dashboardControlsBound) return;
+  state.dashboardControlsBound = true;
+  if (typeof document.querySelectorAll === 'function') {
+    document.querySelectorAll('[data-topn-preset]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const input = document.querySelector('#topn-input');
+        if (input) {
+          input.value = button.getAttribute('data-topn-preset') || DASHBOARD_INPUT_DEFAULTS.topN;
         }
-        loadEntry(request.entry, { historyMode: "push" });
-      } catch (error) {
-        showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`);
-      }
+        syncTopNAvailability(currentRun(), selectedFactor());
+        renderWithBusy('상위 종목 수 프리셋을 반영하는 중입니다...');
+      });
     });
-    $("#reset-default-inputs").addEventListener("click", () => {
-      const entry = entryByResultKey(state.manifest, state.manifest.defaultResultKey);
-      fillForm(entry);
-      loadEntry(entry, { historyMode: "push" });
-    });
-    $("#category-filter").addEventListener("change", (event) => {
-      state.category = event.target.value;
-      renderFactorComparison();
-    });
-    $("#factor-search").addEventListener("input", (event) => {
-      state.search = event.target.value.trim();
-      renderFactorComparison();
-    });
-    window.addEventListener("popstate", () => loadFromLocation());
-  }
-
-  async function loadFromLocation(options = {}) {
-    const request = requestFromSearch(state.manifest, window.location.search);
-    if (!request.baseEntry) {
-      showUnavailable(request.error);
-      return;
-    }
-    if (!request.entry) {
-      const apiRequest = localApiRequestFromStaticState(state.manifest, request.requestedInputs);
-      await loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, { historyMode: "replace" });
-      return;
-    }
-    await loadEntry(request.entry, {
-      historyMode: options.replaceHistory || request.recoveredFromRotatedResult ? "replace" : null,
+    document.querySelectorAll('[data-max-weight-preset]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const input = document.querySelector('#max-weight-input');
+        if (input) {
+          input.value = button.getAttribute('data-max-weight-preset')
+            || DASHBOARD_INPUT_DEFAULTS.maxWeightPercent;
+        }
+        renderWithBusy('최대 비중 프리셋을 반영하는 중입니다...');
+      });
     });
   }
+  document.querySelector('#factor-select').addEventListener('change', () => {
+    state.hasUserSelectedFactor = true;
+    syncFactorDependentControls(currentRun(), selectedFactor(), selectedDate());
+    renderWithBusy('선택 팩터를 반영하는 중입니다...');
+  });
+  ['#date-select', '#window-select'].forEach((selector) => {
+    document.querySelector(selector).addEventListener('input', () => {
+      syncDefaultFactorToCurrentBasis();
+      renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
+    });
+    document.querySelector(selector).addEventListener('change', () => {
+      syncDefaultFactorToCurrentBasis();
+      renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
+    });
+  });
+  [
+    '#lookback-months-select',
+    '#topn-input',
+    '#max-weight-input',
+    '#rebalance-select',
+    '#transaction-cost-input',
+    '#slippage-input',
+  ].forEach((selector) => {
+    document.querySelector(selector).addEventListener(
+      'input',
+      () => renderWithBusy('선택값을 반영하는 중입니다...'),
+    );
+    document.querySelector(selector).addEventListener(
+      'change',
+      () => renderWithBusy('선택값을 반영하는 중입니다...'),
+    );
+  });
+}
 
-  async function load() {
-    initTheme();
-    showLoading("정적 grid manifest를 불러오는 중…");
-    try {
-      state.manifestUrl = new URL(MANIFEST_URL, window.location.href);
-      state.manifest = validateManifest(await fetchJson(state.manifestUrl.href, "manifest"));
-      populateResultOptions(state.manifest);
-      bindControls();
-      await loadFromLocation({ replaceHistory: !window.location.search });
-    } catch (error) {
-      showUnavailable(`정적 grid를 사용할 수 없습니다: ${error.message}`);
-      console.error(error);
-    }
+async function loadFromLocation(options = {}) {
+  const request = requestFromSearch(state.manifest, window.location.search);
+  if (!request.baseEntry) {
+    showUnavailable(request.error);
+    return;
   }
-
-  if (typeof globalThis !== "undefined") {
-    globalThis.__MFL_WEB_TESTS__ = {
-      INPUT_FIELDS,
-      LOCAL_API_REQUIRED,
-      LOCAL_API_BASE_URL,
-      canonicalString,
-      validateManifest,
-      resolveExactEntry,
-      requestFromSearch,
-      searchForRequest,
-      researchInputsFromNormalizedInputs,
-      localApiRequestFromStaticState,
-      validateGridAccounting,
-      validateResult,
-      fetchJson,
-      fetchLocalApiJson,
-      resolveLocalApiResult,
-      rowReasonCodes,
-    };
+  if (!request.entry) {
+    const apiRequest = localApiRequestFromStaticState(state.manifest, request.requestedInputs);
+    await loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
+      historyMode: 'replace',
+    });
+    return;
   }
+  await loadEntry(request.entry, {
+    historyMode: options.replaceHistory || request.recoveredFromRotatedResult
+      ? 'replace'
+      : null,
+  });
+}
 
-  if (hasDom) load();
-})();
+async function loadBrowserDashboard() {
+  showLoading('bounded static-grid manifest를 검증하는 중입니다...');
+  try {
+    state.manifestUrl = new URL(MANIFEST_URL, window.location.href);
+    const rawManifest = await fetchJson(state.manifestUrl.href, 'manifest');
+    state.manifest = validateManifest(rawManifest);
+    await Promise.all(
+      state.manifest.entries.map((entry, index) => (
+        validateIdentityDigest(entry.identity, `manifest.entries[${index}]`)
+      )),
+    );
+    populateResultOptions(state.manifest);
+    bindBrowserContractControls();
+    bindDashboardControls();
+    await loadFromLocation({ replaceHistory: !window.location.search });
+  } catch (error) {
+    showUnavailable(`정적 grid를 사용할 수 없습니다: ${error.message}`);
+    console.error(error);
+  }
+}
+
+if (typeof globalThis !== 'undefined') {
+  globalThis.__MFL_WEB_TESTS__ = {
+    INPUT_FIELDS,
+    LOCAL_API_REQUIRED,
+    LOCAL_API_BASE_URL,
+    canonicalString,
+    validateIdentity,
+    validateManifest,
+    resolveExactEntry,
+    requestFromSearch,
+    searchForRequest,
+    researchInputsFromNormalizedInputs,
+    localApiRequestFromStaticState,
+    validateTargetAllocation,
+    validateFactorPortfolios,
+    validateFactorDiagnostics,
+    validatePerformance,
+    validateBacktestHeldPortfolio,
+    validateSelectedBacktestHoldingHistory,
+    validateFactorHoldingHistorySidecarManifest,
+    validateFactorHoldingHistorySidecarData,
+    validateGridAccounting,
+    validateResult,
+    sha256Hex,
+    validateIdentityDigest,
+    fetchJson,
+    fetchLocalApiJson,
+    resolveLocalApiResult,
+    loadStaticEntryData,
+    attachFactorHoldingHistorySidecar,
+    resultSourceLabel,
+    rowReasonCodes,
+    adaptSchemaV4Payload,
+    v4BenchmarkCurves,
+    v4CurveReturn,
+    v4CommonEvaluationPeriod,
+    periodFactorStatsIncludingDiagnostic,
+    seriesPointsThroughDate,
+    commonEvaluationSeriesPoints,
+    commonEvaluationSeriesSegments,
+    dateTickMarks,
+    niceReturnTicks,
+    pythonPerformanceMetric,
+    renderPythonPerformanceMetricsTable,
+    renderBacktestComparisonSummary,
+    v4SelectionEligibility,
+    v4HoldingHistory,
+    v4FactorHoldingHistory,
+    loadV4FactorHoldingHistorySidecar,
+    selectedDailyWeightRows,
+    dailyWeightSymbols,
+    renderDailyWeightsTable,
+    v4CurrentResearchTargetFromPortfolio,
+    v4FactorDiagnostics,
+    appendFactorHoldingHistoryLoadStatus,
+    factorOptionLabel,
+    defaultFactorForRun,
+    factorComparisonBarClass,
+    benchmarkPaletteClass,
+    canonicalPolicyClass,
+    canonicalSelectionStatusClass,
+    canonicalSelectionStatusLabel,
+    canonicalExclusionReasonLabel,
+    canonicalRankingStatusText,
+    canonicalGridAccounting,
+    appendBarRow,
+    appendCanonicalBar,
+    formatSourceHealth,
+    storedScenarioRowLimit,
+    syncFactorDependentControls,
+    canonicalRequestedThroughText,
+    canonicalCountDefinitions,
+    canonicalUniverseScopeEvidence,
+    CHART_PALETTE_CLASS_MAP,
+    V4_EXPLORATION_PERIODS,
+    V4_BENCHMARK_LABELS,
+  };
+}
+
+if (typeof document !== 'undefined') {
+  bindThemeToggle();
+  bindManualUpdateControls();
+  loadBrowserDashboard();
+}

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from momentum_factor_lab.config import RunConfig
+from momentum_factor_lab.config import MAX_TOP_N, RunConfig
 from momentum_factor_lab.research_inputs import (
     RESEARCH_INPUTS_VERSION,
     ResearchInputError,
@@ -38,7 +38,7 @@ def test_public_inputs_round_trip_and_apply_to_run_config(tmp_path: Path) -> Non
     assert config.min_daily_risk_observations == 4 * 252
     assert config.top_n == 30
     assert config.selection_extreme_event_action == "exclude"
-    assert config.selection_max_abs_security_day_contribution == pytest.approx(0.25)
+    assert config.selection_max_abs_security_day_contribution == pytest.approx(0.10)
     assert ResearchInputs.from_config(config) == inputs
     assert inputs.to_dict()["evaluationWindowDays"] == 1_260
     assert len(inputs.state_key) == 64
@@ -52,6 +52,7 @@ def test_public_inputs_round_trip_and_apply_to_run_config(tmp_path: Path) -> Non
         {"evaluationYears": 0},
         {"evaluationYears": 2.5},
         {"topN": 0},
+        {"topN": MAX_TOP_N + 1},
         {"maxWeight": 0.0},
         {"minLiquidityObservations": 64, "liquidityLookbackDays": 63},
         {"selectionMinEffectiveNames": 21, "topN": 20},

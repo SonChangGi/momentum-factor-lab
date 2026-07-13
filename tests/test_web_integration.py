@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
     [
         "scripts/test_web_contract.mjs",
         "scripts/test_web_dom_integration.mjs",
+        "scripts/test_performance_table_dom.mjs",
+        "scripts/test_chart_palette_dom.mjs",
+        "scripts/test_original_design_contract.mjs",
+        "scripts/test_static_web_loader_contract.mjs",
+        "scripts/test_web_local_api_dom_integration.mjs",
     ],
 )
 def test_node_web_contract_and_dom_integration(script: str) -> None:

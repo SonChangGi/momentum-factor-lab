@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from momentum_factor_lab.config import RunConfig, WEIGHTING_POLICIES
+from momentum_factor_lab.config import MAX_TOP_N, RunConfig, WEIGHTING_POLICIES
 
 
 def test_default_research_contract_has_four_fixed_policies_and_explicit_scores() -> None:
@@ -10,6 +10,10 @@ def test_default_research_contract_has_four_fixed_policies_and_explicit_scores()
     config.validate()
 
     assert config.demo_symbol_count == 200
+    assert config.benchmark == "SPY"
+    assert config.chart_benchmark == "^IXIC"
+    assert config.additional_comparison_benchmarks == ("QQQ",)
+    assert config.comparison_benchmarks == ("SPY", "^IXIC", "QQQ")
     assert config.demo_missing_ratio == 0.0
     assert config.top_n == 20
     assert config.evaluation_window_days == 756
@@ -47,7 +51,7 @@ def test_default_research_contract_has_four_fixed_policies_and_explicit_scores()
     assert config.selection_min_effective_names == pytest.approx(10.0)
     assert config.selection_max_target_hhi == pytest.approx(0.15)
     assert config.selection_max_target_weight == pytest.approx(0.15)
-    assert config.selection_max_abs_security_day_contribution == pytest.approx(0.25)
+    assert config.selection_max_abs_security_day_contribution == pytest.approx(0.10)
     assert config.selection_max_security_absolute_contribution_share == pytest.approx(0.35)
     assert config.selection_max_leave_one_security_cagr_delta == pytest.approx(0.25)
     assert config.selection_extreme_event_action == "exclude"
@@ -58,6 +62,7 @@ def test_default_research_contract_has_four_fixed_policies_and_explicit_scores()
     assert serialized["joint_selection_version"] == config.joint_selection_version
     assert serialized["absolute_guardrail_version"] == config.absolute_guardrail_version
     assert serialized["analysis_cache_version"] == config.analysis_cache_version
+    assert serialized["comparison_benchmarks"] == ["SPY", "^IXIC", "QQQ"]
     assert serialized["score_liquidity_score_weight"] == pytest.approx(0.60)
     assert serialized["selection_max_security_absolute_contribution_share"] == pytest.approx(0.35)
     assert "score_size_market_cap_weight" not in serialized
@@ -86,6 +91,8 @@ def test_exactly_one_live_local_or_demo_source_is_required() -> None:
         ({"demo_missing_ratio": 0.0009}, "at least 0.001"),
         ({"demo_missing_ratio": 1.0}, "demo_missing_ratio"),
         ({"top_n": 0}, "top_n"),
+        ({"top_n": MAX_TOP_N + 1}, "top_n"),
+        ({"top_n": True}, "top_n"),
         ({"max_weight": 0.0}, "max_weight"),
         ({"min_evaluation_observations": 200}, "min_evaluation_observations"),
         ({"score_winsor_lower": 0.9, "score_winsor_upper": 0.1}, "winsor"),
@@ -250,3 +257,19 @@ def test_demo_missing_ratio_is_demo_only_and_accepts_sparse_boundary() -> None:
 def test_invalid_benchmark_symbol_is_rejected() -> None:
     with pytest.raises(ValueError, match="supported security symbol"):
         RunConfig(demo=True, benchmark="BAD SYMBOL").validate()
+
+
+def test_comparison_benchmarks_are_normalized_validated_and_deduplicated() -> None:
+    config = RunConfig(
+        demo=True,
+        benchmark=" spy ",
+        chart_benchmark=" ^ixic ",
+        additional_comparison_benchmarks=(" qqq ", "QQQ", "spy", "^IXIC", "dia"),
+    )
+    config.validate()
+
+    assert config.additional_comparison_benchmarks == ("QQQ", "DIA")
+    assert config.comparison_benchmarks == ("SPY", "^IXIC", "QQQ", "DIA")
+
+    with pytest.raises(ValueError, match="additional_comparison_benchmarks"):
+        RunConfig(demo=True, additional_comparison_benchmarks=("BAD SYMBOL",)).validate()
