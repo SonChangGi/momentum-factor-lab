@@ -5,15 +5,17 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .config import POLICY_VERSIONS, RunConfig, WEIGHTING_POLICIES
+from .config import (
+    FIXED_WEIGHTING_POLICY,
+    POLICY_VERSIONS,
+    RunConfig,
+    WEIGHTING_POLICIES,
+)
 
 
 TIE_BREAK_POLICY = "factor_score_desc_then_boundary_trailing_dollar_volume_desc_then_symbol_asc"
 POLICY_LABELS = {
-    "equal_weight": "Equal weight",
-    "capped_linear_rank": "Capped linear rank",
-    "capped_vol_adjusted_rank": "Volatility-adjusted capped rank",
-    "score_liquidity_rank": "Score and trailing-liquidity rank",
+    FIXED_WEIGHTING_POLICY: "Fixed factor, liquidity, and point-in-time market-cap rank",
 }
 
 
@@ -65,7 +67,7 @@ class ModelPortfolio:
     factor: str
     as_of: pd.Timestamp
     allocation: TargetAllocation
-    target_type: str = "current_research_target"
+    target_type: str = "factor_portfolio"
     execution_timing: str = "next_available_session_close_after_signal"
 
     @property
@@ -265,8 +267,8 @@ def construct_target_allocation(
     eligibility: pd.Series,
     config: RunConfig,
     *,
-    trailing_volatility: pd.Series | None = None,
     trailing_dollar_volume: pd.Series | None = None,
+    trailing_market_cap: pd.Series | None = None,
 ) -> TargetAllocation:
     """Build one target from signal-date-only inputs for history and current use."""
 
@@ -286,36 +288,33 @@ def construct_target_allocation(
     if ranked.empty:
         return _unavailable(policy_id, signal_date, "no_complete_signal_inputs")
 
-    volatility = (
-        _positive_finite(trailing_volatility, ranked.index)
-        if trailing_volatility is not None
-        else pd.Series(np.nan, index=ranked.index, dtype=float)
-    )
     liquidity = (
         _positive_finite(trailing_dollar_volume, ranked.index)
         if trailing_dollar_volume is not None
         else pd.Series(np.nan, index=ranked.index, dtype=float)
     )
-    if policy_id == "capped_vol_adjusted_rank":
-        ranked = ranked.loc[volatility.notna()]
-        if ranked.empty:
-            return _unavailable(
-                policy_id,
-                signal_date,
-                "no_finite_trailing_volatility",
-                eligible_count=eligible_count,
-                component_status={"volatility": "unavailable"},
-            )
-    if policy_id == "score_liquidity_rank":
-        ranked = ranked.loc[liquidity.notna()]
-        if ranked.empty:
-            return _unavailable(
-                policy_id,
-                signal_date,
-                "no_finite_trailing_dollar_volume",
-                eligible_count=eligible_count,
-                component_status={"liquidity": "unavailable"},
-            )
+    market_cap = (
+        _positive_finite(trailing_market_cap, ranked.index)
+        if trailing_market_cap is not None
+        else pd.Series(np.nan, index=ranked.index, dtype=float)
+    )
+    ranked = ranked.loc[liquidity.notna() & market_cap.notna()]
+    if ranked.empty:
+        reasons = []
+        if liquidity.dropna().empty:
+            reasons.append("no_finite_trailing_dollar_volume")
+        if market_cap.dropna().empty:
+            reasons.append("no_point_in_time_market_cap")
+        return _unavailable(
+            policy_id,
+            signal_date,
+            "+".join(reasons) or "no_complete_fixed_policy_inputs",
+            eligible_count=eligible_count,
+            component_status={
+                "liquidity": "unavailable" if liquidity.dropna().empty else "partial",
+                "marketCap": "unavailable" if market_cap.dropna().empty else "partial",
+            },
+        )
 
     selected, boundary_tie_resolved = _select_with_boundary_tie_break(
         ranked,
@@ -334,49 +333,33 @@ def construct_target_allocation(
     component_status: dict[str, str] = {"score": "available"}
     diagnostics = pd.DataFrame(index=symbols)
     diagnostics["rankComponent"] = rank_strength
-    diagnostics["trailingVolatility"] = volatility.reindex(symbols)
     diagnostics["trailingDollarVolume"] = liquidity.reindex(symbols)
+    diagnostics["trailingMarketCap"] = market_cap.reindex(symbols)
     diagnostics["scoreComponent"] = np.nan
     diagnostics["liquidityComponent"] = np.nan
-    if policy_id == "equal_weight":
-        raw = pd.Series(1.0, index=symbols)
-        component_status.update({"rank": "not_used", "volatility": "not_used"})
-    elif policy_id == "capped_linear_rank":
-        raw = rank_strength
-        component_status.update({"rank": "available", "volatility": "not_used"})
-    elif policy_id == "capped_vol_adjusted_rank":
-        clipped_volatility = volatility.reindex(symbols).clip(
-            lower=config.volatility_floor,
-            upper=config.volatility_cap,
-        )
-        diagnostics["trailingVolatility"] = clipped_volatility
-        raw = rank_strength.divide(clipped_volatility)
-        component_status.update(
-            {
-                "rank": "available",
-                "volatility": "trailing_signal_date_only",
-                "volatilityWindow": str(config.volatility_lookback_days),
-            }
-        )
-    else:
-        score_values = selected.clip(lower=0.0)
-        if not bool(score_values.gt(0.0).any()):
-            score_values = selected
-        score_component = _percentile_component(score_values)
-        liquidity_component = _percentile_component(np.log1p(liquidity.reindex(symbols)))
-        raw = (
-            config.score_liquidity_rank_floor
-            + config.score_liquidity_score_weight * score_component
-            + config.score_liquidity_liquidity_weight * liquidity_component
-        )
-        diagnostics["scoreComponent"] = score_component
-        diagnostics["liquidityComponent"] = liquidity_component
-        component_status.update(
-            {
-                "rank": "available",
-                "liquidity": "trailing_raw_dollar_volume",
-            }
-        )
+    diagnostics["marketCapComponent"] = np.nan
+    score_values = selected.clip(lower=0.0)
+    if not bool(score_values.gt(0.0).any()):
+        score_values = selected
+    score_component = _percentile_component(score_values)
+    liquidity_component = _percentile_component(np.log1p(liquidity.reindex(symbols)))
+    market_cap_component = _percentile_component(np.log1p(market_cap.reindex(symbols)))
+    raw = (
+        config.allocation_rank_floor
+        + config.allocation_score_weight * score_component
+        + config.allocation_liquidity_weight * liquidity_component
+        + config.allocation_market_cap_weight * market_cap_component
+    )
+    diagnostics["scoreComponent"] = score_component
+    diagnostics["liquidityComponent"] = liquidity_component
+    diagnostics["marketCapComponent"] = market_cap_component
+    component_status.update(
+        {
+            "methodology": "fixed_not_optimized",
+            "liquidity": "trailing_raw_dollar_volume",
+            "marketCap": "point_in_time_public_filing",
+        }
+    )
 
     weights = _water_fill_cap(raw, config.max_weight)
     total = float(weights.sum())
@@ -396,10 +379,11 @@ def construct_target_allocation(
             "maxWeight": float(config.max_weight),
             "capBinding": weights.reindex(symbols).ge(config.max_weight - 1e-12).to_numpy(),
             "rankComponent": diagnostics["rankComponent"].to_numpy(dtype=float),
-            "trailingVolatility": diagnostics["trailingVolatility"].to_numpy(dtype=float),
             "trailingDollarVolume": diagnostics["trailingDollarVolume"].to_numpy(dtype=float),
+            "trailingMarketCap": diagnostics["trailingMarketCap"].to_numpy(dtype=float),
             "scoreComponent": diagnostics["scoreComponent"].to_numpy(dtype=float),
             "liquidityComponent": diagnostics["liquidityComponent"].to_numpy(dtype=float),
+            "marketCapComponent": diagnostics["marketCapComponent"].to_numpy(dtype=float),
         }
     )
     reasons: list[str] = []
@@ -464,8 +448,8 @@ def construct_model_portfolio(
     config: RunConfig,
     *,
     policy_id: str,
-    trailing_volatility: pd.Series | None = None,
     trailing_dollar_volume: pd.Series | None = None,
+    trailing_market_cap: pd.Series | None = None,
     names: pd.Series | None = None,
 ) -> ModelPortfolio:
     allocation = construct_target_allocation(
@@ -475,8 +459,8 @@ def construct_model_portfolio(
         prices,
         eligibility,
         config,
-        trailing_volatility=trailing_volatility,
         trailing_dollar_volume=trailing_dollar_volume,
+        trailing_market_cap=trailing_market_cap,
     )
     if not allocation.rows.empty:
         rows = allocation.rows.copy()

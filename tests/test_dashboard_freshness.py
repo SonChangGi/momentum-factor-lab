@@ -21,17 +21,17 @@ def _dashboard(
     }
 
 
-def _dashboard_v4(timestamp: str, *, data_as_of: str = "2026-06-09") -> dict[str, object]:
+def _dashboard_v5(timestamp: str, *, data_as_of: str = "2026-06-09") -> dict[str, object]:
     return {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "generatedAtUtc": timestamp,
         "data": {"asOf": data_as_of},
     }
 
 
-def test_schema_v4_uses_generated_at_and_actual_data_as_of() -> None:
+def test_schema_v5_uses_generated_at_and_actual_data_as_of() -> None:
     decision = decide_dashboard_freshness(
-        _dashboard_v4("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
+        _dashboard_v5("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
     )

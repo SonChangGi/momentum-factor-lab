@@ -5,7 +5,7 @@ import pytest
 from momentum_factor_lab.config import MAX_TOP_N, RunConfig, WEIGHTING_POLICIES
 
 
-def test_default_research_contract_has_four_fixed_policies_and_explicit_scores() -> None:
+def test_default_research_contract_has_one_fixed_policy_and_explicit_scores() -> None:
     config = RunConfig(demo=True)
     config.validate()
 
@@ -19,16 +19,7 @@ def test_default_research_contract_has_four_fixed_policies_and_explicit_scores()
     assert config.evaluation_window_days == 756
     assert config.min_valuation_coverage == 0.98
     assert config.min_daily_risk_observations == 504
-    assert (
-        config.weighting_policies
-        == WEIGHTING_POLICIES
-        == (
-            "equal_weight",
-            "capped_linear_rank",
-            "capped_vol_adjusted_rank",
-            "score_liquidity_rank",
-        )
-    )
+    assert config.weighting_policies == WEIGHTING_POLICIES == ("score_liquidity_market_cap_rank",)
     assert config.score_weights == {
         "sortino": 0.25,
         "calmar": 0.20,
@@ -38,13 +29,15 @@ def test_default_research_contract_has_four_fixed_policies_and_explicit_scores()
         "stability": 0.10,
     }
     assert sum(config.score_weights.values()) == pytest.approx(1.0)
-    assert (
-        config.score_liquidity_score_weight + config.score_liquidity_liquidity_weight
-        == pytest.approx(1.0)
-    )
-    assert config.joint_selection_version == "joint-factor-policy-v1"
-    assert config.absolute_guardrail_version == "absolute-factor-policy-v1"
-    assert config.analysis_cache_version == "analysis-cache-v1"
+    assert config.allocation_score_weight == pytest.approx(0.50)
+    assert config.allocation_liquidity_weight == pytest.approx(0.30)
+    assert config.allocation_market_cap_weight == pytest.approx(0.20)
+    assert config.allocation_rank_floor == pytest.approx(0.05)
+    assert config.market_cap_max_age_days == 550
+    assert config.market_cap_min_universe_coverage == pytest.approx(0.75)
+    assert config.factor_selection_version == "fixed-policy-factor-selection-v1"
+    assert config.absolute_guardrail_version == "absolute-factor-v2"
+    assert config.analysis_cache_version == "analysis-cache-v2"
     assert config.selection_min_sharpe == 0.0
     assert config.selection_max_drawdown == pytest.approx(0.60)
     assert config.selection_max_annualized_cost_drag == pytest.approx(0.02)
@@ -59,11 +52,13 @@ def test_default_research_contract_has_four_fixed_policies_and_explicit_scores()
     assert config.market_cache_max_age_hours == pytest.approx(24.0)
     assert config.refresh_market_data is False
     serialized = config.to_dict()
-    assert serialized["joint_selection_version"] == config.joint_selection_version
+    assert serialized["factor_selection_version"] == config.factor_selection_version
     assert serialized["absolute_guardrail_version"] == config.absolute_guardrail_version
     assert serialized["analysis_cache_version"] == config.analysis_cache_version
     assert serialized["comparison_benchmarks"] == ["SPY", "^IXIC", "QQQ"]
-    assert serialized["score_liquidity_score_weight"] == pytest.approx(0.60)
+    assert serialized["allocation_score_weight"] == pytest.approx(0.50)
+    assert serialized["allocation_liquidity_weight"] == pytest.approx(0.30)
+    assert serialized["allocation_market_cap_weight"] == pytest.approx(0.20)
     assert serialized["selection_max_security_absolute_contribution_share"] == pytest.approx(0.35)
     assert "score_size_market_cap_weight" not in serialized
     assert "policy_sharpe_tolerance" not in serialized
@@ -112,32 +107,25 @@ def test_invalid_research_configuration_is_rejected(
     ("changes", "message"),
     [
         (
-            {"weighting_policies": WEIGHTING_POLICIES[:-1]},
-            "all four canonical weighting policies",
+            {"weighting_policies": ()},
+            "fixed weighting policy",
         ),
         (
-            {"weighting_policies": tuple(reversed(WEIGHTING_POLICIES))},
-            "fixed order",
+            {"weighting_policies": ("equal_weight",)},
+            "fixed weighting policy",
         ),
-        ({"min_volatility_observations": 1}, "fit the volatility lookback"),
-        (
-            {"volatility_lookback_days": 10, "min_volatility_observations": 11},
-            "fit the volatility lookback",
-        ),
-        ({"volatility_floor": 0.0}, "volatility bounds"),
-        (
-            {"volatility_floor": 0.50, "volatility_cap": 0.40},
-            "volatility bounds",
-        ),
-        ({"score_liquidity_score_weight": 0.70}, "sum to 1"),
+        ({"allocation_score_weight": 0.70}, "sum to 1"),
         (
             {
-                "score_liquidity_score_weight": 1.10,
-                "score_liquidity_liquidity_weight": -0.10,
+                "allocation_score_weight": 1.10,
+                "allocation_liquidity_weight": -0.30,
             },
             "non-negative and sum to 1",
         ),
-        ({"score_liquidity_rank_floor": -0.01}, "rank_floor"),
+        ({"allocation_rank_floor": -0.01}, "allocation_rank_floor"),
+        ({"allocation_market_cap_weight": 0.30}, "sum to 1"),
+        ({"market_cap_max_age_days": 549}, "market_cap_max_age_days"),
+        ({"market_cap_min_universe_coverage": 0.0}, "market_cap_min_universe_coverage"),
         ({"selection_min_effective_names": 0.0}, "must be positive"),
         (
             {"top_n": 5, "selection_min_effective_names": 6.0},
@@ -195,8 +183,12 @@ def test_config_exposes_live_mode_without_credentials_or_execution_contracts() -
         "live",
         "weighting_policies",
         "min_valuation_coverage",
-        "score_liquidity_score_weight",
-        "score_liquidity_liquidity_weight",
+        "allocation_score_weight",
+        "allocation_liquidity_weight",
+        "allocation_market_cap_weight",
+        "allocation_rank_floor",
+        "market_cap_max_age_days",
+        "market_cap_min_universe_coverage",
         "selection_min_sharpe",
         "selection_max_drawdown",
         "selection_max_abs_security_day_contribution",

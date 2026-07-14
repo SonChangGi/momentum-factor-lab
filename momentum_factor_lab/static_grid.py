@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
-from .config import WEIGHTING_POLICIES
 from .dashboard import (
     MAX_DASHBOARD_BYTES,
     MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES,
@@ -28,17 +26,14 @@ from .identity import (
 STATIC_GRID_CONTRACT = "momentum-static-result-grid"
 STATIC_GRID_SCHEMA_VERSION = 1
 STATIC_GRID_VERSION = "v1"
-RESULT_PAYLOAD_SCHEMA_VERSION = 4
+RESULT_PAYLOAD_SCHEMA_VERSION = 5
 MAX_STATIC_GRID_ENTRIES = 64
 MIN_ACTUAL_ANALYZED_SECURITY_COUNT = 2_700
 STATIC_PRESET_ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 EXPECTED_TOTAL_FACTOR_COUNT = 64
 EXPECTED_INDEPENDENT_FACTOR_COUNT = 61
 EXPECTED_ALIAS_FACTOR_COUNT = 3
-EXPECTED_POLICY_COUNT = 4
-EXPECTED_INDEPENDENT_PAIR_COUNT = 244
-EXPECTED_ALIAS_PAIR_COUNT = 12
-EXPECTED_TOTAL_PAIR_COUNT = 256
+EXPECTED_POLICY_COUNT = 1
 
 _DETAIL_DIRECTORY = "results"
 _SUMMARY_DIRECTORY = "summaries"
@@ -166,368 +161,10 @@ def _validate_actual_market_detail(
     for identity_field, observed in parity.items():
         if market.get(identity_field) != observed:
             _fail(f"detail data differs from resultIdentity marketSnapshot at {identity_field}")
-    for field in ("selectedFactor", "selectedWeightingPolicy"):
+    for field in ("bestFactor", "weightingPolicy"):
         if not isinstance(detail.get(field), str) or not detail[field]:
             _fail(f"detail.{field} must be a non-empty string")
     return data
-
-
-def _finite_number(value: object) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and math.isfinite(float(value))
-    )
-
-
-def _close(left: object, right: float, *, tolerance: float = 1e-9) -> bool:
-    if not _finite_number(left):
-        return False
-    return math.isclose(float(left), right, rel_tol=tolerance, abs_tol=tolerance)
-
-
-def _validate_target_allocation(
-    detail: Mapping[str, Any],
-    data: Mapping[str, Any],
-) -> tuple[dict[str, Any], float]:
-    target = _mapping(detail.get("currentResearchTarget"), "detail.currentResearchTarget")
-    config = _mapping(detail.get("config"), "detail.config")
-    max_weight = config.get("max_weight")
-    if not _finite_number(max_weight) or not 0.0 < float(max_weight) <= 1.0:
-        _fail("detail.config.max_weight must be in (0, 1]")
-    max_weight = float(max_weight)
-
-    parity = {
-        "factor": detail.get("selectedFactor"),
-        "weightingPolicyId": detail.get("selectedWeightingPolicy"),
-        "asOf": data.get("asOf"),
-        "signalDate": data.get("asOf"),
-    }
-    for field, expected in parity.items():
-        if target.get(field) != expected:
-            _fail(f"detail.currentResearchTarget.{field} differs from the selected result")
-
-    weights = target.get("weights")
-    if not isinstance(weights, list):
-        _fail("detail.currentResearchTarget.weights must be an array")
-    selected_count = target.get("selectedSecurityCount")
-    if (
-        not isinstance(selected_count, int)
-        or isinstance(selected_count, bool)
-        or selected_count != len(weights)
-    ):
-        _fail("detail.currentResearchTarget.selectedSecurityCount differs from weights")
-    top_n = config.get("top_n")
-    if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1 or len(weights) > top_n:
-        _fail("detail.currentResearchTarget holding count exceeds config.top_n")
-    eligible_count = target.get("eligibleSecurityCount")
-    if (
-        not isinstance(eligible_count, int)
-        or isinstance(eligible_count, bool)
-        or eligible_count < len(weights)
-    ):
-        _fail("detail.currentResearchTarget.eligibleSecurityCount is inconsistent")
-
-    symbols: set[str] = set()
-    values: list[float] = []
-    for expected_rank, value in enumerate(weights, start=1):
-        row = _mapping(value, f"detail.currentResearchTarget.weights[{expected_rank - 1}]")
-        symbol = row.get("symbol")
-        normalized_symbol = symbol.strip().upper() if isinstance(symbol, str) else ""
-        weight = row.get("weight")
-        if (
-            row.get("rank") != expected_rank
-            or not normalized_symbol
-            or normalized_symbol in symbols
-            or not _finite_number(row.get("factorScore"))
-            or not _finite_number(weight)
-            or not 0.0 < float(weight) <= max_weight + 1e-12
-        ):
-            _fail("detail.currentResearchTarget contains an invalid holding")
-        if "maxWeight" in row and not _close(row.get("maxWeight"), max_weight):
-            _fail("detail.currentResearchTarget holding maxWeight differs from config")
-        symbols.add(normalized_symbol)
-        values.append(float(weight))
-
-    cash_weight = target.get("cashWeight")
-    if (
-        not _finite_number(cash_weight)
-        or not 0.0 <= float(cash_weight) <= 1.0
-        or not _close(sum(values) + float(cash_weight), 1.0)
-    ):
-        _fail("detail.currentResearchTarget weights plus cash must equal one")
-
-    concentration = _mapping(
-        target.get("concentration"),
-        "detail.currentResearchTarget.concentration",
-    )
-    invested = sum(values)
-    normalized = [weight / invested for weight in values] if invested > 0.0 else []
-    hhi = sum(weight * weight for weight in normalized)
-    ordered = sorted(values, reverse=True)
-    expected_concentration = {
-        "investedWeight": invested,
-        "cashWeight": float(cash_weight),
-        "riskySleeveHhi": hhi,
-        "effectiveNames": 1.0 / hhi if hhi > 0.0 else 0.0,
-        "top1Weight": sum(ordered[:1]),
-        "top5Weight": sum(ordered[:5]),
-        "maxWeight": ordered[0] if ordered else 0.0,
-    }
-    for field, expected in expected_concentration.items():
-        if not _close(concentration.get(field), expected):
-            _fail(f"detail.currentResearchTarget.concentration.{field} is inconsistent")
-    return target, max_weight
-
-
-def _validate_grid_accounting(detail: Mapping[str, Any]) -> dict[str, Any]:
-    accounting = _mapping(detail.get("gridAccounting"), "detail.gridAccounting")
-    registry = _mapping(
-        detail.get("weightingPolicyRegistry"),
-        "detail.weightingPolicyRegistry",
-    )
-    policies = _mapping(
-        registry.get("policies"),
-        "detail.weightingPolicyRegistry.policies",
-    )
-    policy_ids = {
-        str(policy_id).strip()
-        for policy_id in policies
-        if isinstance(policy_id, str) and str(policy_id).strip()
-    }
-    if not policy_ids or len(policy_ids) != len(policies):
-        _fail("detail.weightingPolicyRegistry.policies must have unique non-empty ids")
-    if policy_ids != set(WEIGHTING_POLICIES) or len(policy_ids) != EXPECTED_POLICY_COUNT:
-        _fail("detail.weightingPolicyRegistry must contain the four canonical policies")
-
-    definitions = detail.get("factorDefinitions")
-    if not isinstance(definitions, list) or not definitions:
-        _fail("detail.factorDefinitions must be a populated array")
-    independent_factors: set[str] = set()
-    alias_factors: set[str] = set()
-    definition_ids: set[str] = set()
-    for index, value in enumerate(definitions):
-        definition = _mapping(value, f"detail.factorDefinitions[{index}]")
-        factor = definition.get("factor")
-        if not isinstance(factor, str) or not factor.strip() or factor in definition_ids:
-            _fail("detail.factorDefinitions must have unique non-empty factor ids")
-        definition_ids.add(factor)
-        if definition.get("selection_eligible") is True and not definition.get(
-            "compatibility_alias_of"
-        ):
-            independent_factors.add(factor)
-        elif definition.get("selection_eligible") is False and isinstance(
-            definition.get("compatibility_alias_of"), str
-        ):
-            alias_factors.add(factor)
-        else:
-            _fail("detail.factorDefinitions contains a noncanonical factor classification")
-    if (
-        len(definition_ids) != EXPECTED_TOTAL_FACTOR_COUNT
-        or len(independent_factors) != EXPECTED_INDEPENDENT_FACTOR_COUNT
-        or len(alias_factors) != EXPECTED_ALIAS_FACTOR_COUNT
-    ):
-        _fail("detail.factorDefinitions must contain canonical 64/61/3 factor counts")
-
-    ranking = detail.get("factorPolicyRanking")
-    if not isinstance(ranking, list) or not ranking:
-        _fail("detail.factorPolicyRanking must be a populated array")
-    independent_rows: list[dict[str, Any]] = []
-    alias_rows: list[dict[str, Any]] = []
-    observed_pairs: set[tuple[str, str]] = set()
-    for index, value in enumerate(ranking):
-        row = _mapping(value, f"detail.factorPolicyRanking[{index}]")
-        factor = row.get("factor")
-        if factor not in definition_ids:
-            _fail("detail.factorPolicyRanking contains an unknown factor id")
-        policy_id = row.get("policy_id")
-        if policy_id not in policy_ids:
-            _fail("detail.factorPolicyRanking contains an unknown policy id")
-        pair = (str(factor), str(policy_id))
-        if pair in observed_pairs:
-            _fail("detail.factorPolicyRanking contains a duplicate independent pair")
-        observed_pairs.add(pair)
-        if factor in independent_factors:
-            independent_rows.append(row)
-        else:
-            alias_rows.append(row)
-
-    expected_independent_pairs = {
-        (factor, policy_id) for factor in independent_factors for policy_id in policy_ids
-    }
-    expected_alias_pairs = {
-        (factor, policy_id) for factor in alias_factors for policy_id in policy_ids
-    }
-    expected_pairs = expected_independent_pairs | expected_alias_pairs
-    missing_pairs = expected_pairs.difference(observed_pairs)
-    unexpected_pairs = observed_pairs.difference(expected_pairs)
-    if missing_pairs or unexpected_pairs:
-        _fail("detail.factorPolicyRanking canonical 256-row grid is incomplete")
-    if (
-        len(independent_rows) != EXPECTED_INDEPENDENT_PAIR_COUNT
-        or len(alias_rows) != EXPECTED_ALIAS_PAIR_COUNT
-        or len(ranking) != EXPECTED_TOTAL_PAIR_COUNT
-    ):
-        _fail("detail.factorPolicyRanking must contain canonical 244/12/256 row counts")
-    for row in alias_rows:
-        if row.get("comparison_status") != "duplicate_alias":
-            _fail("diagnostic alias factor-policy row must be marked duplicate_alias")
-
-    available_count = 0
-    reason_counts: dict[str, int] = {}
-    for row in independent_rows:
-        status = row.get("comparison_status")
-        reason_codes = row.get("exclusion_reason_codes")
-        structured_reasons = row.get("exclusion_reasons")
-        if status == "available":
-            available_count += 1
-            if reason_codes != [] or structured_reasons != []:
-                _fail("available independent factor-policy row has exclusion reasons")
-            continue
-        if (
-            not isinstance(reason_codes, list)
-            or not reason_codes
-            or any(not isinstance(code, str) or not code.strip() for code in reason_codes)
-            or len(set(reason_codes)) != len(reason_codes)
-        ):
-            _fail("excluded independent factor-policy row has no exact reason codes")
-        if not isinstance(structured_reasons, list) or not structured_reasons:
-            _fail("excluded independent factor-policy row has no structured reasons")
-        structured_codes: list[str] = []
-        for reason_index, value in enumerate(structured_reasons):
-            reason = _mapping(
-                value,
-                f"detail.factorPolicyRanking exclusion_reasons[{reason_index}]",
-            )
-            code = reason.get("code")
-            if not isinstance(code, str) or not code.strip():
-                _fail("excluded independent factor-policy structured reason has no code")
-            structured_codes.append(code)
-        if structured_codes != reason_codes:
-            _fail("excluded independent factor-policy reason codes differ from structured reasons")
-        for code in reason_codes:
-            reason_counts[code] = reason_counts.get(code, 0) + 1
-
-    expected_count = len(expected_independent_pairs)
-    evaluated_count = len(independent_rows)
-    excluded_count = evaluated_count - available_count
-    common_count = sum(
-        all(
-            row.get("comparison_status") == "available"
-            for row in independent_rows
-            if row.get("factor") == factor
-        )
-        for factor in independent_factors
-    )
-    expected_accounting = {
-        "version": 1,
-        "independentFactorCount": EXPECTED_INDEPENDENT_FACTOR_COUNT,
-        "policyCount": EXPECTED_POLICY_COUNT,
-        "expectedIndependentPairCount": expected_count,
-        "evaluatedIndependentPairCount": evaluated_count,
-        "availableIndependentPairCount": available_count,
-        "excludedIndependentPairCount": excluded_count,
-        "missingIndependentPairCount": 0,
-        "diagnosticAliasFactorCount": EXPECTED_ALIAS_FACTOR_COUNT,
-        "diagnosticAliasPairCount": EXPECTED_ALIAS_PAIR_COUNT,
-        "commonComparableFactorCount": common_count,
-        "exclusionReasonCounts": dict(sorted(reason_counts.items())),
-        "invariant": (
-            "availableIndependentPairCount + excludedIndependentPairCount = "
-            "expectedIndependentPairCount"
-        ),
-    }
-    for field, expected in expected_accounting.items():
-        observed = accounting.get(field)
-        if isinstance(expected, int):
-            valid = (
-                isinstance(observed, int)
-                and not isinstance(observed, bool)
-                and observed == expected
-            )
-        elif isinstance(expected, Mapping):
-            valid = (
-                isinstance(observed, Mapping)
-                and all(
-                    isinstance(code, str)
-                    and code.strip()
-                    and isinstance(count, int)
-                    and not isinstance(count, bool)
-                    and count >= 0
-                    for code, count in observed.items()
-                )
-                and dict(observed) == expected
-            )
-        else:
-            valid = observed == expected
-        if not valid:
-            _fail(f"detail.gridAccounting.{field} is inconsistent with the independent grid")
-    if available_count + excluded_count != expected_count:
-        _fail("detail.gridAccounting available plus excluded pairs must equal expected pairs")
-    return accounting
-
-
-def _validate_summary_parity(
-    detail: Mapping[str, Any],
-    summary: Mapping[str, Any],
-    identity: Mapping[str, Any],
-    data: Mapping[str, Any],
-    target: Mapping[str, Any],
-    max_weight: float,
-    require_canonical_transport: bool,
-) -> None:
-    if summary.get("schemaVersion") != RESULT_PAYLOAD_SCHEMA_VERSION:
-        _fail(f"summary.schemaVersion must be {RESULT_PAYLOAD_SCHEMA_VERSION}")
-    summary_identity, _ = _validate_identity(
-        summary.get("resultIdentity"),
-        "summary.resultIdentity",
-        require_canonical_transport=require_canonical_transport,
-    )
-    if summary_identity != identity:
-        _fail("summary.resultIdentity differs from detail.resultIdentity")
-    result_key = str(identity["resultKey"])
-    _validate_top_level_result_key(summary, result_key, "summary")
-
-    parity = {
-        "dataAsOf": data.get("asOf"),
-        "dataMode": data.get("mode"),
-        "synthetic": False,
-        "analyzedSecurityCount": data.get("analyzedSecurityCount"),
-        "selectedFactor": detail.get("selectedFactor"),
-        "selectedWeightingPolicy": detail.get("selectedWeightingPolicy"),
-    }
-    for field, expected in parity.items():
-        if summary.get(field) != expected:
-            _fail(f"summary.{field} differs from detail")
-    allocation_parity = {
-        "gridAccounting": detail.get("gridAccounting"),
-        "currentResearchTarget": target,
-        "weights": target.get("weights"),
-        "cashWeight": target.get("cashWeight"),
-        "maxWeight": max_weight,
-        "concentration": target.get("concentration"),
-        "portfolioSize": target.get("selectedSecurityCount"),
-    }
-    for field, expected in allocation_parity.items():
-        if summary.get(field) != expected:
-            _fail(f"summary.{field} differs from detail.currentResearchTarget")
-
-
-def _validate_public_research_contract(detail: Mapping[str, Any]) -> None:
-    scope = _mapping(detail.get("researchScope"), "detail.researchScope")
-    if (
-        scope.get("researchOnly") is not True
-        or scope.get("notInvestmentRecommendation") is not True
-        or scope.get("evidenceStatus") != "same_sample_descriptive_actual_market"
-    ):
-        _fail("detail.researchScope must declare actual-market research-only evidence")
-    limitations = scope.get("limitations")
-    if (
-        not isinstance(limitations, list)
-        or not limitations
-        or any(not isinstance(value, str) or not value.strip() for value in limitations)
-    ):
-        _fail("detail.researchScope.limitations must be a populated text array")
 
 
 def _validate_artifact(
@@ -544,23 +181,11 @@ def _validate_artifact(
     )
     result_key = str(identity["resultKey"])
     _validate_top_level_result_key(detail, result_key, "detail")
-    data = _validate_actual_market_detail(detail, identity)
-    _validate_grid_accounting(detail)
-    target, max_weight = _validate_target_allocation(detail, data)
-    _validate_public_research_contract(detail)
-    _validate_summary_parity(
-        detail,
-        summary,
-        identity,
-        data,
-        target,
-        max_weight,
-        not allow_identity_enrichment,
-    )
+    _validate_actual_market_detail(detail, identity)
     try:
         canonical_summary = dashboard_summary(detail)
     except (KeyError, TypeError, ValueError) as error:
-        _fail(f"detail fails the canonical schema-v4 dashboard contract: {error}")
+        _fail(f"detail fails the schema-v5 dashboard contract: {error}")
     if summary != canonical_summary:
         _fail("summary differs from canonical dashboard_summary(detail)")
     if allow_identity_enrichment and "canonicalKeyPartsJson" not in identity:

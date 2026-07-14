@@ -14,7 +14,8 @@ from typing import Any
 from .advanced_factors import advanced_factor_definitions_frame
 from .config import (
     ABSOLUTE_GUARDRAIL_VERSION,
-    JOINT_SELECTION_VERSION,
+    FACTOR_SELECTION_VERSION,
+    FIXED_WEIGHTING_POLICY,
     POLICY_REGISTRY,
     POLICY_REGISTRY_VERSION,
     RunConfig,
@@ -53,7 +54,8 @@ from .workflow import (
     SELECTED_HOLDING_HISTORY_SESSION_COUNT,
     SELECTED_HOLDING_HISTORY_WEIGHT_TIMING,
     AnalysisResult,
-    JOINT_TIE_BREAK_POLICY,
+    FACTOR_SELECTION_TIE_BREAK_POLICY,
+    _absolute_guardrail_profile,
     result_payload,
 )
 
@@ -149,10 +151,11 @@ _FACTOR_PORTFOLIO_WEIGHT_FIELDS = frozenset(
         "maxWeight",
         "capBinding",
         "rankComponent",
-        "trailingVolatility",
         "trailingDollarVolume",
+        "trailingMarketCap",
         "scoreComponent",
         "liquidityComponent",
+        "marketCapComponent",
     }
 )
 _CONCENTRATION_FIELDS = frozenset(
@@ -175,8 +178,16 @@ _AVAILABLE_FACTOR_PORTFOLIO_REASONS = frozenset(
 )
 _UNAVAILABLE_FACTOR_PORTFOLIO_COMPONENTS = {
     "no_complete_signal_inputs": {},
-    "no_finite_trailing_volatility": {"volatility": "unavailable"},
     "no_finite_trailing_dollar_volume": {"liquidity": "unavailable"},
+    "no_point_in_time_market_cap": {"marketCap": "unavailable"},
+    "no_finite_trailing_dollar_volume+no_point_in_time_market_cap": {
+        "liquidity": "unavailable",
+        "marketCap": "unavailable",
+    },
+    "no_complete_fixed_policy_inputs": {
+        "liquidity": "partial",
+        "marketCap": "partial",
+    },
     "top_n_boundary_tie_has_no_finite_liquidity_tie_break": {},
 }
 
@@ -471,16 +482,18 @@ def _validate_registry(payload: dict[str, Any]) -> None:
         raise ValueError("dashboard configured weighting-policy registry is inconsistent")
 
 
-def _validate_research_inputs(payload: dict[str, Any]) -> None:
+def _reconstruct_run_config(payload: dict[str, Any]) -> RunConfig:
     config = payload["config"]
     run_fields = {field.name for field in fields(RunConfig)}
     try:
-        reconstructed = RunConfig(
-            **{key: value for key, value in config.items() if key in run_fields}
-        )
-        expected = ResearchInputs.from_config(reconstructed).to_dict()
+        return RunConfig(**{key: value for key, value in config.items() if key in run_fields})
     except (TypeError, ResearchInputError) as error:
         raise ValueError("dashboard config cannot reconstruct canonical researchInputs") from error
+
+
+def _validate_research_inputs(payload: dict[str, Any]) -> None:
+    reconstructed = _reconstruct_run_config(payload)
+    expected = ResearchInputs.from_config(reconstructed).to_dict()
     if payload.get("researchInputs") != expected:
         raise ValueError("dashboard researchInputs differ from the result-affecting config")
 
@@ -1068,6 +1081,127 @@ def _selection_sort_key(row: dict[str, Any]) -> tuple[object, ...]:
     )
 
 
+def _validate_ranking_guardrails(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Recompute every result-affecting guardrail, score, and rank from payload evidence."""
+
+    action = config.get("selection_extreme_event_action")
+    if action not in {"warn", "penalize", "exclude"}:
+        raise ValueError("dashboard extreme-event action is invalid")
+    for row in rows:
+        expected_guards = _guardrail_expectations(row, config)
+        for field, expected in expected_guards.items():
+            if row.get(field) is not expected:
+                raise ValueError(f"factor-policy {field} is inconsistent")
+        standard_pass = all(expected_guards[field] for field in _STANDARD_GUARDRAILS)
+        contribution_pass = all(expected_guards[field] for field in _CONTRIBUTION_GUARDRAILS)
+        absolute_pass = standard_pass and contribution_pass
+        if (
+            row.get("standard_guardrail_pass") is not standard_pass
+            or row.get("contribution_guardrail_pass") is not contribution_pass
+            or row.get("absolute_guardrail_pass") is not absolute_pass
+        ):
+            raise ValueError("factor-policy aggregate guardrail flags are inconsistent")
+        standard_breaches = [
+            field.removeprefix("guardrail_")
+            for field in _STANDARD_GUARDRAILS
+            if not expected_guards[field]
+        ]
+        contribution_breaches = [
+            field.removeprefix("guardrail_")
+            for field in _CONTRIBUTION_GUARDRAILS
+            if not expected_guards[field]
+        ]
+        if row.get("guardrail_breaches") != [*standard_breaches, *contribution_breaches]:
+            raise ValueError("factor-policy guardrail breach list is inconsistent")
+        if row.get("contribution_guardrail_breaches") != contribution_breaches:
+            raise ValueError("factor-policy contribution breach list is inconsistent")
+
+        contribution_values = (
+            ("max_abs_security_day_contribution", "selection_max_abs_security_day_contribution"),
+            (
+                "max_security_absolute_contribution_share",
+                "selection_max_security_absolute_contribution_share",
+            ),
+            (
+                "max_abs_leave_one_security_cagr_delta",
+                "selection_max_leave_one_security_cagr_delta",
+            ),
+        )
+        if any(not _finite_number(row.get(field)) for field, _ in contribution_values):
+            raise ValueError("factor-policy contribution diagnostics are not finite")
+        expected_penalty = 0.0
+        if action == "penalize" and contribution_breaches:
+            severity = max(
+                _ratio_severity(float(row[field]), float(config[threshold_field]))
+                for field, threshold_field in contribution_values
+            )
+            expected_penalty = float(config["selection_extreme_event_penalty_points"]) * severity
+        _require_close(
+            row.get("extreme_event_penalty_points"),
+            expected_penalty,
+            "factor-policy extreme-event penalty",
+        )
+        _require_optional_close(
+            row.get("base_composite_score"),
+            row.get("composite_score"),
+            "factor-policy base composite score",
+        )
+        metric_available = row.get("comparison_status") == "available"
+        expected_eligible = metric_available and standard_pass
+        if action == "exclude":
+            expected_eligible = expected_eligible and contribution_pass
+        if row.get("selection_eligible") is not expected_eligible:
+            raise ValueError("factor-policy selection eligibility is inconsistent")
+        if expected_eligible:
+            if not _finite_number(row.get("base_composite_score")):
+                raise ValueError("eligible factor-policy pair has no base score")
+            expected_score = max(0.0, float(row["base_composite_score"]) - expected_penalty)
+            _require_close(
+                row.get("selection_score"), expected_score, "factor-policy selection score"
+            )
+        elif row.get("selection_score") is not None:
+            raise ValueError("ineligible factor-policy selection score must be null")
+
+        if not metric_available:
+            expected_status = "data_excluded"
+        elif not standard_pass:
+            expected_status = "absolute_guardrail_excluded"
+        elif not contribution_pass:
+            expected_status = {
+                "warn": "extreme_event_warning",
+                "penalize": "extreme_event_penalized",
+                "exclude": "extreme_event_excluded",
+            }[str(action)]
+        else:
+            expected_status = "eligible"
+        if row.get("selection_status") != expected_status:
+            raise ValueError("factor-policy selection status is inconsistent")
+
+    ordered = sorted(
+        (row for row in rows if row.get("selection_eligible") is True),
+        key=_selection_sort_key,
+    )
+    if not ordered:
+        raise ValueError("dashboard has no selection-eligible factor-policy pair")
+    for expected_rank, row in enumerate(ordered, start=1):
+        if not _finite_number(row.get("rank")) or int(float(row["rank"])) != expected_rank:
+            raise ValueError("factor-policy selection rank is inconsistent")
+        if row.get("selected") is not (expected_rank == 1):
+            raise ValueError("factor-policy selected flag is inconsistent")
+    for row in rows:
+        if row.get("selection_eligible") is not True and (
+            row.get("rank") is not None or row.get("selected") is not False
+        ):
+            raise ValueError("ineligible factor-policy rank/selected contract is inconsistent")
+    selected = ordered[0]
+    if rows[0] is not selected:
+        raise ValueError("selected factor-policy row must be first in the canonical ranking")
+    return selected
+
+
 def _validate_grid_and_selection(
     payload: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
@@ -1394,7 +1528,7 @@ def _validate_performance(payload: dict[str, Any]) -> None:
     if (
         performance.get("contractVersion") != PERFORMANCE_CONTRACT_VERSION
         or not isinstance(dates, list)
-        or len(dates) < 2
+        or len(dates) != int(config["evaluation_window_days"]) + 1
         or not all(_required_text(date) for date in dates)
         or dates != sorted(dates)
         or dates[-1] != data.get("asOf")
@@ -1626,14 +1760,15 @@ def _validate_selection_decision(payload: dict[str, Any], selected: dict[str, An
         row.get("selection_eligible") is True for row in payload["factorPolicyRanking"]
     )
     exact_fields = {
-        "method": "joint_factor_policy",
-        "version": JOINT_SELECTION_VERSION,
+        "method": "fixed_policy_factor_selection",
+        "version": FACTOR_SELECTION_VERSION,
         "dynamicSelection": True,
+        "weightingPolicyOptimized": False,
         "selectedFactor": selected["factor"],
         "selectedPolicyId": selected["policy_id"],
         "selectedPolicyVersion": POLICY_REGISTRY[str(selected["policy_id"])]["version"],
         "guardrailProfile": profile,
-        "tieBreakPolicy": list(JOINT_TIE_BREAK_POLICY),
+        "tieBreakPolicy": list(FACTOR_SELECTION_TIE_BREAK_POLICY),
         "reason": payload["selectedReason"],
         "evaluationStart": dates[0],
         "evaluationEnd": dates[-1],
@@ -1641,7 +1776,7 @@ def _validate_selection_decision(payload: dict[str, Any], selected: dict[str, An
         "minimumObservations": config["min_evaluation_observations"],
         "minimumValuationCoverage": config["min_valuation_coverage"],
         "minimumDailyRiskObservations": config["min_daily_risk_observations"],
-        "selectionEligiblePairCount": eligible_count,
+        "selectionEligibleFactorCount": eligible_count,
         "gridAccounting": payload["gridAccounting"],
     }
     if any(decision.get(field) != value for field, value in exact_fields.items()):
@@ -1658,8 +1793,8 @@ def _validate_selection_decision(payload: dict[str, Any], selected: dict[str, An
             f"selectionDecision.{decision_field}",
         )
     expected_method = {
-        "name": "joint_factor_policy_absolute_guardrails",
-        "version": JOINT_SELECTION_VERSION,
+        "name": "fixed_policy_factor_selection_absolute_guardrails",
+        "version": FACTOR_SELECTION_VERSION,
         "guardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
         "evaluationWindowDays": len(dates),
         "minimumObservations": config["min_evaluation_observations"],
@@ -1670,9 +1805,9 @@ def _validate_selection_decision(payload: dict[str, Any], selected: dict[str, An
         "signalTiming": "close_t",
         "executionTiming": "next_session_close",
         "returnExposureStarts": "following_close_to_close_session",
-        "tieBreakPolicy": list(JOINT_TIE_BREAK_POLICY),
-        "policyAggregatesAreDiagnosticOnly": True,
-        "equalWeightIsPeerCandidate": True,
+        "tieBreakPolicy": list(FACTOR_SELECTION_TIE_BREAK_POLICY),
+        "weightingPolicyOptimized": False,
+        "fixedWeightingPolicy": FIXED_WEIGHTING_POLICY,
     }
     if selection_method != expected_method:
         raise ValueError("dashboard selectionMethod is inconsistent")
@@ -1766,8 +1901,9 @@ def _validate_policy_diagnostics(
             )
     aggregate = payload.get("portfolioPolicy", {}).get("policyAggregateDiagnostics")
     expected_aggregate = {
-        "diagnosticOnly": True,
-        "selectedByPolicyAggregate": False,
+        "fixed": True,
+        "optimized": False,
+        "policyId": FIXED_WEIGHTING_POLICY,
         "policyCount": len(WEIGHTING_POLICIES),
         "commonComparableFactorCount": len(common),
     }
@@ -1809,30 +1945,12 @@ def _expected_available_component_status(
     config: dict[str, Any],
     reasons: list[str],
 ) -> dict[str, str]:
-    if policy_id == "equal_weight":
+    if policy_id == FIXED_WEIGHTING_POLICY:
         expected = {
             "score": "available",
-            "rank": "not_used",
-            "volatility": "not_used",
-        }
-    elif policy_id == "capped_linear_rank":
-        expected = {
-            "score": "available",
-            "rank": "available",
-            "volatility": "not_used",
-        }
-    elif policy_id == "capped_vol_adjusted_rank":
-        expected = {
-            "score": "available",
-            "rank": "available",
-            "volatility": "trailing_signal_date_only",
-            "volatilityWindow": str(config["volatility_lookback_days"]),
-        }
-    elif policy_id == "score_liquidity_rank":
-        expected = {
-            "score": "available",
-            "rank": "available",
+            "methodology": "fixed_not_optimized",
             "liquidity": "trailing_raw_dollar_volume",
+            "marketCap": "point_in_time_public_filing",
         }
     else:  # pragma: no cover - canonical registry validation prevents this branch
         raise ValueError(f"unsupported weighting policy: {policy_id}")
@@ -1859,7 +1977,7 @@ def _validate_factor_portfolio(
         or portfolio.get("weightingPolicyVersion") != POLICY_REGISTRY[policy_id]["version"]
         or portfolio.get("asOf") != as_of
         or portfolio.get("signalDate") != as_of
-        or portfolio.get("targetType") != "current_research_target"
+        or portfolio.get("targetType") != "factor_portfolio"
         or portfolio.get("executionTiming") != "next_available_session_close_after_signal"
         or portfolio.get("tieBreakPolicy") != TIE_BREAK_POLICY
     ):
@@ -1914,7 +2032,13 @@ def _validate_factor_portfolio(
         if (
             (reason == "no_complete_signal_inputs" and int(eligible_count) != 0)
             or (
-                reason in {"no_finite_trailing_volatility", "no_finite_trailing_dollar_volume"}
+                reason
+                in {
+                    "no_finite_trailing_dollar_volume",
+                    "no_point_in_time_market_cap",
+                    "no_finite_trailing_dollar_volume+no_point_in_time_market_cap",
+                    "no_complete_fixed_policy_inputs",
+                }
                 and int(eligible_count) <= 0
             )
             or (
@@ -1966,32 +2090,24 @@ def _validate_factor_portfolio(
             or not _close(float(row["maxWeight"]), float(config["max_weight"]))
             or not isinstance(row.get("capBinding"), bool)
             or not _finite_number(row.get("rankComponent"))
-            or (
-                row.get("trailingVolatility") is not None
-                and (
-                    not _finite_number(row.get("trailingVolatility"))
-                    or float(row["trailingVolatility"]) <= 0.0
-                )
-            )
-            or (
-                row.get("trailingDollarVolume") is not None
-                and (
-                    not _finite_number(row.get("trailingDollarVolume"))
-                    or float(row["trailingDollarVolume"]) <= 0.0
-                )
-            )
+            or not _finite_number(row.get("trailingDollarVolume"))
+            or float(row["trailingDollarVolume"]) <= 0.0
+            or not _finite_number(row.get("trailingMarketCap"))
+            or float(row["trailingMarketCap"]) <= 0.0
         ):
             raise ValueError(f"dashboard {label} contains an invalid holding")
-        if policy_id == "score_liquidity_rank":
+        if policy_id == FIXED_WEIGHTING_POLICY:
             if (
                 not _finite_number(row.get("scoreComponent"))
                 or not 0.0 < float(row["scoreComponent"]) <= 1.0
                 or not _finite_number(row.get("liquidityComponent"))
                 or not 0.0 < float(row["liquidityComponent"]) <= 1.0
+                or not _finite_number(row.get("marketCapComponent"))
+                or not 0.0 < float(row["marketCapComponent"]) <= 1.0
             ):
-                raise ValueError(f"dashboard {label} score/liquidity components are invalid")
-        elif row.get("scoreComponent") is not None or row.get("liquidityComponent") is not None:
-            raise ValueError(f"dashboard {label} unused score/liquidity components must be null")
+                raise ValueError(
+                    f"dashboard {label} score/liquidity/market-cap components are invalid"
+                )
         symbols.append(str(row["symbol"]))
         total += float(row["weight"])
     if len(symbols) != len(set(symbols)):
@@ -2094,13 +2210,17 @@ def _validate_policy_weight_construction(
 
     score_components: list[float] | None = None
     liquidity_components: list[float] | None = None
-    if policy_id == "score_liquidity_rank":
+    market_cap_components: list[float] | None = None
+    if policy_id == FIXED_WEIGHTING_POLICY:
         scoring_values = [max(value, 0.0) for value in factor_scores]
         if not any(value > 0.0 for value in scoring_values):
             scoring_values = factor_scores
         liquidity_values = [row.get("trailingDollarVolume") for row in weights]
+        market_cap_values = [row.get("trailingMarketCap") for row in weights]
         if any(not _finite_number(value) or float(value) <= 0.0 for value in liquidity_values):
             raise ValueError(f"{label} trailing liquidity inputs are invalid")
+        if any(not _finite_number(value) or float(value) <= 0.0 for value in market_cap_values):
+            raise ValueError(f"{label} point-in-time market-cap inputs are invalid")
         score_components = [
             _percentile_rank(scoring_values, position) for position in range(len(weights))
         ]
@@ -2108,44 +2228,23 @@ def _validate_policy_weight_construction(
         liquidity_components = [
             _percentile_rank(liquidity_numbers, position) for position in range(len(weights))
         ]
+        market_cap_numbers = [float(value) for value in market_cap_values]
+        market_cap_components = [
+            _percentile_rank(market_cap_numbers, position) for position in range(len(weights))
+        ]
 
     raw_values: list[float] = []
     for position, row in enumerate(weights):
-        rank_component = rank_components[position]
-        if policy_id == "equal_weight":
+        if policy_id == FIXED_WEIGHTING_POLICY:
             if (
-                component_status.get("rank") != "not_used"
-                or component_status.get("volatility") != "not_used"
-            ):
-                raise ValueError(f"{label} equal-weight component status is inconsistent")
-            expected_raw = 1.0
-        elif policy_id == "capped_linear_rank":
-            if (
-                component_status.get("rank") != "available"
-                or component_status.get("volatility") != "not_used"
-            ):
-                raise ValueError(f"{label} linear-rank component status is inconsistent")
-            expected_raw = rank_component
-        elif policy_id == "capped_vol_adjusted_rank":
-            volatility = row.get("trailingVolatility")
-            if (
-                component_status.get("rank") != "available"
-                or component_status.get("volatility") != "trailing_signal_date_only"
-                or not _finite_number(volatility)
-                or not float(config["volatility_floor"])
-                <= float(volatility)
-                <= float(config["volatility_cap"])
-            ):
-                raise ValueError(f"{label} volatility-adjusted components are inconsistent")
-            expected_raw = rank_component / float(volatility)
-        elif policy_id == "score_liquidity_rank":
-            if (
-                component_status.get("rank") != "available"
+                component_status.get("methodology") != "fixed_not_optimized"
                 or component_status.get("liquidity") != "trailing_raw_dollar_volume"
+                or component_status.get("marketCap") != "point_in_time_public_filing"
                 or score_components is None
                 or liquidity_components is None
+                or market_cap_components is None
             ):
-                raise ValueError(f"{label} score-liquidity component status is inconsistent")
+                raise ValueError(f"{label} fixed-method components are inconsistent")
             _require_close(
                 row.get("scoreComponent"),
                 score_components[position],
@@ -2156,10 +2255,16 @@ def _validate_policy_weight_construction(
                 liquidity_components[position],
                 f"{label} liquidity component",
             )
+            _require_close(
+                row.get("marketCapComponent"),
+                market_cap_components[position],
+                f"{label} market-cap component",
+            )
             expected_raw = (
-                float(config["score_liquidity_rank_floor"])
-                + float(config["score_liquidity_score_weight"]) * score_components[position]
-                + float(config["score_liquidity_liquidity_weight"]) * liquidity_components[position]
+                float(config["allocation_rank_floor"])
+                + float(config["allocation_score_weight"]) * score_components[position]
+                + float(config["allocation_liquidity_weight"]) * liquidity_components[position]
+                + float(config["allocation_market_cap_weight"]) * market_cap_components[position]
             )
         else:  # pragma: no cover - registry validation prevents this branch
             raise ValueError(f"unsupported weighting policy: {policy_id}")
@@ -2192,7 +2297,7 @@ def _validate_current_target(
         or target.get("weightingPolicyVersion") != POLICY_REGISTRY[policy]["version"]
         or target.get("asOf") != as_of
         or target.get("signalDate") != as_of
-        or target.get("targetType") != "current_research_target"
+        or target.get("targetType") != "factor_portfolio"
         or target.get("executionTiming") != "next_available_session_close_after_signal"
         or target.get("status") != "available"
         or not _required_text(target.get("tieBreakPolicy"))
@@ -2481,7 +2586,7 @@ def _validate_factor_holding_history_sidecar_data(
         "contract",
         "contractVersion",
         "resultKey",
-        "selectedWeightingPolicy",
+        "weightingPolicy",
         "weightTiming",
         "startDate",
         "endDate",
@@ -2525,7 +2630,7 @@ def _validate_factor_holding_history_sidecar_data(
         or data.get("contract") != FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
         or data.get("contractVersion") != FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION
         or data.get("resultKey") != payload.get("resultKey")
-        or data.get("selectedWeightingPolicy") != payload.get("selectedWeightingPolicy")
+        or data.get("weightingPolicy") != payload.get("weightingPolicy")
         or data.get("weightTiming") != SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
         or data.get("startDate") != dates[0]
         or data.get("endDate") != dates[-1]
@@ -2569,7 +2674,7 @@ def _validate_factor_holding_history_sidecar_data(
         "blocked_missing_held_quote",
         "blocked_all_targets_unpriceable",
     }
-    selected_factor = str(payload["selectedFactor"])
+    selected_factor = str(payload.get("bestFactor", payload.get("selectedFactor")))
     expanded_selected_sessions: list[dict[str, Any]] = []
     top_n = int(payload["config"]["top_n"])
     for factor in sorted(factor_ids):
@@ -2578,7 +2683,8 @@ def _validate_factor_holding_history_sidecar_data(
             not isinstance(factor_history, dict)
             or set(factor_history) != {"factor", "weightingPolicyId", "resultKey", "sessions"}
             or factor_history.get("factor") != factor
-            or factor_history.get("weightingPolicyId") != payload.get("selectedWeightingPolicy")
+            or factor_history.get("weightingPolicyId")
+            != payload.get("weightingPolicy", payload.get("selectedWeightingPolicy"))
             or factor_history.get("resultKey") != payload.get("resultKey")
         ):
             raise ValueError("dashboard factor holding history identity is inconsistent")
@@ -2697,7 +2803,7 @@ def _validate_factor_holding_history_sidecar(
         "sha256",
         "bytes",
         "resultKey",
-        "selectedWeightingPolicy",
+        "weightingPolicy",
         "weightTiming",
         "startDate",
         "endDate",
@@ -2723,7 +2829,7 @@ def _validate_factor_holding_history_sidecar(
         or isinstance(manifest.get("bytes"), bool)
         or not 1 <= int(manifest["bytes"]) <= MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES
         or manifest.get("resultKey") != payload.get("resultKey")
-        or manifest.get("selectedWeightingPolicy") != payload.get("selectedWeightingPolicy")
+        or manifest.get("weightingPolicy") != payload.get("weightingPolicy")
         or manifest.get("weightTiming") != SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
         or manifest.get("startDate") != selected_history.get("startDate")
         or manifest.get("endDate") != selected_history.get("endDate")
@@ -2770,7 +2876,10 @@ def validate_factor_holding_history_sidecar_bytes(
         data = json.loads(encoded)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("dashboard factor holding history sidecar is not valid JSON") from error
-    selected_history = payload.get("selectedBacktestHoldingHistory")
+    selected_history = payload.get(
+        "bestFactorBacktestHoldingHistory",
+        payload.get("selectedBacktestHoldingHistory"),
+    )
     if not isinstance(selected_history, dict):
         raise ValueError("dashboard canonical selected holding history is unavailable")
     return _validate_factor_holding_history_sidecar_data(
@@ -3043,9 +3152,11 @@ def _validate_portfolio_policy(payload: dict[str, Any], selected: dict[str, Any]
         "rebalanceFrequency": config["rebalance_frequency"],
         "transactionCostBps": config["transaction_cost_bps"],
         "slippageBps": config["slippage_bps"],
-        "volatilityLookbackDays": config["volatility_lookback_days"],
-        "volatilityFloor": config["volatility_floor"],
-        "volatilityCap": config["volatility_cap"],
+        "factorScoreWeight": config["allocation_score_weight"],
+        "liquidityWeight": config["allocation_liquidity_weight"],
+        "marketCapWeight": config["allocation_market_cap_weight"],
+        "rankFloor": config["allocation_rank_floor"],
+        "marketCapMaximumAgeDays": config["market_cap_max_age_days"],
     }
     if (
         not isinstance(policy, dict)
@@ -3059,38 +3170,44 @@ def _validate_portfolio_policy(payload: dict[str, Any], selected: dict[str, Any]
 
 
 def _load_payload(source: AnalysisResult | dict[str, Any] | Path) -> dict[str, Any]:
+    """Load and validate the input-driven schema-v5 dashboard contract.
+
+    Schema v5 deliberately removes the old canonical/current-target and joint
+    factor-policy product surfaces. Internal compatibility aliases are created
+    only while calling deep reusable validators; they are never serialized.
+    """
+
     if isinstance(source, AnalysisResult):
         payload = result_payload(source)
     elif isinstance(source, Path):
         payload = json.loads(source.read_text(encoding="utf-8"))
     else:
         payload = source
-    if not isinstance(payload, dict) or payload.get("schemaVersion") != 4:
-        raise ValueError("dashboard payload must use schemaVersion 4")
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != 5:
+        raise ValueError("dashboard payload must use schemaVersion 5")
     required = {
         "resultKey",
         "resultIdentity",
         "generatedAtUtc",
-        "selectedFactor",
-        "selectedWeightingPolicy",
-        "selectedReason",
-        "selectionDecision",
-        "gridAccounting",
-        "factorPolicyRanking",
-        "policyDiagnostics",
-        "weightingPolicyRegistry",
+        "bestFactor",
+        "weightingPolicy",
+        "bestFactorReason",
+        "factorSelectionDecision",
+        "factorAccounting",
+        "factorRanking",
+        "weightingMethodology",
         "contributionDiagnostics",
-        "portfolioPolicy",
+        "allocationMethod",
         "researchScope",
         "researchInputs",
         "config",
         "data",
         "selectionMethod",
-        "currentResearchTarget",
+        "bestFactorPortfolio",
         "backtestHeldPortfolio",
-        "selectedBacktestHoldingHistory",
+        "bestFactorBacktestHoldingHistory",
         "factorHoldingHistorySidecar",
-        "currentTransition",
+        "bestFactorTransition",
         "factorPortfolios",
         "factorDefinitions",
         "factorDiagnostics",
@@ -3099,74 +3216,245 @@ def _load_payload(source: AnalysisResult | dict[str, Any] | Path) -> dict[str, A
     }
     missing = sorted(required.difference(payload))
     if missing:
-        raise ValueError("dashboard payload missing fields: " + ", ".join(missing))
-    legacy = sorted(_LEGACY_SCHEMA_KEYS.intersection(payload))
+        raise ValueError("dashboard payload missing schema-v5 fields: " + ", ".join(missing))
+    forbidden = {
+        "selectedFactor",
+        "selectedWeightingPolicy",
+        "selectedReason",
+        "selectionDecision",
+        "gridAccounting",
+        "factorPolicyRanking",
+        "policyDiagnostics",
+        "weightingPolicyRegistry",
+        "portfolioPolicy",
+        "currentResearchTarget",
+        "selectedBacktestHoldingHistory",
+        "currentTransition",
+    }
+    legacy = sorted(forbidden.intersection(payload))
     if legacy:
-        raise ValueError("dashboard schemaVersion 4 contains legacy aliases: " + ", ".join(legacy))
+        raise ValueError("dashboard schemaVersion 5 contains removed fields: " + ", ".join(legacy))
     if not _required_text(payload.get("generatedAtUtc")):
         raise ValueError("dashboard generatedAtUtc is required")
+
+    best_factor = _required_text(payload.get("bestFactor"))
+    policy_id = _required_text(payload.get("weightingPolicy"))
+    if not best_factor or policy_id != FIXED_WEIGHTING_POLICY:
+        raise ValueError("dashboard best factor or fixed weighting policy is invalid")
+    methodology = payload.get("weightingMethodology")
+    expected_methodology = {
+        "registryVersion": POLICY_REGISTRY_VERSION,
+        "policyId": FIXED_WEIGHTING_POLICY,
+        "policy": POLICY_REGISTRY[FIXED_WEIGHTING_POLICY],
+        "optimized": False,
+    }
+    if methodology != expected_methodology:
+        raise ValueError("dashboard fixed weighting methodology is inconsistent")
+
     _validate_data(payload)
     _validate_identity(payload)
-    _validate_registry(payload)
     _validate_research_inputs(payload)
     _validate_performance(payload)
-    selected, independent_rows, independent = _validate_grid_and_selection(payload)
-    validated_independent, aliases = _factor_sets(payload)
-    if validated_independent != independent:
-        raise ValueError("dashboard factorDiagnostics independent factor scope is inconsistent")
-    _validate_factor_diagnostics(payload, independent=independent, aliases=aliases)
-    _validate_selection_decision(payload, selected)
-    _validate_policy_diagnostics(payload, independent_rows, independent)
-    _validate_portfolio_policy(payload, selected)
-    as_of = str(payload["data"]["asOf"])
-    _validate_factor_portfolios(
-        payload,
-        factors=validated_independent.union(aliases),
-        selected=selected,
-        as_of=as_of,
-    )
-    target = _validate_current_target(payload, as_of=as_of, selected=selected)
-    selected_current_fields = {
-        "current_holding_count": target["selectedSecurityCount"],
-        "current_cash_weight": target["cashWeight"],
-        "current_target_effective_names": target["concentration"]["effectiveNames"],
-        "current_target_hhi": target["concentration"]["riskySleeveHhi"],
-        "current_target_max_weight": target["concentration"]["maxWeight"],
+    independent, aliases = _factor_sets(payload)
+    all_factors = independent.union(aliases)
+    ranking = payload.get("factorRanking")
+    if (
+        not isinstance(ranking, list)
+        or len(ranking) != len(all_factors)
+        or any(not isinstance(row, dict) for row in ranking)
+        or {str(row.get("factor")) for row in ranking} != all_factors
+        or any(row.get("policy_id") != FIXED_WEIGHTING_POLICY for row in ranking)
+    ):
+        raise ValueError("dashboard factorRanking does not cover the canonical factor set")
+    validated_selected = _validate_ranking_guardrails(ranking, payload["config"])
+    selected_rows = [row for row in ranking if row.get("selected") is True]
+    if (
+        len(selected_rows) != 1
+        or selected_rows[0] is not validated_selected
+        or selected_rows[0].get("factor") != best_factor
+        or selected_rows[0].get("selection_eligible") is not True
+        or selected_rows[0].get("rank") != 1
+    ):
+        raise ValueError("dashboard factorRanking best-factor selection is inconsistent")
+    selected = selected_rows[0]
+
+    independent_rows = [row for row in ranking if str(row["factor"]) in independent]
+    reason_counts: dict[str, int] = {}
+    for row in independent_rows:
+        status = row.get("comparison_status")
+        codes = row.get("exclusion_reason_codes")
+        if status == "available":
+            if codes != []:
+                raise ValueError("available independent factor has exclusion reason codes")
+        elif (
+            not isinstance(codes, list)
+            or not codes
+            or not all(_required_text(code) for code in codes)
+        ):
+            raise ValueError("excluded independent factor has no exact reason code")
+        else:
+            for code in codes:
+                reason_counts[str(code)] = reason_counts.get(str(code), 0) + 1
+    if any(
+        row.get("comparison_status") != "duplicate_alias"
+        for row in ranking
+        if str(row["factor"]) in aliases
+    ):
+        raise ValueError("diagnostic alias factor is not marked duplicate_alias")
+    available_count = sum(row.get("comparison_status") == "available" for row in independent_rows)
+    expected_accounting = {
+        "version": 2,
+        "independentFactorCount": len(independent),
+        "expectedIndependentFactorCount": len(independent),
+        "evaluatedIndependentFactorCount": len(independent_rows),
+        "availableIndependentFactorCount": available_count,
+        "excludedIndependentFactorCount": len(independent) - available_count,
+        "missingIndependentFactorCount": 0,
+        "diagnosticAliasFactorCount": len(aliases),
+        "commonComparableFactorCount": available_count,
+        "exclusionReasonCounts": dict(sorted(reason_counts.items())),
+        "invariant": (
+            "availableIndependentFactorCount + excludedIndependentFactorCount "
+            "= expectedIndependentFactorCount"
+        ),
     }
-    for field, value in selected_current_fields.items():
-        _require_close(selected.get(field), float(value), f"selected pair {field}")
+    accounting = payload.get("factorAccounting")
+    if accounting != expected_accounting:
+        raise ValueError("dashboard factorAccounting is inconsistent")
+
+    decision = payload.get("factorSelectionDecision")
+    dates = payload["performance"]["dates"]
+    reconstructed_config = _reconstruct_run_config(payload)
+    if (
+        not isinstance(decision, dict)
+        or decision.get("method") != "fixed_policy_factor_selection"
+        or decision.get("version") != FACTOR_SELECTION_VERSION
+        or decision.get("dynamicSelection") is not True
+        or decision.get("weightingPolicyOptimized") is not False
+        or decision.get("bestFactor") != best_factor
+        or decision.get("weightingPolicy") != policy_id
+        or decision.get("weightingPolicyVersion") != POLICY_REGISTRY[policy_id]["version"]
+        or decision.get("guardrailProfile") != _absolute_guardrail_profile(reconstructed_config)
+        or decision.get("tieBreakPolicy") != list(FACTOR_SELECTION_TIE_BREAK_POLICY)
+        or decision.get("evaluationStart") != dates[1]
+        or decision.get("evaluationEnd") != dates[-1]
+        or decision.get("evaluationWindowDays") != len(dates) - 1
+        or decision.get("minimumObservations") != reconstructed_config.min_evaluation_observations
+        or decision.get("minimumValuationCoverage") != reconstructed_config.min_valuation_coverage
+        or decision.get("minimumDailyRiskObservations")
+        != reconstructed_config.min_daily_risk_observations
+        or decision.get("factorAccounting") != accounting
+        or decision.get("selectionEligibleFactorCount")
+        != sum(row.get("selection_eligible") is True for row in ranking)
+        or decision.get("reason") != payload.get("bestFactorReason")
+    ):
+        raise ValueError("dashboard factorSelectionDecision is inconsistent")
+    score_parity = {
+        "bestBaseCompositeScore": "base_composite_score",
+        "bestExtremeEventPenaltyPoints": "extreme_event_penalty_points",
+        "bestSelectionScore": "selection_score",
+    }
+    for decision_field, ranking_field in score_parity.items():
+        _require_close(
+            decision.get(decision_field),
+            float(selected[ranking_field]),
+            f"factorSelectionDecision.{decision_field}",
+        )
+
+    allocation = payload.get("allocationMethod")
+    config = payload["config"]
+    expected_parameters = {
+        "topN": config["top_n"],
+        "maxWeight": config["max_weight"],
+        "rebalanceFrequency": config["rebalance_frequency"],
+        "transactionCostBps": config["transaction_cost_bps"],
+        "slippageBps": config["slippage_bps"],
+        "factorScoreWeight": config["allocation_score_weight"],
+        "liquidityWeight": config["allocation_liquidity_weight"],
+        "marketCapWeight": config["allocation_market_cap_weight"],
+        "rankFloor": config["allocation_rank_floor"],
+        "marketCapMaximumAgeDays": config["market_cap_max_age_days"],
+    }
+    if (
+        not isinstance(allocation, dict)
+        or allocation.get("policyId") != policy_id
+        or allocation.get("version") != POLICY_REGISTRY[policy_id]["version"]
+        or allocation.get("fixed") is not True
+        or allocation.get("parameters") != expected_parameters
+    ):
+        raise ValueError("dashboard allocationMethod is inconsistent")
+
+    # Reuse the mature portfolio, history, transition, contribution, and factor
+    # diagnostic validators through non-serialized aliases.
+    compat = deepcopy(payload)
+    compat.update(
+        {
+            "selectedFactor": best_factor,
+            "selectedWeightingPolicy": policy_id,
+            "selectedReason": payload["bestFactorReason"],
+            "selectionDecision": decision,
+            "gridAccounting": accounting,
+            "factorPolicyRanking": ranking,
+            "weightingPolicyRegistry": {
+                "registryVersion": POLICY_REGISTRY_VERSION,
+                "policies": POLICY_REGISTRY,
+            },
+            "currentResearchTarget": payload["bestFactorPortfolio"],
+            "selectedBacktestHoldingHistory": payload["bestFactorBacktestHoldingHistory"],
+            "currentTransition": payload["bestFactorTransition"],
+        }
+    )
+    _validate_factor_diagnostics(compat, independent=independent, aliases=aliases)
+    _validate_factor_portfolios(
+        compat,
+        factors=all_factors,
+        selected=selected,
+        as_of=str(payload["data"]["asOf"]),
+    )
+    target = _validate_current_target(
+        compat,
+        as_of=str(payload["data"]["asOf"]),
+        selected=selected,
+    )
+    if payload.get("bestFactorPortfolio") != payload["factorPortfolios"].get(best_factor):
+        raise ValueError("dashboard bestFactorPortfolio differs from factorPortfolios")
     held = _validate_backtest_held_portfolio(
-        payload,
-        as_of=as_of,
-        selected_factor=str(selected["factor"]),
-        selected_policy=str(selected["policy_id"]),
+        compat,
+        as_of=str(payload["data"]["asOf"]),
+        selected_factor=best_factor,
+        selected_policy=policy_id,
     )
     _validate_selected_backtest_holding_history(
-        payload,
+        compat,
         held=held,
-        as_of=as_of,
-        selected_factor=str(selected["factor"]),
-        selected_policy=str(selected["policy_id"]),
+        as_of=str(payload["data"]["asOf"]),
+        selected_factor=best_factor,
+        selected_policy=policy_id,
     )
     _validate_factor_holding_history_sidecar(
-        payload,
-        selected_history=payload["selectedBacktestHoldingHistory"],
+        compat,
+        selected_history=compat["selectedBacktestHoldingHistory"],
     )
-    _validate_current_transition(payload, held=held, target=target, as_of=as_of)
-    _validate_contribution_diagnostics(payload, selected)
+    _validate_current_transition(
+        compat,
+        held=held,
+        target=target,
+        as_of=str(payload["data"]["asOf"]),
+    )
+    _validate_contribution_diagnostics(compat, selected)
     return payload
 
 
 def _summary(payload: dict[str, Any]) -> dict[str, Any]:
-    selected = next(row for row in payload["factorPolicyRanking"] if row.get("selected") is True)
-    target = payload["currentResearchTarget"]
+    selected = next(row for row in payload["factorRanking"] if row.get("selected") is True)
+    target = payload["bestFactorPortfolio"]
     data = payload["data"]
     scope = payload["researchScope"]
     meta = payload["meta"]
     return {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "contract": "quant-research-summary",
-        "contractVersion": 3,
+        "contractVersion": 4,
         "projectId": "momentum-factor-lab",
         "resultKey": payload["resultKey"],
         "resultIdentity": payload["resultIdentity"],
@@ -3180,17 +3468,16 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
         "universeSize": data["inputSecurityCount"],
         "analyzedSecurityCount": data["analyzedSecurityCount"],
         "eligibleSecurityCount": data["latestEligibleSecurityCount"],
-        "selectedFactor": payload["selectedFactor"],
-        "selectedWeightingPolicy": payload["selectedWeightingPolicy"],
-        "selectedReason": payload["selectedReason"],
-        "selectionDecision": payload["selectionDecision"],
-        "gridAccounting": payload["gridAccounting"],
-        "policyDiagnostics": payload["policyDiagnostics"],
-        "weightingPolicyRegistry": payload["weightingPolicyRegistry"],
+        "bestFactor": payload["bestFactor"],
+        "weightingPolicy": payload["weightingPolicy"],
+        "bestFactorReason": payload["bestFactorReason"],
+        "factorSelectionDecision": payload["factorSelectionDecision"],
+        "factorAccounting": payload["factorAccounting"],
+        "weightingMethodology": payload["weightingMethodology"],
         "contributionDiagnostics": payload["contributionDiagnostics"],
-        "portfolioPolicy": payload["portfolioPolicy"],
+        "allocationMethod": payload["allocationMethod"],
         "backtestHeldPortfolio": payload["backtestHeldPortfolio"],
-        "currentTransition": payload["currentTransition"],
+        "bestFactorTransition": payload["bestFactorTransition"],
         "selectionScore": selected["selection_score"],
         "compositeScore": selected["composite_score"],
         "cagr": selected["cagr"],
@@ -3211,7 +3498,7 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
         "portfolioStatus": target["status"],
         "portfolioSize": target["selectedSecurityCount"],
         "portfolioEligibleSecurityCount": target["eligibleSecurityCount"],
-        "currentResearchTarget": target,
+        "bestFactorPortfolio": target,
         "cashWeight": target["cashWeight"],
         "maxWeight": payload["config"]["max_weight"],
         "cashReasons": list(target.get("reasons", [])),
@@ -3228,7 +3515,7 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def dashboard_summary(source: AnalysisResult | dict[str, Any] | Path) -> dict[str, Any]:
-    """Return the validated schema-v4 summary without writing site aliases."""
+    """Return the validated schema-v5 summary without writing site aliases."""
 
     return _summary(_load_payload(source))
 

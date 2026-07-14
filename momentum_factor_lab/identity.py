@@ -12,7 +12,7 @@ import rfc8785
 from .config import (
     ABSOLUTE_GUARDRAIL_VERSION,
     ANALYSIS_CACHE_VERSION,
-    JOINT_SELECTION_VERSION,
+    FACTOR_SELECTION_VERSION,
     POLICY_REGISTRY,
     POLICY_REGISTRY_VERSION,
     RunConfig,
@@ -50,6 +50,7 @@ _ENGINE_SOURCE_FILES = (
     "factors.py",
     "identity.py",
     "metrics.py",
+    "market_cap.py",
     "portfolio.py",
     "workflow.py",
 )
@@ -108,7 +109,7 @@ def policy_definition_sha256() -> str:
 
 def selection_spec_sha256(config: RunConfig) -> str:
     payload = {
-        "jointSelectionVersion": JOINT_SELECTION_VERSION,
+        "factorSelectionVersion": FACTOR_SELECTION_VERSION,
         "absoluteGuardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
         "contributionDiagnosticVersion": CONTRIBUTION_DIAGNOSTIC_VERSION,
         "scoreWeights": config.score_weights,

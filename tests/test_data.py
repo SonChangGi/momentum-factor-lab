@@ -11,7 +11,7 @@ import pytest
 
 from momentum_factor_lab import data
 from momentum_factor_lab.backtest import run_factor_backtest
-from momentum_factor_lab.config import RunConfig
+from momentum_factor_lab.config import FIXED_WEIGHTING_POLICY, RunConfig
 from momentum_factor_lab.data import (
     build_eligibility_mask,
     load_market_data,
@@ -20,6 +20,63 @@ from momentum_factor_lab.data import (
 )
 from momentum_factor_lab.identity import build_result_identity
 from momentum_factor_lab.metrics import metric_summary
+from momentum_factor_lab.market_cap import MarketCapResult
+
+
+@pytest.fixture(autouse=True)
+def _stub_sec_market_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    def load_fixture_market_caps(
+        *,
+        dates: pd.DatetimeIndex,
+        raw_closes: pd.DataFrame,
+        universe: pd.DataFrame,
+        **_kwargs,
+    ) -> MarketCapResult:
+        market_caps = raw_closes.mul(100_000_000.0)
+        symbols = [
+            str(symbol)
+            for symbol in universe.get("symbol", pd.Series(dtype=object))
+            if str(symbol) in market_caps
+        ]
+        sources = pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "mapping": "fixture",
+                    "taxonomy": "fixture",
+                    "tag": "sharesOutstanding",
+                    "valueKind": "shares",
+                    "latestMarketCapAvailable": bool(
+                        pd.notna(market_caps.loc[dates.max(), symbol])
+                    ),
+                }
+                for symbol in symbols
+            ]
+        )
+        health = pd.DataFrame(
+            [
+                {
+                    "source": "sec-xbrl-point-in-time-market-cap-fixture",
+                    "status": "available",
+                    "records": len(symbols),
+                    "point_in_time_market_cap": True,
+                }
+            ]
+        )
+        covered = int(market_caps.reindex(columns=symbols).iloc[-1].notna().sum())
+        return MarketCapResult(
+            market_caps=market_caps,
+            symbol_sources=sources,
+            source_health=health,
+            observation_count=len(symbols),
+            covered_symbol_count=covered,
+            coverage_ratio=covered / max(1, len(symbols)),
+        )
+
+    monkeypatch.setattr(
+        "momentum_factor_lab.market_cap.load_sec_market_caps",
+        load_fixture_market_caps,
+    )
 
 
 def test_demo_uses_200_candidates_and_keeps_benchmark_out_of_eligibility() -> None:
@@ -39,6 +96,8 @@ def test_demo_uses_200_candidates_and_keeps_benchmark_out_of_eligibility() -> No
         "generatorSource",
         "defaultUniverseFile",
         "resolvedOrderedUniverse",
+        "marketCaps",
+        "marketCapSources",
     } == set(market.input_sha256)
     assert market.input_sha256["rawCloses"] is None
     assert all(value is None or len(value) == 64 for value in market.input_sha256.values())
@@ -376,6 +435,7 @@ def test_live_provider_non_positive_prices_are_missing_and_disclosed(monkeypatch
         raw_volumes=volumes,
         volumes=volumes,
         raw_closes=raw_closes,
+        stock_splits=pd.DataFrame(0.0, index=dates, columns=prices.columns),
         candidate_universe=pd.DataFrame({"symbol": ["AAA"]}),
         price_sources=pd.DataFrame(),
         data_sources=pd.DataFrame(),
@@ -423,6 +483,7 @@ def test_zero_volume_candidate_quote_blocks_halt_exit_and_terminal_metrics(
         raw_volumes=volumes,
         volumes=volumes,
         raw_closes=prices.copy(),
+        stock_splits=pd.DataFrame(0.0, index=dates, columns=prices.columns),
         candidate_universe=pd.DataFrame({"symbol": ["QMMM", "SAFE", "QQQ"]}),
         price_sources=pd.DataFrame(),
         data_sources=pd.DataFrame(),
@@ -448,6 +509,8 @@ def test_zero_volume_candidate_quote_blocks_halt_exit_and_terminal_metrics(
         raw_closes,
         comparison_prices,
         analysis_universe,
+        _,
+        _,
         _,
         _,
         _,
@@ -485,11 +548,13 @@ def test_zero_volume_candidate_quote_blocks_halt_exit_and_terminal_metrics(
     eligibility = candidate_prices.notna()
     backtest = run_factor_backtest(
         "gap_resistant_fixture",
-        "equal_weight",
+        FIXED_WEIGHTING_POLICY,
         candidate_prices,
         scores,
         config,
         eligibility_mask=eligibility,
+        trailing_dollar_volume=dollar_volumes,
+        trailing_market_cap=analysis_prices.mul(100_000_000.0),
     )
 
     assert backtest.returns.loc[event_date] == pytest.approx(207.0 / 11.27 - 1.0)
@@ -528,6 +593,7 @@ def test_live_comparator_prices_are_preserved_outside_the_analyzed_universe(monk
         raw_volumes=volumes,
         volumes=volumes,
         raw_closes=prices.copy(),
+        stock_splits=pd.DataFrame(0.0, index=dates, columns=prices.columns),
         candidate_universe=pd.DataFrame({"symbol": ["QQQ", "AAA"]}),
         price_sources=pd.DataFrame(),
         data_sources=pd.DataFrame(),
@@ -545,6 +611,8 @@ def test_live_comparator_prices_are_preserved_outside_the_analyzed_universe(monk
         _,
         comparison_prices,
         analysis_universe,
+        _,
+        _,
         _,
         _,
         _,
@@ -658,6 +726,19 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
             }
         ]
     )
+    market_caps = raw_closes.mul(100_000_000.0)
+    market_cap_sources = pd.DataFrame(
+        [
+            {
+                "symbol": "AAA",
+                "mapping": "fixture",
+                "taxonomy": "fixture",
+                "tag": "sharesOutstanding",
+                "valueKind": "shares",
+                "latestMarketCapAvailable": True,
+            }
+        ]
+    )
     hashes = {
         "prices": data._canonical_matrix_sha256(prices),
         "volumes": data._canonical_matrix_sha256(volumes),
@@ -669,6 +750,8 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
         "priceSources": data.canonical_records_sha256(price_sources),
         "dataSources": data.canonical_records_sha256(data_sources),
         "comparisonPrices": data._canonical_matrix_sha256(comparison_prices),
+        "marketCaps": data._canonical_matrix_sha256(market_caps),
+        "marketCapSources": data.canonical_records_sha256(market_cap_sources),
     }
     market = data.MarketData(
         prices=prices,
@@ -692,6 +775,8 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
         price_sources=price_sources,
         data_sources=data_sources,
         comparison_prices=comparison_prices,
+        market_caps=market_caps,
+        market_cap_sources=market_cap_sources,
     )
     snapshot_dir = tmp_path / "snapshot"
     write_market_data_snapshot(market, snapshot_dir)
@@ -756,8 +841,10 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
 
     manifest_path = snapshot_dir / "market_data_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["schemaVersion"] == 3
+    assert manifest["schemaVersion"] == 4
     assert manifest["files"]["priceSources"] == "price_sources.json"
+    assert manifest["files"]["marketCaps"] == "point_in_time_market_caps.csv.gz"
+    assert manifest["files"]["marketCapSources"] == "market_cap_sources.json"
     assert manifest["files"]["dataSources"] == "data_sources.json"
     assert manifest["files"]["universe"] == "universe.json"
     assert manifest["files"]["comparisonPrices"] == "comparison_adjusted_prices.csv.gz"
@@ -778,6 +865,7 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
         "dollarVolumes": market.dollar_volumes,
         "rawCloses": market.raw_closes,
         "comparisonPrices": market.comparison_prices,
+        "marketCaps": market.market_caps,
     }
     for component, frame in legacy_matrix_frames.items():
         transitional_manifest["matrixSha256"][component] = data._legacy_canonical_matrix_sha256(
@@ -866,12 +954,13 @@ def test_exported_actual_market_snapshot_replays_only_after_hash_verification(
     legacy_manifest["readContract"] = data.LEGACY_SNAPSHOT_READ_CONTRACT
     for field in ("comparisonSymbols", "comparisonPriceBasis", "comparisonAsOf"):
         legacy_manifest.pop(field)
-    legacy_manifest["matrixSha256"].pop("comparisonPrices")
-    comparison_filename = legacy_manifest["files"].pop("comparisonPrices")
-    legacy_manifest["fileSha256"].pop("comparisonPrices")
-    (legacy_dir / comparison_filename).unlink()
+    for component in ("comparisonPrices", "marketCaps", "marketCapSources"):
+        legacy_manifest["matrixSha256"].pop(component)
+        filename = legacy_manifest["files"].pop(component)
+        legacy_manifest["fileSha256"].pop(component)
+        (legacy_dir / filename).unlink()
     for component, frame in legacy_matrix_frames.items():
-        if component == "comparisonPrices":
+        if component in {"comparisonPrices", "marketCaps"}:
             continue
         legacy_manifest["matrixSha256"][component] = data._legacy_canonical_matrix_sha256(
             frame,
@@ -1048,6 +1137,7 @@ def test_live_raw_close_proxy_snapshot_is_auditable_and_hash_reproducible(
         raw_volumes=volumes,
         volumes=volumes,
         raw_closes=raw_closes,
+        stock_splits=pd.DataFrame(0.0, index=dates, columns=prices.columns),
         candidate_universe=pd.DataFrame({"symbol": ["AAA", "BBB"]}),
         price_sources=pd.DataFrame(
             {

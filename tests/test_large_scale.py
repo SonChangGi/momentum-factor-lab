@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from momentum_factor_lab.backtest import run_factor_backtest
-from momentum_factor_lab.config import RunConfig
+from momentum_factor_lab.config import FIXED_WEIGHTING_POLICY, RunConfig
 from momentum_factor_lab.factors import simple_momentum
 
 
@@ -26,11 +26,13 @@ def test_core_backtest_supports_a_2701_security_universe() -> None:
     )
     result = run_factor_backtest(
         "mom_3m",
-        "equal_weight",
+        FIXED_WEIGHTING_POLICY,
         prices,
         scores,
         config,
         eligibility_mask=eligibility,
+        trailing_dollar_volume=prices.mul(1_000_000.0),
+        trailing_market_cap=prices.mul(100_000_000.0),
     )
     assert result.weights.shape == prices.shape
     assert result.weights.iloc[-1].gt(0.0).sum() == 20

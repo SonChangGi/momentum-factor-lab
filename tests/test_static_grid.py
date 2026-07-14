@@ -62,6 +62,17 @@ def _actual_market_detail(source: AnalysisResult) -> dict[str, object]:
             "cache_hit": False,
         }
     ]
+    market_cap_sources = [
+        {
+            "symbol": row["symbol"],
+            "mapping": "fixture",
+            "taxonomy": "fixture",
+            "tag": "sharesOutstanding",
+            "valueKind": "shares",
+            "latestMarketCapAvailable": True,
+        }
+        for row in price_sources
+    ]
     hashes = {
         "prices": "c" * 64,
         "volumes": "d" * 64,
@@ -72,6 +83,9 @@ def _actual_market_detail(source: AnalysisResult) -> dict[str, object]:
         "universeRecords": "3" * 64,
         "priceSources": canonical_records_sha256(price_sources),
         "dataSources": canonical_records_sha256(source_health),
+        "comparisonPrices": "4" * 64,
+        "marketCaps": "5" * 64,
+        "marketCapSources": canonical_records_sha256(market_cap_sources),
     }
     data.update(
         {
@@ -89,6 +103,11 @@ def _actual_market_detail(source: AnalysisResult) -> dict[str, object]:
             "analyzedSecurityCount": analyzed_count,
             "analyzedSymbols": [row["symbol"] for row in price_sources],
             "rawCloseAvailable": True,
+            "pointInTimeMarketCapAvailable": True,
+            "latestMarketCapSecurityCount": analyzed_count,
+            "latestMarketCapCoverageRatio": 1.0,
+            "marketCapSourcesSha256": hashes["marketCapSources"],
+            "comparisonPricesSha256": hashes["comparisonPrices"],
         }
     )
     data["funnel"].update(
@@ -122,6 +141,8 @@ def _actual_market_detail(source: AnalysisResult) -> dict[str, object]:
             "providerReturnedCandidateCount": analyzed_count,
             "analyzedSecurityCount": analyzed_count,
             "candidateSymbolsSha256": canonical_sha256(data["analyzedSymbols"]),
+            "comparisonSymbols": data["comparisonSymbols"],
+            "comparisonPricesSha256": hashes["comparisonPrices"],
         }
     )
     result_key = canonical_sha256(key_parts)
@@ -184,7 +205,7 @@ def _artifact(
     detail = deepcopy(base.detail)
     detail["config"]["top_n"] = top_n
     detail["researchInputs"]["topN"] = top_n
-    detail["portfolioPolicy"]["parameters"]["topN"] = top_n
+    detail["allocationMethod"]["parameters"]["topN"] = top_n
     shortage_reason = "fewer_complete_policy_inputs_than_top_n"
     cash_reason = "max_weight_capacity_or_missing_policy_inputs"
     portfolios = detail["factorPortfolios"]
@@ -197,10 +218,10 @@ def _artifact(
             reasons.insert(insert_at, shortage_reason)
         portfolio["reasons"] = reasons
 
-    selected_factor = detail["selectedFactor"]
-    detail["currentResearchTarget"] = deepcopy(portfolios[selected_factor])
-    selected_policy = detail["selectedWeightingPolicy"]
-    for row in detail["factorPolicyRanking"]:
+    selected_factor = detail["bestFactor"]
+    detail["bestFactorPortfolio"] = deepcopy(portfolios[selected_factor])
+    selected_policy = detail["weightingPolicy"]
+    for row in detail["factorRanking"]:
         if row["policy_id"] != selected_policy:
             continue
         portfolio = portfolios[row["factor"]]
@@ -459,22 +480,22 @@ def test_exact_tuple_resolution_has_no_partial_or_nearest_fallback(
             "at least 2,700 securities",
         ),
         (
-            lambda artifact: artifact.summary.update({"selectedFactor": "different"}),
-            "summary.selectedFactor differs",
+            lambda artifact: artifact.summary.update({"bestFactor": "different"}),
+            "summary differs from canonical",
         ),
         (
             lambda artifact: artifact.summary.update({"weights": [], "cashWeight": 1.0}),
-            "summary.weights differs",
+            "summary differs from canonical",
         ),
         (
-            lambda artifact: artifact.detail["currentResearchTarget"]["weights"][0].update(
+            lambda artifact: artifact.detail["bestFactorPortfolio"]["weights"][0].update(
                 {"weight": -0.25}
             ),
-            "invalid holding",
+            "schema-v5 dashboard contract",
         ),
         (
             lambda artifact: artifact.summary.update({"resultIdentity": {}}),
-            "identityVersion is unsupported",
+            "summary differs from canonical",
         ),
         (
             lambda artifact: artifact.detail.update({"resultKey": "f" * 64}),
@@ -502,9 +523,9 @@ def test_rejects_non_actual_or_non_parity_payloads(
 @pytest.mark.parametrize(
     ("field", "message"),
     [
-        ("researchScope", "researchScope must be an object"),
-        ("selectionMethod", "canonical schema-v4 dashboard contract"),
-        ("currentTransition", "canonical schema-v4 dashboard contract"),
+        ("researchScope", "missing schema-v5 fields: researchScope"),
+        ("selectionMethod", "missing schema-v5 fields: selectionMethod"),
+        ("bestFactorTransition", "missing schema-v5 fields: bestFactorTransition"),
         ("priceSources", "provider provenance contract is incomplete"),
         ("sourceHealth", "provider provenance contract is incomplete"),
     ],
@@ -526,14 +547,13 @@ def test_rejects_partial_payload_missing_browser_or_quant_contract(
         )
 
 
-def test_rejects_one_factor_one_policy_partial_schema_v4_payload(
+def test_rejects_one_factor_partial_schema_v5_payload(
     canonical_actual_artifact: StaticGridArtifact,
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(canonical_actual_artifact)
     detail = artifact.detail
-    selected_factor = detail["selectedFactor"]
-    selected_policy = detail["selectedWeightingPolicy"]
+    selected_factor = detail["bestFactor"]
     detail["factorDefinitions"] = [
         next(
             definition
@@ -541,18 +561,11 @@ def test_rejects_one_factor_one_policy_partial_schema_v4_payload(
             if definition["factor"] == selected_factor
         )
     ]
-    detail["weightingPolicyRegistry"]["policies"] = {
-        selected_policy: detail["weightingPolicyRegistry"]["policies"][selected_policy]
-    }
-    detail["factorPolicyRanking"] = [
-        next(
-            row
-            for row in detail["factorPolicyRanking"]
-            if row["factor"] == selected_factor and row["policy_id"] == selected_policy
-        )
+    detail["factorRanking"] = [
+        next(row for row in detail["factorRanking"] if row["factor"] == selected_factor)
     ]
 
-    with pytest.raises(StaticGridContractError, match="four canonical policies"):
+    with pytest.raises(StaticGridContractError, match="schema-v5 dashboard contract"):
         write_static_grid(
             tmp_path / "data",
             [artifact],
@@ -565,7 +578,7 @@ def test_rejects_one_factor_one_policy_partial_schema_v4_payload(
     [
         (
             lambda artifact: artifact.detail["researchScope"].update({"researchOnly": False}),
-            "actual-market research-only evidence",
+            "summary differs from canonical",
         ),
         (
             _remove_price_sources_hash,
@@ -685,11 +698,11 @@ def _add_excluded_independent_pair(artifact: StaticGridArtifact) -> None:
         definition["factor"]
         for definition in detail["factorDefinitions"]
         if definition.get("selection_eligible") is True
-        and definition["factor"] != detail["selectedFactor"]
+        and definition["factor"] != detail["bestFactor"]
     )
     row = next(
         row
-        for row in detail["factorPolicyRanking"]
+        for row in detail["factorRanking"]
         if row["factor"] == excluded_factor and row["policy_id"] == WEIGHTING_POLICIES[0]
     )
     row.update(
@@ -705,54 +718,54 @@ def _add_excluded_independent_pair(artifact: StaticGridArtifact) -> None:
             ],
         }
     )
-    detail["gridAccounting"] = {
-        **detail["gridAccounting"],
-        "availableIndependentPairCount": 243,
-        "excludedIndependentPairCount": 1,
+    detail["factorAccounting"] = {
+        **detail["factorAccounting"],
+        "availableIndependentFactorCount": 60,
+        "excludedIndependentFactorCount": 1,
         "commonComparableFactorCount": 60,
         "exclusionReasonCounts": {"insufficient_observations": 1},
     }
-    summary["gridAccounting"] = deepcopy(detail["gridAccounting"])
+    summary["factorAccounting"] = deepcopy(detail["factorAccounting"])
 
 
 @pytest.mark.parametrize(
     ("mutator", "message"),
     [
         (
-            lambda artifact: artifact.detail["gridAccounting"].update(
-                {"expectedIndependentPairCount": 999}
+            lambda artifact: artifact.detail["factorAccounting"].update(
+                {"expectedIndependentFactorCount": 999}
             ),
-            "expectedIndependentPairCount is inconsistent",
+            "factorAccounting is inconsistent",
         ),
         (
-            lambda artifact: artifact.detail["gridAccounting"].update(
-                {"availableIndependentPairCount": 0}
+            lambda artifact: artifact.detail["factorAccounting"].update(
+                {"availableIndependentFactorCount": 0}
             ),
-            "availableIndependentPairCount is inconsistent",
+            "factorAccounting is inconsistent",
         ),
         (
-            lambda artifact: artifact.detail["gridAccounting"].update(
-                {"evaluatedIndependentPairCount": 0}
+            lambda artifact: artifact.detail["factorAccounting"].update(
+                {"evaluatedIndependentFactorCount": 0}
             ),
-            "evaluatedIndependentPairCount is inconsistent",
+            "factorAccounting is inconsistent",
         ),
         (
-            lambda artifact: artifact.detail["gridAccounting"].update(
-                {"excludedIndependentPairCount": 1}
+            lambda artifact: artifact.detail["factorAccounting"].update(
+                {"excludedIndependentFactorCount": 1}
             ),
-            "excludedIndependentPairCount is inconsistent",
+            "factorAccounting is inconsistent",
         ),
         (
-            lambda artifact: artifact.detail["gridAccounting"].update(
-                {"missingIndependentPairCount": 1}
+            lambda artifact: artifact.detail["factorAccounting"].update(
+                {"missingIndependentFactorCount": 1}
             ),
-            "missingIndependentPairCount is inconsistent",
+            "factorAccounting is inconsistent",
         ),
         (
-            lambda artifact: artifact.detail["gridAccounting"].update(
-                {"expectedIndependentPairCount": True}
+            lambda artifact: artifact.detail["factorAccounting"].update(
+                {"expectedIndependentFactorCount": True}
             ),
-            "expectedIndependentPairCount is inconsistent",
+            "factorAccounting is inconsistent",
         ),
     ],
 )
@@ -779,10 +792,10 @@ def test_rejects_inconsistent_independent_exclusion_reason_totals(
 ) -> None:
     artifact = _artifact(canonical_actual_artifact)
     _add_excluded_independent_pair(artifact)
-    artifact.detail["gridAccounting"]["exclusionReasonCounts"] = {"fabricated_reason": 1}
-    artifact.summary["gridAccounting"] = deepcopy(artifact.detail["gridAccounting"])
+    artifact.detail["factorAccounting"]["exclusionReasonCounts"] = {"fabricated_reason": 1}
+    artifact.summary["factorAccounting"] = deepcopy(artifact.detail["factorAccounting"])
 
-    with pytest.raises(StaticGridContractError, match="exclusionReasonCounts is inconsistent"):
+    with pytest.raises(StaticGridContractError, match="schema-v5 dashboard contract"):
         write_static_grid(
             tmp_path / "data",
             [artifact],
@@ -795,12 +808,12 @@ def test_rejects_summary_grid_accounting_that_differs_from_detail(
     tmp_path: Path,
 ) -> None:
     artifact = _artifact(canonical_actual_artifact)
-    artifact.summary["gridAccounting"] = {
-        **artifact.summary["gridAccounting"],
-        "expectedIndependentPairCount": 999,
+    artifact.summary["factorAccounting"] = {
+        **artifact.summary["factorAccounting"],
+        "expectedIndependentFactorCount": 999,
     }
 
-    with pytest.raises(StaticGridContractError, match="summary.gridAccounting differs"):
+    with pytest.raises(StaticGridContractError, match="summary differs from canonical"):
         write_static_grid(
             tmp_path / "data",
             [artifact],
@@ -816,12 +829,12 @@ def test_rejects_exclusion_code_that_differs_from_structured_reason(
     _add_excluded_independent_pair(artifact)
     excluded = next(
         row
-        for row in artifact.detail["factorPolicyRanking"]
+        for row in artifact.detail["factorRanking"]
         if row["comparison_status"] == "insufficient_history"
     )
     excluded["exclusion_reason_codes"] = ["fabricated_reason"]
 
-    with pytest.raises(StaticGridContractError, match="reason codes differ"):
+    with pytest.raises(StaticGridContractError, match="schema-v5 dashboard contract"):
         write_static_grid(
             tmp_path / "data",
             [artifact],

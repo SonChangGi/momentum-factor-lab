@@ -86,6 +86,11 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
     source.add_argument("--demo", action="store_true", help="Use the deterministic synthetic demo")
     run.add_argument("--volumes", type=Path, help="Optional local share-volume CSV")
     run.add_argument(
+        "--market-caps",
+        type=Path,
+        help="Optional local point-in-time market-cap CSV; required for local portfolio analysis",
+    )
+    run.add_argument(
         "--volume-basis",
         choices=["split_adjusted"],
         help="Required with --volumes; confirms split-consistent share volume",
@@ -141,14 +146,7 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
     evaluation.add_argument("--score-winsor-lower", type=float, default=0.05)
     evaluation.add_argument("--score-winsor-upper", type=float, default=0.95)
 
-    policy = run.add_argument_group("weighting-policy and joint-selection evaluation")
-    policy.add_argument("--volatility-lookback-days", type=int, default=63)
-    policy.add_argument("--min-volatility-observations", type=int, default=42)
-    policy.add_argument("--volatility-floor", type=float, default=0.10)
-    policy.add_argument("--volatility-cap", type=float, default=1.0)
-    policy.add_argument("--score-liquidity-score-weight", type=float, default=0.60)
-    policy.add_argument("--score-liquidity-liquidity-weight", type=float, default=0.40)
-    policy.add_argument("--score-liquidity-rank-floor", type=float, default=0.05)
+    policy = run.add_argument_group("fixed weighting methodology and factor-selection guards")
     policy.add_argument("--selection-min-sharpe", type=float, default=0.0)
     policy.add_argument("--selection-max-drawdown", type=float, default=0.60)
     policy.add_argument("--selection-max-annualized-cost-drag", type=float, default=0.02)
@@ -293,14 +291,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Additional exact HTTP(S) browser Origin allowed to call the loopback API",
     )
 
-    site = subparsers.add_parser("build-site", help="Rebuild the site from schema-v4 JSON")
+    site = subparsers.add_parser("build-site", help="Rebuild the site from schema-v5 JSON")
     site.add_argument("--input", type=Path, required=True)
     site.add_argument("--site-dir", type=Path, default=Path("outputs/site-preview"))
     site.add_argument("--title", default=DEFAULT_SITE_TITLE)
 
     grid = subparsers.add_parser(
         "build-static-grid",
-        help="Publish a bounded sparse grid from precomputed schema-v4 detail/summary pairs",
+        help="Publish a bounded sparse grid from precomputed schema-v5 detail/summary pairs",
     )
     grid.add_argument("--site-dir", type=Path, default=Path("docs"))
     grid.add_argument(
@@ -348,6 +346,7 @@ def _config(args: argparse.Namespace) -> RunConfig:
         live=args.live,
         prices_path=args.prices,
         volumes_path=args.volumes,
+        market_caps_path=args.market_caps,
         volume_basis=args.volume_basis,
         demo=args.demo,
         demo_symbol_count=args.demo_symbol_count,
@@ -388,13 +387,6 @@ def _config(args: argparse.Namespace) -> RunConfig:
         score_stability_weight=args.score_stability_weight,
         score_winsor_lower=args.score_winsor_lower,
         score_winsor_upper=args.score_winsor_upper,
-        volatility_lookback_days=args.volatility_lookback_days,
-        min_volatility_observations=args.min_volatility_observations,
-        volatility_floor=args.volatility_floor,
-        volatility_cap=args.volatility_cap,
-        score_liquidity_score_weight=args.score_liquidity_score_weight,
-        score_liquidity_liquidity_weight=args.score_liquidity_liquidity_weight,
-        score_liquidity_rank_floor=args.score_liquidity_rank_floor,
         selection_min_sharpe=args.selection_min_sharpe,
         selection_max_drawdown=args.selection_max_drawdown,
         selection_max_annualized_cost_drag=args.selection_max_annualized_cost_drag,
@@ -452,15 +444,15 @@ PERFORMANCE_FIELDS = {
 
 
 def _compact_summary(payload: dict[str, Any], paths: dict[str, str]) -> dict[str, Any]:
-    ranking = payload.get("factorPolicyRanking")
-    selected = payload.get("selectedFactor")
-    selected_policy = payload.get("selectedWeightingPolicy")
+    ranking = payload.get("factorRanking")
+    selected = payload.get("bestFactor")
+    selected_policy = payload.get("weightingPolicy")
     if (
         not isinstance(ranking, list)
         or not isinstance(selected, str)
         or not isinstance(selected_policy, str)
     ):
-        raise ValueError("result payload is missing factor selection metadata")
+        raise ValueError("result payload is missing best-factor metadata")
     selected_rows = [
         row
         for row in ranking
@@ -470,11 +462,11 @@ def _compact_summary(payload: dict[str, Any], paths: dict[str, str]) -> dict[str
         and row.get("selected") is True
     ]
     if len(selected_rows) != 1:
-        raise ValueError("result payload must contain exactly one selected factor-policy row")
+        raise ValueError("result payload must contain exactly one selected best-factor row")
     selected_row = selected_rows[0]
     data = payload.get("data")
     meta = payload.get("meta")
-    portfolio = payload.get("currentResearchTarget")
+    portfolio = payload.get("bestFactorPortfolio")
     if not isinstance(data, dict) or not isinstance(meta, dict) or not isinstance(portfolio, dict):
         raise ValueError("result payload is missing data, factor, or allocation metadata")
     performance = {
@@ -494,7 +486,7 @@ def _compact_summary(payload: dict[str, Any], paths: dict[str, str]) -> dict[str
         "concentration": portfolio.get("concentration", {}),
     }
     return {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "resultKey": payload.get("resultKey"),
         "resultIdentity": payload.get("resultIdentity"),
         "generatedAtUtc": payload.get("generatedAtUtc"),
@@ -507,14 +499,13 @@ def _compact_summary(payload: dict[str, Any], paths: dict[str, str]) -> dict[str
         "eligibleSecurityCount": data.get("latestEligibleSecurityCount"),
         "factorCount": meta.get("factorCount"),
         "independentFactorCount": meta.get("independentFactorCount"),
-        "availableIndependentPairCount": meta.get("availableIndependentPairCount"),
-        "selectedFactor": selected,
-        "selectedFactorReason": payload.get("selectedReason"),
-        "selectedWeightingPolicy": selected_policy,
-        "selectedWeightingPolicyReason": payload.get("selectedReason"),
+        "availableIndependentFactorCount": meta.get("availableIndependentFactorCount"),
+        "bestFactor": selected,
+        "bestFactorReason": payload.get("bestFactorReason"),
+        "weightingPolicy": selected_policy,
         "performance": performance,
         "currentAllocation": current_allocation,
-        "currentTransition": payload.get("currentTransition"),
+        "bestFactorTransition": payload.get("bestFactorTransition"),
         "runtimeSeconds": meta.get("runtimeSeconds"),
         "maxRssBytes": meta.get("maxRssBytes"),
         "paths": dict(paths),
@@ -602,8 +593,8 @@ def _print_run_summary(summary: dict[str, Any]) -> None:
     score = performance.get("compositeScore")
     score_text = f"{score:.2f}" if isinstance(score, int | float) else "unavailable"
     print(
-        f"selected={summary['selectedFactor']} score={score_text} "
-        f"policy={summary['selectedWeightingPolicy']}"
+        f"best_factor={summary['bestFactor']} score={score_text} "
+        f"policy={summary['weightingPolicy']}"
     )
     print(
         "universe="

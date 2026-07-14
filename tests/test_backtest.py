@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from momentum_factor_lab.backtest import _rebalance_dates, run_factor_backtest
-from momentum_factor_lab.config import RunConfig, WEIGHTING_POLICIES
+from momentum_factor_lab.config import FIXED_WEIGHTING_POLICY, RunConfig, WEIGHTING_POLICIES
 from momentum_factor_lab.data import build_eligibility_mask
 from momentum_factor_lab.metrics import composite_factor_scorecard, evaluation_metrics
 from momentum_factor_lab.portfolio import construct_model_portfolio
@@ -35,15 +35,17 @@ def _fixture() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, RunConfig]:
 
 
 def _policy_panels(prices: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    volatility = pd.DataFrame(0.20, index=prices.index, columns=prices.columns)
     dollar_volume = pd.DataFrame(
-        {
-            "AAA": np.repeat(20_000_000.0, len(prices)),
-            "BBB": np.repeat(10_000_000.0, len(prices)),
-        },
+        20_000_000.0,
         index=prices.index,
+        columns=prices.columns,
     )
-    return volatility, dollar_volume
+    market_cap = pd.DataFrame(
+        2_000_000_000.0,
+        index=prices.index,
+        columns=prices.columns,
+    )
+    return dollar_volume, market_cap
 
 
 def _attribution_config(*, top_n: int, max_weight: float) -> RunConfig:
@@ -69,10 +71,18 @@ def _run(
     eligibility: pd.DataFrame,
     *,
     factor: str = "factor",
-    policy_id: str = "equal_weight",
-    trailing_volatility: pd.DataFrame | None = None,
+    policy_id: str = FIXED_WEIGHTING_POLICY,
     trailing_dollar_volume: pd.DataFrame | None = None,
+    trailing_market_cap: pd.DataFrame | None = None,
 ):
+    if trailing_dollar_volume is None or trailing_market_cap is None:
+        default_liquidity, default_market_cap = _policy_panels(prices)
+        trailing_dollar_volume = (
+            default_liquidity if trailing_dollar_volume is None else trailing_dollar_volume
+        )
+        trailing_market_cap = (
+            default_market_cap if trailing_market_cap is None else trailing_market_cap
+        )
     return run_factor_backtest(
         factor,
         policy_id,
@@ -80,8 +90,8 @@ def _run(
         scores,
         config,
         eligibility_mask=eligibility,
-        trailing_volatility=trailing_volatility,
         trailing_dollar_volume=trailing_dollar_volume,
+        trailing_market_cap=trailing_market_cap,
     )
 
 
@@ -108,11 +118,13 @@ def test_weight_history_tail_retains_only_exact_recent_sessions() -> None:
     full = _run(prices, scores, config, eligible)
     tail = run_factor_backtest(
         "factor",
-        "equal_weight",
+        FIXED_WEIGHTING_POLICY,
         prices,
         scores,
         config,
         eligibility_mask=eligible,
+        trailing_dollar_volume=_policy_panels(prices)[0],
+        trailing_market_cap=_policy_panels(prices)[1],
         retain_weight_history=True,
         weight_history_tail_sessions=7,
     )
@@ -131,22 +143,26 @@ def test_weight_history_tail_requires_positive_retained_history() -> None:
     with pytest.raises(ValueError, match="positive integer"):
         run_factor_backtest(
             "factor",
-            "equal_weight",
+            FIXED_WEIGHTING_POLICY,
             prices,
             scores,
             config,
             eligibility_mask=eligible,
+            trailing_dollar_volume=_policy_panels(prices)[0],
+            trailing_market_cap=_policy_panels(prices)[1],
             retain_weight_history=False,
             weight_history_tail_sessions=7,
         )
     with pytest.raises(ValueError, match="positive integer"):
         run_factor_backtest(
             "factor",
-            "equal_weight",
+            FIXED_WEIGHTING_POLICY,
             prices,
             scores,
             config,
             eligibility_mask=eligible,
+            trailing_dollar_volume=_policy_panels(prices)[0],
+            trailing_market_cap=_policy_panels(prices)[1],
             weight_history_tail_sessions=0,
         )
 
@@ -182,7 +198,7 @@ def test_post_signal_policy_inputs_cannot_change_first_execution_target(policy_i
     config.max_weight = 0.75
     config.transaction_cost_bps = 0.0
     config.slippage_bps = 0.0
-    volatility, dollar_volume = _policy_panels(prices)
+    dollar_volume, market_cap = _policy_panels(prices)
 
     baseline = _run(
         prices,
@@ -190,18 +206,18 @@ def test_post_signal_policy_inputs_cannot_change_first_execution_target(policy_i
         config,
         eligible,
         policy_id=policy_id,
-        trailing_volatility=volatility,
         trailing_dollar_volume=dollar_volume,
+        trailing_market_cap=market_cap,
     )
     signal = _rebalance_dates(prices.index, "ME")[0]
     execution = prices.index[prices.index.get_loc(signal) + 1]
     first_exposure = prices.index[prices.index.get_loc(signal) + 2]
     changed_scores = scores.copy()
-    changed_volatility = volatility.copy()
     changed_dollar_volume = dollar_volume.copy()
+    changed_market_cap = market_cap.copy()
     changed_scores.loc[execution:, ["AAA", "BBB"]] = [1.0, 10.0]
-    changed_volatility.loc[execution:, ["AAA", "BBB"]] = [1.0, 0.10]
     changed_dollar_volume.loc[execution:, ["AAA", "BBB"]] = [1.0, 1_000_000_000.0]
+    changed_market_cap.loc[execution:, ["AAA", "BBB"]] = [1.0, 10_000_000_000.0]
 
     changed = _run(
         prices,
@@ -209,8 +225,8 @@ def test_post_signal_policy_inputs_cannot_change_first_execution_target(policy_i
         config,
         eligible,
         policy_id=policy_id,
-        trailing_volatility=changed_volatility,
         trailing_dollar_volume=changed_dollar_volume,
+        trailing_market_cap=changed_market_cap,
     )
 
     assert changed.signal_dates.loc[execution] == signal
@@ -228,7 +244,7 @@ def test_historical_execution_target_matches_current_target_kernel_exactly(
     config.max_weight = 0.75
     config.transaction_cost_bps = 0.0
     config.slippage_bps = 0.0
-    volatility, dollar_volume = _policy_panels(prices)
+    dollar_volume, market_cap = _policy_panels(prices)
 
     history = _run(
         prices,
@@ -236,8 +252,8 @@ def test_historical_execution_target_matches_current_target_kernel_exactly(
         config,
         eligible,
         policy_id=policy_id,
-        trailing_volatility=volatility,
         trailing_dollar_volume=dollar_volume,
+        trailing_market_cap=market_cap,
     )
     signal = _rebalance_dates(prices.index, "ME")[0]
     current = construct_model_portfolio(
@@ -248,8 +264,8 @@ def test_historical_execution_target_matches_current_target_kernel_exactly(
         eligible.loc[signal],
         config,
         policy_id=policy_id,
-        trailing_volatility=volatility.loc[signal],
         trailing_dollar_volume=dollar_volume.loc[signal],
+        trailing_market_cap=market_cap.loc[signal],
     )
     first_exposure = history.first_market_exposure_return_date
 
@@ -284,18 +300,18 @@ def test_backtest_requires_exact_unique_increasing_date_index(
 
 def test_backtest_rejects_misaligned_policy_panel_index() -> None:
     prices, scores, eligible, config = _fixture()
-    volatility, dollar_volume = _policy_panels(prices)
-    volatility = volatility.iloc[1:]
+    dollar_volume, market_cap = _policy_panels(prices)
+    market_cap = market_cap.iloc[1:]
 
-    with pytest.raises(ValueError, match="trailing_volatility must share"):
+    with pytest.raises(ValueError, match="trailing_market_cap must share"):
         _run(
             prices,
             scores,
             config,
             eligible,
-            policy_id="capped_vol_adjusted_rank",
-            trailing_volatility=volatility,
+            policy_id=FIXED_WEIGHTING_POLICY,
             trailing_dollar_volume=dollar_volume,
+            trailing_market_cap=market_cap,
         )
 
 
@@ -543,21 +559,21 @@ def test_turnover_and_cost_use_drifted_execution_close_weights() -> None:
 
 def test_missing_policy_inputs_are_recorded_with_reason_and_never_traded() -> None:
     prices, scores, eligible, config = _fixture()
-    volatility = pd.DataFrame(np.nan, index=prices.index, columns=prices.columns)
+    market_cap = pd.DataFrame(np.nan, index=prices.index, columns=prices.columns)
 
     result = _run(
         prices,
         scores,
         config,
         eligible,
-        policy_id="capped_vol_adjusted_rank",
-        trailing_volatility=volatility,
+        policy_id=FIXED_WEIGHTING_POLICY,
+        trailing_market_cap=market_cap,
     )
     signal = _rebalance_dates(prices.index, "ME")[0]
     execution = prices.index[prices.index.get_loc(signal) + 1]
 
     assert result.policy_input_statuses.loc[execution] == "unavailable"
-    assert result.policy_input_reasons.loc[execution] == ("no_finite_trailing_volatility",)
+    assert result.policy_input_reasons.loc[execution] == ("no_point_in_time_market_cap",)
     assert result.signal_dates.empty
     assert result.turnover.eq(0.0).all()
     assert result.costs.eq(0.0).all()

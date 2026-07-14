@@ -2,7 +2,7 @@
 
 ## 연구 질문
 
-같은 실제 시장 입력, eligibility, 평가기간, 리밸런싱, 비용 조건에서 어떤 모멘텀 팩터와 비중 정책의 조합이 가장 견고한 후행 결과를 보였는지 비교합니다. 결과는 동일 표본의 설명적 연구이며 미래 수익이나 실제 주문을 뜻하지 않습니다.
+같은 실제 시장 입력, eligibility, 평가기간, 리밸런싱, 비용 조건과 하나의 고정 비중 방법에서 어떤 모멘텀 팩터가 가장 견고한 후행 결과를 보였는지 비교합니다. 결과는 동일 표본의 설명적 연구이며 미래 수익이나 실제 주문을 뜻하지 않습니다.
 
 ## 데이터와 기준일
 
@@ -10,10 +10,11 @@
 - 라이브 실행은 후보 전체를 요청하며 내부에서 200개로 자르지 않습니다.
 - 팩터 수익률은 adjusted close를 사용합니다.
 - 거래대금은 provider raw close × raw share volume을 사용하고 필요한 proxy 수를 공개합니다.
+- 시가총액은 SEC 공시 제출일 기준 발행주식수·public float 자료를 신호일 당시 정보만으로 정렬하고 이후 split을 가격 기준과 맞춥니다.
 - `data.asOf`는 마지막 실제 가격 관측일입니다. 요청 종료일이나 생성일로 덮어쓰지 않습니다.
 - 실제시장 수집 실패는 demo나 정적 이전 결과로 대체하지 않습니다.
 
-시장 스냅샷 v2는 adjusted prices, raw closes, share volumes, dollar volumes와 요청
+시장 스냅샷 v4는 adjusted prices, raw closes, share volumes, dollar volumes, PIT market caps와 요청
 universe 메타데이터, 종목별 가격 공급자(`priceSources`)·수집 source
 health(`dataSources`)를 별도 저장합니다. 모든 파일 SHA-256과 행렬·ordered symbol·canonical
 record SHA-256을 함께 기록하며, 검증된 snapshot replay는 모든 hash, universe 순서,
@@ -41,7 +42,7 @@ preset도 refresh universe의 종목명과 원래의 Yahoo/Nasdaq/Stooq/FDR prov
 - `short_acceleration` → `accel_1m_vs_3m`
 - `relative_strength_6m` → `mom_6m`
 
-독립 팩터 61개와 정책 4개의 Cartesian product 244개를 먼저 생성합니다. 각 기대 조합은 정확히 한 행이어야 하며 누락은 데이터 부족이 아니라 구현 오류입니다. 각 독립 행은 `available` 또는 구조화된 `excluded` 사유를 가져야 합니다. alias 12개 행은 별도 진단 회계로 유지합니다.
+독립 팩터 61개를 동일한 고정 비중 방법으로 각각 정확히 한 번 계산합니다. 누락은 데이터 부족이 아니라 구현 오류입니다. 각 독립 행은 `available` 또는 구조화된 `excluded` 사유를 가져야 하며 alias 3개 행은 별도 진단 회계로 유지합니다.
 
 ## 시점·회계 계약
 
@@ -65,51 +66,33 @@ modeled_cost = one_way_turnover
 
 비용은 체결일에 한 번만 차감합니다. 첫 신호 전 cash warm-up은 팩터 성과 관측치가 아닙니다.
 
-## 비중 정책
+## 고정 비중 방법
 
-### `equal_weight`
-
-Top-N에 같은 raw score를 주고 종목 상한을 적용합니다.
-
-### `capped_linear_rank`
-
-동점 인식 선형 rank strength를 사용합니다. 같은 팩터 점수는 같은 강도를 받습니다.
-
-### `capped_vol_adjusted_rank`
-
-```text
-raw_i = tie_aware_rank_strength_i
-      / clipped_trailing_annualized_volatility_i
-```
-
-기본 후행 창은 63거래일, 최소 42관측, 변동성 floor 10%, cap 100%입니다.
-
-### `score_liquidity_rank`
+### `score_liquidity_market_cap_rank`
 
 ```text
 raw_i = floor
-      + 0.60 × factor_score_percentile_i
-      + 0.40 × trailing_raw_dollar_volume_percentile_i
+      + 0.50 × factor_score_percentile_i
+      + 0.30 × trailing_raw_dollar_volume_percentile_i
+      + 0.20 × point_in_time_market_cap_percentile_i
 ```
 
-규모·현재 시가총액·부분 market-cap fallback을 사용하지 않습니다.
+기본 floor는 0.05입니다. 시가총액 정보의 최대 연령과 전체 유니버스 커버리지 하한을 적용합니다. 현재 시가총액을 과거 신호일에 소급하거나 부분 fallback으로 채우지 않습니다. 필요한 정책 입력이 불완전하면 포트폴리오는 unavailable·현금 100%가 됩니다.
 
 ### Top-N 경계 동점
 
 팩터 점수가 Top-N 경계를 가로질러 동률이면 trailing raw-dollar-volume 내림차순, symbol 오름차순으로 멤버십을 결정합니다. 필요한 거래대금이 없으면 target을 unavailable로 둡니다.
 
-## 팩터–정책 공동 선택
+## 최고 팩터 선택
 
-정책을 먼저 고른 뒤 팩터를 고르는 계층 선택을 사용하지 않습니다.
+팩터 선택 단계에서 비중 정책을 고르거나 최적화하지 않습니다.
 
-1. 244개 기대 독립 조합을 전부 계산합니다.
-2. 정책 입력, 현재 target, valuation, exact daily-risk, 체결 coverage를 평가합니다.
-3. 유효 조합 전체를 하나의 모집단으로 합칩니다.
+1. 61개 독립 팩터를 고정 비중 방법으로 전부 계산합니다.
+2. 정책 입력, 현재 포트폴리오, valuation, exact daily-risk, 체결 coverage를 평가합니다.
+3. 유효 팩터 전체를 하나의 모집단으로 합칩니다.
 4. Sortino, Calmar, MDD, CAGR, Sharpe, stability를 한 번만 robust percentile로 변환합니다.
-5. 절대 가드레일과 extreme-event 규칙을 조합별로 적용합니다.
-6. `selection_score`와 결정론 tie-break로 `(factor, policy)` 한 쌍을 직접 선택합니다.
-
-정책별 중앙 성과는 `policyDiagnostics`에만 기록하며 선택·순위 의미가 없습니다. `equal_weight`는 동등한 후보일 뿐 허용선 기준이 아닙니다.
+5. 절대 가드레일과 extreme-event 규칙을 팩터별로 적용합니다.
+6. `selection_score`와 결정론 tie-break로 최고 팩터 하나를 선택합니다.
 
 ## 절대·버전형 가드레일
 
@@ -147,35 +130,34 @@ security_absolute_contribution_share_i
 
 Leave-one sensitivity는 실제 경로·비용을 동결한 realized-contribution deletion입니다. 종목을 제거한 뒤 신호·순위·비중을 재최적화한 반사실 결과가 아닙니다.
 
-## 현재 연구 목표
+## 팩터별 포트폴리오
 
-`currentResearchTarget`은 마지막 실제 입력일 점수를 선택된 정책의 역사 kernel에 넣은 다음 세션 목표입니다. `backtestHeldPortfolio`는 마지막 체결 이후 as-of까지 drift된 연구 보유입니다.
+`factorPortfolios`는 마지막 실제 입력일의 각 팩터 점수에 같은 고정 방법을 적용한 결과입니다. `bestFactorPortfolio`는 그중 Python 최고 팩터와 정확히 같은 객체입니다. 사용자가 웹에서 다른 팩터를 고르면 해당 팩터의 Python 포트폴리오를 표시하며 최고 팩터 객체를 복제하거나 브라우저에서 비중을 다시 계산하지 않습니다. `backtestHeldPortfolio`는 최고 팩터의 마지막 체결 이후 as-of까지 drift된 연구 보유입니다.
 
-`currentTransition`은 마지막 관측 종가 기준 두 상태 사이의 indicative turnover/cost입니다. 다음 종가 전의 실제 pre-trade drift와 비용은 아직 알 수 없으므로 `actualNextClosePretradeDriftKnown=false`입니다.
+`bestFactorTransition`은 마지막 관측 종가 기준 최고 팩터의 두 상태 사이 indicative turnover/cost입니다. 다음 종가 전의 실제 pre-trade drift와 비용은 아직 알 수 없으므로 `actualNextClosePretradeDriftKnown=false`입니다.
 
-## Schema v4와 identity
+## Schema v5와 identity
 
 Canonical payload는 다음을 포함합니다.
 
 - `resultIdentity`와 top-level `resultKey`
 - `researchInputs`
-- `factorPolicyRanking`
-- `gridAccounting`
-- `policyDiagnostics`
-- `weightingPolicyRegistry`
+- `factorRanking`
+- `factorAccounting`
+- `weightingMethodology`, `allocationMethod`
 - `contributionDiagnostics`
-- `currentResearchTarget`, `backtestHeldPortfolio`, `currentTransition`
+- `factorPortfolios`, `bestFactorPortfolio`, `backtestHeldPortfolio`, `bestFactorTransition`
 - 데이터 funnel, source health, input hashes, runtime, peak RSS
 
-이전 `factorRanking`, `policyFactorMetrics`, `weightingPolicyComparison`, `modelPortfolio` 중복 필드는 허용하지 않습니다.
+이전 `currentResearchTarget`, `selectedFactor`, `selectedWeightingPolicy`, `factorPolicyRanking`, `gridAccounting`, `policyDiagnostics` 필드는 허용하지 않습니다.
 
-브라우저는 Python-selected 행과 Python target을 표시할 뿐 winner, weight, turnover, cost를 다시 계산하지 않습니다.
+브라우저는 Python 최고 팩터와 사용자가 선택한 팩터의 Python 포트폴리오를 표시할 뿐 winner, weight, turnover, cost를 다시 계산하지 않습니다.
 
 ## 정적 grid와 arbitrary inputs
 
 정적 Pages는 `grid/v1/manifest.json`에 등록된 sparse, content-addressed 실제시장 결과만 제공합니다. `keyParts`는 Python과 JavaScript가 공유하는 RFC 8785 JCS로 canonicalize하며, manifest와 detail/summary의 전체 identity, canonical bytes, artifact bytes, SHA-256을 검증합니다. 같은 JSON 구조라도 공백이나 다른 숫자 표기를 사용한 비정규 identity transport는 거절합니다. 2,700개 미만 또는 synthetic 결과는 게시할 수 없습니다.
 
-전체 입력 tuple과 정확히 맞지 않는 URL 상태는 정적 결과로 대체하지 않습니다. 가장 가까운 preset을 사용하지 않고, 별도의 loopback Python API에 canonical `ResearchInputs`를 제출해 canonical engine을 실행합니다. 브라우저는 `202` status를 polling하고 완료 결과의 actual 2,700+·identity·61×4 grid·exact exclusion reasons를 검증한 뒤에만 표시합니다. 동적 API result key는 manifest preset으로 가장하지 않으며, URL은 최신 default base와 반환된 공개 입력을 보존해 reload/share 시 같은 최신 조건을 다시 실행합니다.
+전체 입력 tuple과 정확히 맞지 않는 URL 상태는 정적 결과로 대체하지 않습니다. 가장 가까운 preset을 사용하지 않고, 별도의 loopback Python API에 canonical `ResearchInputs`를 제출해 canonical engine을 실행합니다. 브라우저는 `202` status를 polling하고 완료 결과의 actual 2,700+·identity·61개 독립 팩터·고정 비중 방법·exact exclusion reasons를 검증한 뒤에만 표시합니다. 동적 API result key는 manifest preset으로 가장하지 않으며, URL은 최신 default base와 반환된 공개 입력을 보존해 reload/share 시 같은 최신 조건을 다시 실행합니다.
 
 정기 publication은 설정에 선언된 모든 `static_grid_presets`를 한 번의 검증된 최신 actual-market 스냅샷에서 다시 계산합니다. 현재 preset은 최신 Top‑20, 최신 Top‑30, 직전 7개 완료 세션의 Top‑20입니다. 각 preset은 동일 Python engine과 독립 identity/cache key를 사용하고, writer는 완성된 bounded manifest를 원자적으로 교체한 뒤 참조되지 않는 content-addressed artifact와 비활성 alias를 제거합니다.
 

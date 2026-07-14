@@ -25,28 +25,32 @@ from momentum_factor_lab.workflow import (
 )
 
 
-def test_result_json_persists_schema_v4_joint_grid_and_identity(
+def test_result_json_persists_schema_v5_fixed_method_and_identity(
     demo_result: AnalysisResult,
 ) -> None:
     path = write_result_json(demo_result)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
     assert path.suffix == ".json"
-    assert payload["schemaVersion"] == 4
+    assert payload["schemaVersion"] == 5
     assert payload["resultKey"] == payload["resultIdentity"]["resultKey"]
     assert len(payload["resultKey"]) == 64
-    assert payload["selectedFactor"] == demo_result.selected_factor
-    assert payload["selectedWeightingPolicy"] == demo_result.selected_policy
+    assert payload["bestFactor"] == demo_result.selected_factor
+    assert payload["weightingPolicy"] == demo_result.selected_policy
     assert payload["meta"]["factorCount"] == 64
     assert payload["meta"]["independentFactorCount"] == 61
     assert payload["meta"]["aliasFactorCount"] == 3
-    assert payload["meta"]["policyCount"] == 4
-    assert payload["meta"]["policyFactorRunCount"] == 256
+    assert payload["meta"]["factorRunCount"] == 64
+    assert payload["meta"]["purpose"] == (
+        "input_driven_momentum_factor_comparison_with_fixed_weighting"
+    )
     assert len(payload["meta"]["factorDefinitionSha256"]) == 64
     assert len(payload["meta"]["policyDefinitionSha256"]) == 64
     assert len(payload["meta"]["selectionSpecSha256"]) == 64
-    assert len(payload["factorPolicyRanking"]) == 256
-    assert "factorRanking" not in payload
+    assert len(payload["factorRanking"]) == 64
+    assert "factorPolicyRanking" not in payload
+    assert "currentResearchTarget" not in payload
+    assert "selectedWeightingPolicy" not in payload
     assert "policyFactorMetrics" not in payload
     assert "modelPortfolio" not in payload
     assert set(payload["factorPortfolios"]) == set(demo_result.factor_scores)
@@ -60,17 +64,17 @@ def test_result_json_persists_schema_v4_joint_grid_and_identity(
     assert payload["researchScope"]["notInvestmentRecommendation"] is True
     assert len(payload["researchScope"]["limitations"]) >= 3
     assert payload["researchInputs"]["evaluationWindowDays"] == 756
-    selected = next(row for row in payload["factorPolicyRanking"] if row["selected"])
+    selected = next(row for row in payload["factorRanking"] if row["selected"])
     assert selected["min_target_effective_names"] <= selected["median_target_effective_names"]
     assert selected["max_target_hhi"] >= selected["median_target_hhi"]
     assert selected["current_target_effective_names"] == pytest.approx(
-        payload["currentResearchTarget"]["concentration"]["effectiveNames"]
+        payload["bestFactorPortfolio"]["concentration"]["effectiveNames"]
     )
     assert selected["current_target_hhi"] == pytest.approx(
-        payload["currentResearchTarget"]["concentration"]["riskySleeveHhi"]
+        payload["bestFactorPortfolio"]["concentration"]["riskySleeveHhi"]
     )
     assert selected["current_target_max_weight"] == pytest.approx(
-        payload["currentResearchTarget"]["concentration"]["maxWeight"]
+        payload["bestFactorPortfolio"]["concentration"]["maxWeight"]
     )
     assert not list(Path(demo_result.config.output_dir).glob("*.pdf"))
     assert not list(Path(demo_result.config.output_dir).glob("*.xlsx"))
@@ -113,9 +117,9 @@ def test_factor_diagnostics_cover_all_independent_factors_and_exclude_aliases(
         and row["latestFiniteCount"] <= payload["data"]["latestEligibleSecurityCount"]
         for row in rank_rows
     )
-    selected_ic = next(row for row in rank_rows if row["factor"] == payload["selectedFactor"])
-    assert selected_ic["available"] is True
-    assert selected_ic["standardDeviation"] >= 0.0
+    best_ic = next(row for row in rank_rows if row["factor"] == payload["bestFactor"])
+    assert best_ic["available"] is True
+    assert best_ic["standardDeviation"] >= 0.0
 
     redundancy = diagnostics["redundancy"]
     redundancy_rows = redundancy["rows"]
@@ -175,52 +179,53 @@ def test_rank_ic_diagnostic_uses_pairwise_ranks_and_exact_21_session_metadata() 
     assert row["latestFiniteCount"] == 4
 
 
-def test_factor_policy_grid_registry_and_accounting_survive_serialization(
+def test_fixed_method_factor_registry_and_accounting_survive_serialization(
     demo_result: AnalysisResult,
 ) -> None:
     payload = result_payload(demo_result)
     factors = set(payload["factorPortfolios"])
-    observed = {(row["policy_id"], row["factor"]) for row in payload["factorPolicyRanking"]}
+    observed = {(row["policy_id"], row["factor"]) for row in payload["factorRanking"]}
 
     assert observed == {
         (policy_id, factor) for policy_id in WEIGHTING_POLICIES for factor in factors
     }
-    registry = payload["weightingPolicyRegistry"]
-    assert set(registry["policies"]) == set(WEIGHTING_POLICIES)
-    assert all(row["implementationId"] for row in registry["policies"].values())
-    accounting = payload["gridAccounting"]
-    assert accounting["expectedIndependentPairCount"] == 244
-    assert accounting["missingIndependentPairCount"] == 0
+    methodology = payload["weightingMethodology"]
+    assert methodology["policyId"] == WEIGHTING_POLICIES[0]
+    assert methodology["optimized"] is False
+    assert methodology["policy"]["implementationId"]
+    accounting = payload["factorAccounting"]
+    assert accounting["expectedIndependentFactorCount"] == 61
+    assert accounting["missingIndependentFactorCount"] == 0
     assert (
-        accounting["availableIndependentPairCount"] + accounting["excludedIndependentPairCount"]
-        == accounting["expectedIndependentPairCount"]
+        accounting["availableIndependentFactorCount"] + accounting["excludedIndependentFactorCount"]
+        == accounting["expectedIndependentFactorCount"]
     )
-    assert payload["portfolioPolicy"]["policyAggregateDiagnostics"]["diagnosticOnly"]
-    assert payload["selectionMethod"]["policyAggregatesAreDiagnosticOnly"]
-    assert payload["selectionMethod"]["equalWeightIsPeerCandidate"]
+    assert payload["selectionMethod"]["weightingPolicyOptimized"] is False
+    assert payload["selectionMethod"]["fixedWeightingPolicy"] == WEIGHTING_POLICIES[0]
+    assert payload["allocationMethod"]["fixed"] is True
 
 
-def test_selected_factor_policy_current_target_and_performance_reconcile(
+def test_best_factor_fixed_method_portfolio_and_performance_reconcile(
     demo_result: AnalysisResult,
 ) -> None:
     payload = result_payload(demo_result)
-    selected_factor = payload["selectedFactor"]
-    selected_policy = payload["selectedWeightingPolicy"]
-    selected_rows = [row for row in payload["factorPolicyRanking"] if row["selected"]]
-    portfolio = payload["currentResearchTarget"]
+    best_factor = payload["bestFactor"]
+    best_policy = payload["weightingPolicy"]
+    best_rows = [row for row in payload["factorRanking"] if row["selected"]]
+    portfolio = payload["bestFactorPortfolio"]
 
-    assert len(selected_rows) == 1
-    ranking = selected_rows[0]
+    assert len(best_rows) == 1
+    ranking = best_rows[0]
     assert ranking["rank"] == 1
     assert ranking["comparison_status"] == "available"
     assert ranking["selection_eligible"] is True
-    assert ranking["factor"] == selected_factor
-    assert ranking["policy_id"] == selected_policy
-    assert payload["portfolioPolicy"]["selectedPolicyId"] == selected_policy
-    assert payload["performance"]["weightingPolicyId"] == selected_policy
-    assert portfolio == payload["factorPortfolios"][selected_factor]
-    assert portfolio["factor"] == selected_factor
-    assert portfolio["weightingPolicyId"] == selected_policy
+    assert ranking["factor"] == best_factor
+    assert ranking["policy_id"] == best_policy
+    assert payload["weightingMethodology"]["policyId"] == best_policy
+    assert payload["performance"]["weightingPolicyId"] == best_policy
+    assert portfolio == payload["factorPortfolios"][best_factor]
+    assert portfolio["factor"] == best_factor
+    assert portfolio["weightingPolicyId"] == best_policy
     assert portfolio["asOf"] == portfolio["signalDate"] == payload["data"]["asOf"]
     assert sum(row["weight"] for row in portfolio["weights"]) + portfolio[
         "cashWeight"
@@ -230,33 +235,33 @@ def test_selected_factor_policy_current_target_and_performance_reconcile(
     assert payload["contributionDiagnostics"]["reoptimized"] is False
 
 
-def test_selected_backtest_history_is_sparse_recent_and_exactly_reconciled(
+def test_best_backtest_history_is_sparse_recent_and_exactly_reconciled(
     demo_result: AnalysisResult,
 ) -> None:
     payload = result_payload(demo_result)
-    selected_factor = payload["selectedFactor"]
-    selected_backtest = demo_result.backtests[selected_factor]
-    history = payload["selectedBacktestHoldingHistory"]
+    best_factor = payload["bestFactor"]
+    best_backtest = demo_result.backtests[best_factor]
+    history = payload["bestFactorBacktestHoldingHistory"]
     held = payload["backtestHeldPortfolio"]
 
-    assert not selected_backtest.weights.empty
-    assert not selected_backtest.pre_trade_weights.empty
-    assert len(selected_backtest.cash_weights) == len(selected_backtest.weights)
+    assert not best_backtest.weights.empty
+    assert not best_backtest.pre_trade_weights.empty
+    assert len(best_backtest.cash_weights) == len(best_backtest.weights)
     assert all(
         backtest.weights.empty
         for factor, backtest in demo_result.backtests.items()
-        if factor != selected_factor
+        if factor != best_factor
     )
     assert set(demo_result.factor_holding_histories) == set(demo_result.factor_scores)
     assert all(
-        factor_history["weightingPolicyId"] == payload["selectedWeightingPolicy"]
+        factor_history["weightingPolicyId"] == payload["weightingPolicy"]
         and [session["date"] for session in factor_history["sessions"]]
         == payload["performance"]["dates"][-SELECTED_HOLDING_HISTORY_SESSION_COUNT:]
         for factor_history in demo_result.factor_holding_histories.values()
     )
     assert history["contractVersion"] == 1
-    assert history["factor"] == selected_factor
-    assert history["weightingPolicyId"] == payload["selectedWeightingPolicy"]
+    assert history["factor"] == best_factor
+    assert history["weightingPolicyId"] == payload["weightingPolicy"]
     assert history["weightTiming"] == SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
     assert history["sessionCount"] == SELECTED_HOLDING_HISTORY_SESSION_COUNT
     assert len(history["sessions"]) == SELECTED_HOLDING_HISTORY_SESSION_COUNT
@@ -376,8 +381,8 @@ def test_current_transition_uses_cash_inclusive_half_l1_and_one_cost_charge(
 ) -> None:
     payload = result_payload(demo_result)
     held = payload["backtestHeldPortfolio"]
-    target = payload["currentResearchTarget"]
-    transition = payload["currentTransition"]
+    target = payload["bestFactorPortfolio"]
+    transition = payload["bestFactorTransition"]
     held_weights = {row["symbol"]: row["weight"] for row in held["weights"]}
     target_weights = {row["symbol"]: row["weight"] for row in target["weights"]}
     symbols = set(held_weights) | set(target_weights)
@@ -427,15 +432,15 @@ def test_data_mode_and_requested_to_eligible_funnel_are_explicit(
     assert data["inputSecurityCount"] == data["analyzedSecurityCount"] == 50
 
 
-def test_all_performance_curves_share_the_selected_policy_dates(
+def test_all_performance_curves_share_the_fixed_policy_dates(
     demo_result: AnalysisResult,
 ) -> None:
     payload = result_payload(demo_result)
     performance = payload["performance"]
     dates = performance["dates"]
 
-    assert performance["weightingPolicyId"] == payload["selectedWeightingPolicy"]
-    assert len(dates) == demo_result.config.evaluation_window_days
+    assert performance["weightingPolicyId"] == payload["weightingPolicy"]
+    assert len(dates) == demo_result.config.evaluation_window_days + 1
     assert set(performance["factorCurves"]) == set(demo_result.factor_scores)
     assert all(len(curve) == len(dates) for curve in performance["factorCurves"].values())
 
@@ -446,16 +451,16 @@ def test_performance_curve_includes_the_first_evaluation_return(
     payload = result_payload(demo_result)
     performance = payload["performance"]
     dates = pd.DatetimeIndex(performance["dates"])
-    selected = payload["selectedFactor"]
+    selected = payload["bestFactor"]
     equity = demo_result.backtests[selected].equity
-    first_position = equity.index.get_loc(dates[0])
-    assert first_position > 0
-    base = float(equity.iloc[first_position - 1])
+    evaluation_start = dates[1]
+    base = float(equity.loc[dates[0]])
 
     curve = performance["factorCurves"][selected]
-    assert curve[0] == pytest.approx(float(equity.loc[dates[0]]) / base)
+    assert curve[0] == pytest.approx(1.0)
+    assert curve[1] == pytest.approx(float(equity.loc[evaluation_start]) / base)
     assert curve[-1] == pytest.approx(float(equity.loc[dates[-1]]) / base)
-    ranking = next(row for row in payload["factorPolicyRanking"] if row["selected"] is True)
+    ranking = next(row for row in payload["factorRanking"] if row["selected"] is True)
     implied_total_return = (1.0 + ranking["cagr"]) ** (ranking["calendar_observations"] / 252.0)
     assert curve[-1] == pytest.approx(implied_total_return)
 
@@ -476,7 +481,7 @@ def test_python_period_performance_uses_exact_boundaries_and_explicit_comparator
 ) -> None:
     payload = result_payload(demo_result)
     performance = payload["performance"]
-    selected = payload["selectedFactor"]
+    selected = payload["bestFactor"]
     comparison_order = ["SPY", "^IXIC", "QQQ"]
 
     assert performance["contractVersion"] == "python-period-performance-v1"
@@ -497,13 +502,13 @@ def test_python_period_performance_uses_exact_boundaries_and_explicit_comparator
     one_week = periods["1W"]
     point_dates = demo_result.market_data.prices.index[-6:]
     equity = demo_result.backtests[selected].equity.reindex(point_dates)
-    selected_metrics = one_week["factors"][selected]
+    best_metrics = one_week["factors"][selected]
     assert one_week["startDate"] == point_dates[0].date().isoformat()
     assert one_week["endDate"] == point_dates[-1].date().isoformat()
     assert one_week["returnObservationCount"] == 5
-    assert selected_metrics["basis"] == "net_of_costs_strategy"
-    assert selected_metrics["returnObservationCount"] <= 5
-    assert selected_metrics["cumulativeReturn"] == pytest.approx(
+    assert best_metrics["basis"] == "net_of_costs_strategy"
+    assert best_metrics["returnObservationCount"] <= 5
+    assert best_metrics["cumulativeReturn"] == pytest.approx(
         float(equity.iloc[-1] / equity.iloc[0] - 1.0)
     )
 

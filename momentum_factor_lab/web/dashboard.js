@@ -5,18 +5,16 @@ const MANIFEST_URL = 'data/grid/v1/manifest.json';
 const MANIFEST_SCHEMA_VERSION = 1;
 const MANIFEST_CONTRACT = 'momentum-static-result-grid';
 const MANIFEST_GRID_VERSION = 'v1';
-const RESULT_SCHEMA_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 5;
 const RESULT_IDENTITY_VERSION = 'momentum-result-identity-v1';
 const CANONICAL_JSON_VERSION = 'rfc8785-jcs-v1';
 const RESEARCH_INPUTS_VERSION = 'research-inputs-v1';
-const ABSOLUTE_GUARDRAIL_VERSION = 'absolute-factor-policy-v1';
+const ABSOLUTE_GUARDRAIL_VERSION = 'absolute-factor-v2';
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:8765';
 const LOCAL_API_POLL_INTERVAL_MS = 1000;
 const EXPECTED_INDEPENDENT_FACTOR_COUNT = 61;
-const EXPECTED_POLICY_COUNT = 4;
-const EXPECTED_INDEPENDENT_PAIR_COUNT = 244;
+const EXPECTED_POLICY_COUNT = 1;
 const EXPECTED_ALIAS_FACTOR_COUNT = 3;
-const EXPECTED_ALIAS_PAIR_COUNT = 12;
 const PERFORMANCE_CONTRACT_VERSION = 'python-period-performance-v1';
 const PERFORMANCE_PERIOD_CONTRACT = Object.freeze([
   Object.freeze({ key: '1W', label: '최근 1주', returnCount: 5 }),
@@ -41,7 +39,7 @@ const SELECTED_HOLDING_HISTORY_CONTRACT_VERSION = 1;
 const SELECTED_HOLDING_HISTORY_SESSION_COUNT = 21;
 const SELECTED_HOLDING_HISTORY_WEIGHT_TIMING = 'last_complete_close_after_execution_processing';
 const FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT = 'momentum-factor-holding-history-sidecar';
-const FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION = 1;
+const FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION = 2;
 const FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY = 'factor-holding-history';
 const MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES = 5_000_000;
 const HOLDING_EXECUTION_STATUSES = Object.freeze([
@@ -62,7 +60,12 @@ const LIVE_INPUT_HASH_FIELDS_V2 = Object.freeze([
   'priceSources',
   'dataSources',
 ]);
-const LIVE_INPUT_HASH_FIELDS = Object.freeze([...LIVE_INPUT_HASH_FIELDS_V2, 'comparisonPrices']);
+const LIVE_INPUT_HASH_FIELDS_V3 = Object.freeze([...LIVE_INPUT_HASH_FIELDS_V2, 'comparisonPrices']);
+const LIVE_INPUT_HASH_FIELDS = Object.freeze([
+  ...LIVE_INPUT_HASH_FIELDS_V3,
+  'marketCaps',
+  'marketCapSources',
+]);
 const PRESET_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LOCAL_API_REQUIRED = [
   '이 입력 조합은 정적 grid에 사전 계산되지 않았습니다.',
@@ -151,10 +154,7 @@ const CHART_PALETTE_CLASS_MAP = Object.freeze({
     default: 'benchmark',
   }),
   policies: Object.freeze({
-    equal_weight: 'policy-equal-weight',
-    capped_linear_rank: 'policy-capped-linear-rank',
-    capped_vol_adjusted_rank: 'policy-capped-vol-adjusted-rank',
-    score_liquidity_rank: 'policy-score-liquidity-rank',
+    score_liquidity_market_cap_rank: 'policy-score-liquidity-market-cap-rank',
   }),
   statuses: Object.freeze({
     eligible: 'status-eligible',
@@ -606,7 +606,7 @@ const state = {
   data: null,
   activeRunIndex: 0,
   hasUserSelectedFactor: false,
-  v4Payload: null,
+  payload: null,
   manifest: null,
   manifestUrl: null,
   entry: null,
@@ -1000,31 +1000,31 @@ function rowReasonCodes(row) {
 }
 
 function validateTargetAllocation(payload) {
-  const target = payload.currentResearchTarget;
+  const target = payload.bestFactorPortfolio;
   const config = payload.config;
-  requireCondition(isRecord(target) && isRecord(config), 'currentResearchTarget/config가 없습니다.');
+  requireCondition(isRecord(target) && isRecord(config), 'bestFactorPortfolio/config가 없습니다.');
   const maxWeight = Number(config.max_weight);
   requireCondition(
     finite(maxWeight) && maxWeight > 0 && maxWeight <= 1,
     'config.max_weight가 잘못되었습니다.',
   );
-  requireCondition(Array.isArray(target.weights), 'currentResearchTarget.weights가 배열이 아닙니다.');
+  requireCondition(Array.isArray(target.weights), 'bestFactorPortfolio.weights가 배열이 아닙니다.');
   requireCondition(
     integer(target.selectedSecurityCount)
       && Number(target.selectedSecurityCount) === target.weights.length,
-    'currentResearchTarget 종목 수가 다릅니다.',
+    'bestFactorPortfolio 종목 수가 다릅니다.',
   );
   requireCondition(
     integer(config.top_n)
       && Number(config.top_n) >= 1
       && Number(config.top_n) <= 50
       && target.weights.length <= Number(config.top_n),
-    'currentResearchTarget 종목 수 또는 Top-N이 잘못되었습니다.',
+    'bestFactorPortfolio 종목 수 또는 Top-N이 잘못되었습니다.',
   );
   requireCondition(
     integer(target.eligibleSecurityCount)
       && Number(target.eligibleSecurityCount) >= target.weights.length,
-    'currentResearchTarget 적격 종목 수가 잘못되었습니다.',
+    'bestFactorPortfolio 적격 종목 수가 잘못되었습니다.',
   );
 
   const symbols = new Set();
@@ -1040,7 +1040,7 @@ function validateTargetAllocation(payload) {
         && finite(weight)
         && weight > 0
         && weight <= maxWeight + 1e-12,
-      'currentResearchTarget 보유 행이 잘못되었습니다.',
+      'bestFactorPortfolio 보유 행이 잘못되었습니다.',
     );
     if (Object.prototype.hasOwnProperty.call(row, 'maxWeight')) {
       requireCondition(
@@ -1054,15 +1054,15 @@ function validateTargetAllocation(payload) {
   const cashWeight = Number(target.cashWeight);
   requireCondition(
     finite(cashWeight) && cashWeight >= 0 && cashWeight <= 1,
-    'currentResearchTarget 현금 비중이 잘못되었습니다.',
+    'bestFactorPortfolio 현금 비중이 잘못되었습니다.',
   );
   requireCondition(
     closeNumber(weights.reduce((sum, value) => sum + value, 0) + cashWeight, 1),
-    'currentResearchTarget 비중과 현금의 합이 1이 아닙니다.',
+    'bestFactorPortfolio 비중과 현금의 합이 1이 아닙니다.',
   );
 
   const concentration = target.concentration;
-  requireCondition(isRecord(concentration), 'currentResearchTarget concentration이 없습니다.');
+  requireCondition(isRecord(concentration), 'bestFactorPortfolio concentration이 없습니다.');
   const invested = weights.reduce((sum, value) => sum + value, 0);
   const normalized = invested > 0 ? weights.map((value) => value / invested) : [];
   const hhi = normalized.reduce((sum, value) => sum + value * value, 0);
@@ -1079,876 +1079,19 @@ function validateTargetAllocation(payload) {
   Object.entries(expected).forEach(([field, value]) => {
     requireCondition(
       closeNumber(concentration[field], value),
-      `currentResearchTarget concentration.${field}가 잘못되었습니다.`,
+      `bestFactorPortfolio concentration.${field}가 잘못되었습니다.`,
     );
   });
   return { target, maxWeight };
 }
 
-function validateFactorPortfolios(payload) {
-  const portfolios = payload.factorPortfolios;
-  const definitions = payload.factorDefinitions;
-  const config = payload.config;
-  requireCondition(
-    isRecord(portfolios) && Array.isArray(definitions) && isRecord(config),
-    'factorPortfolios/factorDefinitions/config가 없습니다.',
-  );
-  const expectedFactors = definitions.map((row) => row?.factor).filter(Boolean).sort();
-  requireCondition(
-    expectedFactors.length === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
-      && sameJson(Object.keys(portfolios).sort(), expectedFactors),
-    'factorPortfolios가 64개 팩터 정의를 정확히 포함하지 않습니다.',
-  );
-  const maxWeight = Number(config.max_weight);
-  const topN = Number(config.top_n);
-  const selectedPolicy = payload.weightingPolicyRegistry?.policies?.[payload.selectedWeightingPolicy];
-  requireCondition(
-    isRecord(selectedPolicy) && typeof selectedPolicy.version === 'string',
-    '선택 weighting policy registry가 없습니다.',
-  );
-  expectedFactors.forEach((factor) => {
-    const target = portfolios[factor];
-    requireCondition(
-      isRecord(target)
-        && target.factor === factor
-        && target.weightingPolicyId === payload.selectedWeightingPolicy
-        && target.asOf === payload.data.asOf
-        && target.signalDate === payload.data.asOf
-        && target.targetType === 'current_research_target'
-        && target.executionTiming === 'next_available_session_close_after_signal'
-        && target.weightingPolicyVersion === selectedPolicy.version
-        && ['available', 'unavailable'].includes(target.status)
-        && Array.isArray(target.weights)
-        && Array.isArray(target.reasons)
-        && integer(target.selectedSecurityCount)
-        && Number(target.selectedSecurityCount) === target.weights.length
-        && integer(target.eligibleSecurityCount)
-        && Number(target.eligibleSecurityCount) >= target.weights.length
-        && target.weights.length <= topN,
-      `factorPortfolios.${factor}의 identity/status/count 계약이 잘못되었습니다.`,
-    );
-    const symbols = new Set();
-    const weights = [];
-    let invested = 0;
-    target.weights.forEach((row, index) => {
-      const symbol = typeof row?.symbol === 'string' ? row.symbol.trim().toUpperCase() : '';
-      const weight = Number(row?.weight);
-      requireCondition(
-        isRecord(row)
-          && row.rank === index + 1
-          && symbol
-          && !symbols.has(symbol)
-          && finite(row.factorScore)
-          && finite(weight)
-          && weight > 0
-          && weight <= maxWeight + 1e-12
-          && (!Object.prototype.hasOwnProperty.call(row, 'maxWeight') || closeNumber(row.maxWeight, maxWeight)),
-        `factorPortfolios.${factor}.weights[${index}]가 잘못되었습니다.`,
-      );
-      symbols.add(symbol);
-      weights.push(weight);
-      invested += weight;
-    });
-    const cash = Number(target.cashWeight);
-    const eligibleCount = Number(target.eligibleSecurityCount);
-    const expectedSelectionFraction = eligibleCount > 0 ? weights.length / eligibleCount : 0;
-    requireCondition(
-      finite(cash)
-        && cash >= 0
-        && cash <= 1
-        && closeNumber(invested + cash, 1)
-        && isRecord(target.concentration)
-        && closeNumber(target.selectionFraction, expectedSelectionFraction),
-      `factorPortfolios.${factor}의 비중/현금/집중도 계약이 잘못되었습니다.`,
-    );
-    const normalized = invested > 0 ? weights.map((weight) => weight / invested) : [];
-    const riskySleeveHhi = normalized.reduce((sum, weight) => sum + weight * weight, 0);
-    const ordered = weights.slice().sort((left, right) => right - left);
-    const expectedConcentration = {
-      investedWeight: invested,
-      cashWeight: cash,
-      riskySleeveHhi,
-      effectiveNames: riskySleeveHhi > 0 ? 1 / riskySleeveHhi : 0,
-      top1Weight: ordered.slice(0, 1).reduce((sum, weight) => sum + weight, 0),
-      top5Weight: ordered.slice(0, 5).reduce((sum, weight) => sum + weight, 0),
-      maxWeight: ordered[0] || 0,
-    };
-    Object.entries(expectedConcentration).forEach(([field, value]) => {
-      requireCondition(
-        closeNumber(target.concentration[field], value),
-        `factorPortfolios.${factor}.concentration.${field}가 잘못되었습니다.`,
-      );
-    });
-    if (target.status === 'available') {
-      const allowedInformationReasons = new Set([
-        'top_n_boundary_tie_resolved_by_trailing_dollar_volume',
-        'fewer_complete_policy_inputs_than_top_n',
-        'max_weight_capacity_or_missing_policy_inputs',
-      ]);
-      const hasFewerInputsReason = target.reasons.includes('fewer_complete_policy_inputs_than_top_n');
-      const hasCashCapacityReason = target.reasons.includes('max_weight_capacity_or_missing_policy_inputs');
-      requireCondition(
-        target.weights.length > 0
-          && new Set(target.reasons).size === target.reasons.length
-          && target.reasons.every((reason) => allowedInformationReasons.has(reason))
-          && hasFewerInputsReason === (target.weights.length < topN)
-          && hasCashCapacityReason === (cash > 1e-12),
-        `factorPortfolios.${factor} available 목표의 informational reason 계약이 잘못되었습니다.`,
-      );
-    } else {
-      requireCondition(
-        target.weights.length === 0
-          && closeNumber(cash, 1)
-          && target.reasons.length > 0
-          && target.reasons.every((reason) => typeof reason === 'string' && reason.trim()),
-        `factorPortfolios.${factor} unavailable 목표가 fail-closed가 아닙니다.`,
-      );
-    }
-  });
-  requireCondition(
-    sameJson(portfolios[payload.selectedFactor], payload.currentResearchTarget),
-    'canonical factorPortfolio가 currentResearchTarget과 다릅니다.',
-  );
-  return portfolios;
-}
-
-function validateFactorDiagnostics(payload) {
-  const diagnostics = payload.factorDiagnostics;
-  const definitions = payload.factorDefinitions;
-  requireCondition(
-    isRecord(diagnostics)
-      && diagnostics.contractVersion === 1
-      && Array.isArray(definitions),
-    'factorDiagnostics v1 계약이 없습니다.',
-  );
-  const independentDefinitions = definitions.filter((row) => (
-    row?.selection_eligible === true && !row?.compatibility_alias_of
-  ));
-  const aliasDefinitions = definitions.filter((row) => Boolean(row?.compatibility_alias_of));
-  const independent = independentDefinitions.map((row) => row.factor).sort();
-  const independentSet = new Set(independent);
-  const categoryByFactor = new Map(independentDefinitions.map((row) => [row.factor, row.category]));
-  const canonicalIsoDate = (value) => {
-    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-    const parsed = new Date(`${value}T00:00:00Z`);
-    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-  };
-  const optionalClose = (actual, expected) => (
-    expected === null ? actual === null : closeNumber(actual, expected)
-  );
-  const scope = diagnostics.scope;
-  requireCondition(
-    isRecord(scope)
-      && scope.factorCount === definitions.length
-      && scope.independentFactorCount === independent.length
-      && scope.diagnosticAliasCount === aliasDefinitions.length
-      && scope.aliasHandling === 'excluded_from_rankings'
-      && Array.isArray(scope.aliases)
-      && scope.aliases.length === aliasDefinitions.length,
-    'factorDiagnostics scope/alias 계약이 잘못되었습니다.',
-  );
-  const expectedAliases = aliasDefinitions.map((row) => ({
-    factor: row.factor,
-    canonicalFactor: row.compatibility_alias_of,
-  })).sort((left, right) => left.factor.localeCompare(right.factor));
-  requireCondition(
-    sameJson(scope.aliases, expectedAliases)
-      && expectedAliases.every((row) => independentSet.has(row.canonicalFactor)),
-    'factorDiagnostics alias mapping이 다릅니다.',
-  );
-
-  const rankIc = diagnostics.rankIc;
-  const rankRows = rankIc?.rows;
-  const signalDates = rankIc?.signalDates;
-  const expectedRequestedSessions = Math.min(756, Number(payload.data?.observations));
-  requireCondition(
-    isRecord(rankIc)
-      && rankIc.method === 'cross_sectional_spearman_signal_t_vs_adjusted_close_return_t_to_t_plus_21'
-      && rankIc.priceBasis === 'analysis_adjusted_close'
-      && rankIc.horizonSessions === 21
-      && rankIc.maximumSignalSessions === 756
-      && rankIc.overlapping === true
-      && integer(payload.data?.observations)
-      && integer(rankIc.requestedSignalSessions)
-      && Number(rankIc.requestedSignalSessions) === expectedRequestedSessions
-      && Array.isArray(signalDates)
-      && signalDates.length === Number(rankIc.requestedSignalSessions)
-      && signalDates.length > 21
-      && signalDates.every(canonicalIsoDate)
-      && new Set(signalDates).size === signalDates.length
-      && signalDates.at(-1) === payload.data.asOf
-      && rankIc.requestedStartDate === signalDates[0]
-      && rankIc.requestedEndDate === signalDates.at(-1)
-      && sameJson([...signalDates].sort(), signalDates)
-      && Array.isArray(rankRows)
-      && rankRows.length === independent.length
-      && sameJson(rankRows.map((row) => row.factor).sort(), independent),
-    'factorDiagnostics Rank-IC 범위/coverage 계약이 잘못되었습니다.',
-  );
-  const maximumObservations = signalDates.length - rankIc.horizonSessions;
-  const latestForwardSignalDate = signalDates.at(-rankIc.horizonSessions - 1);
-  const requiredRankFields = [
-    'rank', 'factor', 'category', 'available', 'unavailableReason', 'horizonSessions',
-    'observations', 'mean', 'median', 'standardDeviation', 'positiveRate', 'startDate',
-    'endDate', 'minimumSecurityCount', 'averageSecurityCount', 'maximumSecurityCount',
-    'latestFiniteCount',
-  ];
-  rankRows.forEach((row, index) => {
-    requireCondition(
-      isRecord(row)
-        && requiredRankFields.every((field) => Object.prototype.hasOwnProperty.call(row, field))
-        && row.rank === index + 1
-        && row.category === categoryByFactor.get(row.factor)
-        && typeof row.available === 'boolean'
-        && row.horizonSessions === 21
-        && integer(row.observations)
-        && Number(row.observations) >= 0
-        && Number(row.observations) <= maximumObservations
-        && integer(row.latestFiniteCount)
-        && Number(row.latestFiniteCount) >= 0
-        && Number(row.latestFiniteCount) <= Number(payload.data.latestEligibleSecurityCount),
-      `factorDiagnostics Rank-IC ${row?.factor || index} 기본 필드가 잘못되었습니다.`,
-    );
-    if (row.available) {
-      requireCondition(
-        [row.mean, row.median, row.standardDeviation, row.positiveRate, row.averageSecurityCount]
-          .every(finite)
-          && row.unavailableReason === null
-          && Number(row.observations) > 0
-          && Number(row.mean) >= -1 && Number(row.mean) <= 1
-          && Number(row.median) >= -1 && Number(row.median) <= 1
-          && Number(row.standardDeviation) >= 0 && Number(row.standardDeviation) <= 1
-          && Number(row.positiveRate) >= 0 && Number(row.positiveRate) <= 1
-          && integer(row.minimumSecurityCount)
-          && integer(row.maximumSecurityCount)
-          && Number(row.minimumSecurityCount) >= 3
-          && Number(row.minimumSecurityCount) <= Number(row.averageSecurityCount)
-          && Number(row.averageSecurityCount) <= Number(row.maximumSecurityCount)
-          && Number(row.maximumSecurityCount) <= Number(payload.data.analyzedSecurityCount)
-          && signalDates.includes(row.startDate)
-          && signalDates.includes(row.endDate)
-          && row.startDate <= row.endDate
-          && row.endDate <= latestForwardSignalDate,
-        `factorDiagnostics Rank-IC ${row.factor} 값/순서가 잘못되었습니다.`,
-      );
-    } else {
-      requireCondition(
-        typeof row.unavailableReason === 'string'
-          && row.unavailableReason.trim()
-          && Number(row.observations) === 0
-          && [
-            'mean', 'median', 'standardDeviation', 'positiveRate', 'startDate', 'endDate',
-            'minimumSecurityCount', 'averageSecurityCount', 'maximumSecurityCount',
-          ].every((field) => row[field] === null),
-        `factorDiagnostics Rank-IC ${row.factor} unavailable 계약이 잘못되었습니다.`,
-      );
-    }
-  });
-  const expectedRankOrder = [...rankRows].sort((left, right) => (
-    Number(right.available) - Number(left.available)
-      || (left.available ? Number(right.mean) - Number(left.mean) : 0)
-      || Number(right.observations) - Number(left.observations)
-      || String(left.factor).localeCompare(String(right.factor))
-  ));
-  requireCondition(
-    sameJson(rankRows.map((row) => row.factor), expectedRankOrder.map((row) => row.factor))
-      && rankIc.availableFactorCount === rankRows.filter((row) => row.available).length
-      && rankIc.unavailableFactorCount === rankRows.filter((row) => !row.available).length,
-    'factorDiagnostics Rank-IC 순서/available count가 다릅니다.',
-  );
-
-  const redundancy = diagnostics.redundancy;
-  const redundancyRows = redundancy?.rows;
-  requireCondition(
-    isRecord(redundancy)
-      && redundancy.method === 'latest_signal_date_cross_sectional_spearman'
-      && redundancy.diagnosticDate === payload.data.asOf
-      && closeNumber(redundancy.thresholdAbs, 0.95)
-      && Array.isArray(redundancyRows)
-      && redundancyRows.length === independent.length
-      && sameJson(redundancyRows.map((row) => row.factor).sort(), independent)
-      && integer(redundancy.eligiblePairCount)
-      && Number(redundancy.eligiblePairCount) >= 0
-      && Number(redundancy.eligiblePairCount) <= independent.length * (independent.length - 1) / 2,
-    'factorDiagnostics redundancy 범위/coverage 계약이 잘못되었습니다.',
-  );
-  const latestCounts = new Map(redundancyRows.map((row) => [row.factor, Number(row.latestFiniteCount)]));
-  const requiredRedundancyFields = [
-    'rank', 'factor', 'category', 'available', 'unavailableReason', 'nearestFactor',
-    'signedCorr', 'absCorr', 'validPeerCount', 'highCorrPeerCount', 'commonSecurityCount',
-    'latestFiniteCount',
-  ];
-  redundancyRows.forEach((row, index) => {
-    requireCondition(
-      isRecord(row)
-        && requiredRedundancyFields.every((field) => Object.prototype.hasOwnProperty.call(row, field))
-        && row.rank === index + 1
-        && row.category === categoryByFactor.get(row.factor)
-        && typeof row.available === 'boolean'
-        && integer(row.validPeerCount)
-        && Number(row.validPeerCount) >= 0
-        && Number(row.validPeerCount) <= independent.length - 1
-        && integer(row.highCorrPeerCount)
-        && Number(row.highCorrPeerCount) >= 0
-        && Number(row.highCorrPeerCount) <= Number(row.validPeerCount)
-        && integer(row.commonSecurityCount)
-        && Number(row.commonSecurityCount) >= 0
-        && integer(row.latestFiniteCount)
-        && Number(row.latestFiniteCount) >= 0
-        && Number(row.latestFiniteCount) <= Number(payload.data.latestEligibleSecurityCount),
-      `factorDiagnostics redundancy ${row?.factor || index} 기본 필드가 잘못되었습니다.`,
-    );
-    if (row.available) {
-      requireCondition(
-        row.unavailableReason === null
-          && independentSet.has(row.nearestFactor)
-          && row.nearestFactor !== row.factor
-          && finite(row.signedCorr)
-          && finite(row.absCorr)
-          && Number(row.signedCorr) >= -1 && Number(row.signedCorr) <= 1
-          && Number(row.absCorr) >= 0 && Number(row.absCorr) <= 1
-          && closeNumber(row.absCorr, Math.abs(Number(row.signedCorr)))
-          && Number(row.validPeerCount) > 0
-          && Number(row.commonSecurityCount) >= 3
-          && Number(row.commonSecurityCount) <= Math.min(
-            latestCounts.get(row.factor),
-            latestCounts.get(row.nearestFactor),
-          ),
-        `factorDiagnostics redundancy ${row.factor} 값/순서가 잘못되었습니다.`,
-      );
-    } else {
-      requireCondition(
-        typeof row.unavailableReason === 'string'
-          && row.unavailableReason.trim()
-          && row.nearestFactor === null
-          && row.signedCorr === null
-          && row.absCorr === null
-          && Number(row.validPeerCount) === 0
-          && Number(row.highCorrPeerCount) === 0
-          && Number(row.commonSecurityCount) === 0,
-        `factorDiagnostics redundancy ${row.factor} unavailable 계약이 잘못되었습니다.`,
-      );
-    }
-  });
-  const expectedRedundancyOrder = [...redundancyRows].sort((left, right) => (
-    Number(right.available) - Number(left.available)
-      || (left.available ? Number(right.absCorr) - Number(left.absCorr) : 0)
-      || String(left.factor).localeCompare(String(right.factor))
-  ));
-  const highPeerTotal = redundancyRows.reduce((sum, row) => sum + Number(row.highCorrPeerCount), 0);
-  const validPeerTotal = redundancyRows.reduce((sum, row) => sum + Number(row.validPeerCount), 0);
-  const availableRedundancyCount = redundancyRows.filter((row) => row.available).length;
-  requireCondition(
-    sameJson(redundancyRows.map((row) => row.factor), expectedRedundancyOrder.map((row) => row.factor))
-      && redundancy.availableFactorCount === availableRedundancyCount
-      && redundancy.unavailableFactorCount === independent.length - availableRedundancyCount
-      && integer(redundancy.highRedundancyPairCount)
-      && Number(redundancy.highRedundancyPairCount) >= 0
-      && Number(redundancy.highRedundancyPairCount) <= Number(redundancy.eligiblePairCount)
-      && validPeerTotal === 2 * Number(redundancy.eligiblePairCount)
-      && highPeerTotal === 2 * Number(redundancy.highRedundancyPairCount),
-    'factorDiagnostics redundancy 순서/available/pair counts가 다릅니다.',
-  );
-  requireCondition(
-    redundancy.highRedundancyFactorCount
-      === redundancyRows.filter((row) => Number(row.highCorrPeerCount) > 0).length,
-    'factorDiagnostics 고중복 팩터 수가 다릅니다.',
-  );
-  const pairs = redundancy.topPairs;
-  requireCondition(
-    Array.isArray(pairs)
-      && pairs.length === Math.min(10, Number(redundancy.eligiblePairCount)),
-    'factorDiagnostics top redundancy pairs가 없습니다.',
-  );
-  const observedPairs = new Set();
-  pairs.forEach((row, index) => {
-    const key = `${row.leftFactor}::${row.rightFactor}`;
-    requireCondition(
-      row.rank === index + 1
-        && independent.includes(row.leftFactor)
-        && independent.includes(row.rightFactor)
-        && row.leftFactor < row.rightFactor
-        && !observedPairs.has(key)
-        && finite(row.signedCorr)
-        && finite(row.absCorr)
-        && Number(row.signedCorr) >= -1 && Number(row.signedCorr) <= 1
-        && Number(row.absCorr) >= 0 && Number(row.absCorr) <= 1
-        && closeNumber(row.absCorr, Math.abs(Number(row.signedCorr)))
-        && integer(row.commonSecurityCount)
-        && Number(row.commonSecurityCount) >= 3
-        && Number(row.commonSecurityCount) <= Math.min(
-          latestCounts.get(row.leftFactor),
-          latestCounts.get(row.rightFactor),
-        ),
-      `factorDiagnostics top pair ${index + 1}이 잘못되었습니다.`,
-    );
-    observedPairs.add(key);
-  });
-  const expectedPairOrder = [...pairs].sort((left, right) => (
-    Number(right.absCorr) - Number(left.absCorr)
-      || String(left.leftFactor).localeCompare(String(right.leftFactor))
-      || String(left.rightFactor).localeCompare(String(right.rightFactor))
-  ));
-  const highPairsInTop = pairs.filter((row) => Number(row.absCorr) >= 0.95).length;
-  requireCondition(
-    sameJson(pairs.map((row) => [row.leftFactor, row.rightFactor]), expectedPairOrder.map((row) => [row.leftFactor, row.rightFactor]))
-      && Number(redundancy.highRedundancyPairCount) >= highPairsInTop
-      && (Number(redundancy.eligiblePairCount) > 10
-        || Number(redundancy.highRedundancyPairCount) === highPairsInTop),
-    'factorDiagnostics top pair 순서/고중복 count가 잘못되었습니다.',
-  );
-  const categories = diagnostics.categorySummary;
-  const expectedCategories = [...new Set(independentDefinitions.map((row) => row.category))].sort();
-  requireCondition(
-    Array.isArray(categories)
-      && sameJson(
-        categories.map((row) => row.category).sort(),
-        expectedCategories,
-      ),
-    'factorDiagnostics category summary coverage가 다릅니다.',
-  );
-  const rankByFactor = new Map(rankRows.map((row) => [row.factor, row]));
-  const redundancyByFactor = new Map(redundancyRows.map((row) => [row.factor, row]));
-  categories.forEach((row) => {
-    const factors = independent
-      .filter((factor) => categoryByFactor.get(factor) === row.category)
-      .sort();
-    const rankAvailable = factors.map((factor) => rankByFactor.get(factor)).filter((item) => item.available);
-    const redundancyAvailable = factors.map((factor) => redundancyByFactor.get(factor)).filter((item) => item.available);
-    const average = (items, field) => items.length
-      ? items.reduce((sum, item) => sum + Number(item[field]), 0) / items.length
-      : null;
-    requireCondition(
-      row.factorCount === factors.length
-        && row.availableRankIcFactorCount === rankAvailable.length
-        && row.highCorrFactorCount === redundancyAvailable.filter((item) => Number(item.highCorrPeerCount) > 0).length
-        && sameJson(row.exampleFactors, factors.slice(0, 4))
-        && optionalClose(row.averageMeanRankIc, average(rankAvailable, 'mean'))
-        && optionalClose(row.averagePositiveRate, average(rankAvailable, 'positiveRate'))
-        && optionalClose(row.averageMaxAbsCorr, average(redundancyAvailable, 'absCorr')),
-      `factorDiagnostics ${row.category} category summary가 잘못되었습니다.`,
-    );
-  });
-  const expectedCategoryOrder = [...categories].sort((left, right) => (
-    Number(right.factorCount) - Number(left.factorCount)
-      || String(left.category).localeCompare(String(right.category))
-  ));
-  requireCondition(
-    sameJson(categories.map((row) => row.category), expectedCategoryOrder.map((row) => row.category)),
-    'factorDiagnostics category summary 순서가 잘못되었습니다.',
-  );
-  return diagnostics;
-}
-
-function configuredComparisonBenchmarks(config) {
-  const raw = [
-    config?.benchmark,
-    config?.chart_benchmark,
-    ...(Array.isArray(config?.additional_comparison_benchmarks)
-      ? config.additional_comparison_benchmarks
-      : []),
-  ];
-  const ordered = [];
-  raw.forEach((value) => {
-    const symbol = typeof value === 'string' ? value.trim().toUpperCase() : '';
-    if (symbol && !ordered.includes(symbol)) ordered.push(symbol);
-  });
-  return ordered;
-}
-
-function validatePeriodMetric(value, expectedBasis, expectedReturnCount, label) {
-  const required = [
-    'available',
-    'unavailableReason',
-    'basis',
-    'returnObservationCount',
-    'requiredReturnCount',
-    'riskObservationCount',
-    'riskMetricsExact',
-    ...PERFORMANCE_METRIC_KEYS,
-  ];
-  requireCondition(
-    isRecord(value)
-      && required.every((field) => Object.prototype.hasOwnProperty.call(value, field))
-      && value.basis === expectedBasis,
-    `${label} 기간 성과 계약이 불완전합니다.`,
-  );
-  requireCondition(
-    typeof value.available === 'boolean'
-      && typeof value.riskMetricsExact === 'boolean'
-      && nonnegativeInteger(value.returnObservationCount)
-      && nonnegativeInteger(value.requiredReturnCount)
-      && nonnegativeInteger(value.riskObservationCount)
-      && value.returnObservationCount <= value.requiredReturnCount
-      && value.riskObservationCount <= value.returnObservationCount,
-    `${label} 기간 성과 관측치 수가 잘못되었습니다.`,
-  );
-  if (value.available) {
-    requireCondition(
-      value.unavailableReason === null
-        && value.requiredReturnCount === expectedReturnCount
-        && strictJsonNumber(value.cumulativeReturn)
-        && PERFORMANCE_METRIC_KEYS.every((metric) => (
-          value[metric] === null || strictJsonNumber(value[metric])
-        )),
-      `${label} available 기간 성과가 잘못되었습니다.`,
-    );
-  } else {
-    requireCondition(
-      requiredText(value.unavailableReason)
-        && PERFORMANCE_METRIC_KEYS.every((metric) => value[metric] === null),
-      `${label} unavailable 기간 성과가 fail-closed가 아닙니다.`,
-    );
-  }
-}
-
-function validateFullPeriodCurveParity(metrics, curve, label, requireCommonSeries) {
-  if (metrics.available !== true) return;
-  const completePositiveCurve = Array.isArray(curve)
-    && curve.length >= 2
-    && curve.every((value) => strictJsonNumber(value) && value > 0);
-  requireCondition(
-    !requireCommonSeries || completePositiveCurve,
-    `${label} FULL 공통 평가 곡선이 잘못되었습니다.`,
-  );
-  if (!completePositiveCurve) return;
-  const expectedReturn = curve.at(-1) / curve[0] - 1;
-  requireCondition(
-    closeNumber(metrics.cumulativeReturn, expectedReturn),
-    `${label} FULL 누적 수익률이 그래프 endpoint와 다릅니다.`,
-  );
-}
-
-function validatePerformance(payload) {
-  const performance = payload.performance;
-  const config = payload.config;
-  const data = payload.data;
-  const dates = performance?.dates;
-  requireCondition(
-    isRecord(performance)
-      && performance.contractVersion === PERFORMANCE_CONTRACT_VERSION
-      && performance.weightingPolicyId === payload.selectedWeightingPolicy
-      && Array.isArray(dates)
-      && dates.length >= 2
-      && dates.every(requiredText)
-      && sameJson([...dates].sort(), dates)
-      && new Set(dates).size === dates.length
-      && dates.at(-1) === data?.asOf
-      && isRecord(performance.factorCurves),
-    'Python performance 날짜/정책 계약이 잘못되었습니다.',
-  );
-
-  const expectedFactors = (payload.factorDefinitions || [])
-    .map((row) => row?.factor)
-    .filter(requiredText)
-    .sort();
-  requireCondition(
-    expectedFactors.length === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
-      && new Set(expectedFactors).size === expectedFactors.length
-      && sameJson(Object.keys(performance.factorCurves).sort(), expectedFactors),
-    'Python performance 팩터 곡선 coverage가 잘못되었습니다.',
-  );
-  Object.entries(performance.factorCurves).forEach(([factor, curve]) => {
-    requireCondition(
-      Array.isArray(curve)
-        && curve.length === dates.length
-        && curve.every((value) => value === null || strictJsonNumber(value)),
-      `Python performance ${factor} 곡선의 길이/유한값/null gap이 잘못되었습니다.`,
-    );
-  });
-
-  const comparisonOrder = configuredComparisonBenchmarks(config);
-  requireCondition(
-    sameJson(config?.comparison_benchmarks, comparisonOrder)
-      && data?.chartBenchmark === config?.chart_benchmark
-      && sameJson(
-        data?.additionalComparisonBenchmarks,
-        config?.additional_comparison_benchmarks,
-      ),
-    '비교지수 config/data 순서가 다릅니다.',
-  );
-  const availability = data?.comparisonBenchmarkAvailability;
-  const benchmarkCurves = performance.benchmarkCurves;
-  requireCondition(
-    sameJson(performance.benchmarkOrder, comparisonOrder)
-      && isRecord(availability)
-      && sameJson(Object.keys(availability).sort(), [...comparisonOrder].sort())
-      && Object.values(availability).every((value) => typeof value === 'boolean')
-      && isRecord(benchmarkCurves)
-      && sameJson(Object.keys(benchmarkCurves).sort(), [...comparisonOrder].sort()),
-    'Python performance 비교지수 순서/coverage가 잘못되었습니다.',
-  );
-  comparisonOrder.forEach((symbol) => {
-    const curve = benchmarkCurves[symbol];
-    if (availability[symbol]) {
-      requireCondition(
-        Array.isArray(curve)
-          && curve.length === dates.length
-          && curve.every((value) => value === null || strictJsonNumber(value))
-          && curve.at(-1) !== null,
-        `${symbol} 비교지수 곡선의 길이/유한값/null gap이 잘못되었습니다.`,
-      );
-    } else {
-      requireCondition(curve === null, `${symbol} unavailable 비교지수 곡선은 null이어야 합니다.`);
-    }
-  });
-  const primary = typeof config?.benchmark === 'string' ? config.benchmark.trim().toUpperCase() : '';
-  requireCondition(
-    sameJson(performance.benchmarkCurve, benchmarkCurves[primary])
-      && data?.benchmarkAvailable === (availability[primary] || false),
-    'legacy benchmarkCurve/사용 가능성이 benchmarkCurves와 다릅니다.',
-  );
-
-  const periods = performance.periods;
-  requireCondition(
-    Array.isArray(periods)
-      && sameJson(
-        periods.map((period) => period?.key),
-        PERFORMANCE_PERIOD_CONTRACT.map((period) => period.key),
-      ),
-    'Python performance 기간 목록이 누락되었거나 순서가 다릅니다.',
-  );
-  periods.forEach((period, index) => {
-    const contract = PERFORMANCE_PERIOD_CONTRACT[index];
-    requireCondition(
-      isRecord(period)
-        && period.label === contract.label
-        && nonnegativeInteger(period.returnObservationCount)
-        && isRecord(period.factors)
-        && sameJson(Object.keys(period.factors).sort(), expectedFactors)
-        && isRecord(period.benchmarks)
-        && sameJson(Object.keys(period.benchmarks).sort(), [...comparisonOrder].sort()),
-      `Python performance ${contract.key} 기간 계약이 잘못되었습니다.`,
-    );
-    const count = period.returnObservationCount;
-    if (contract.returnCount !== null) {
-      requireCondition(
-        count === contract.returnCount,
-        `Python performance ${contract.key} 기간의 거래일 수가 다릅니다.`,
-      );
-    }
-    if (contract.key === 'FULL') {
-      requireCondition(
-        count === dates.length - 1
-          && period.startDate === dates[0]
-          && period.endDate === dates.at(-1),
-        'Python performance FULL 공통 평가기간이 곡선 날짜와 다릅니다.',
-      );
-    }
-    if (period.unavailableReason === null) {
-      requireCondition(
-        requiredText(period.startDate) && period.endDate === dates.at(-1),
-        `Python performance ${contract.key} 기간 경계가 잘못되었습니다.`,
-      );
-    } else {
-      requireCondition(
-        requiredText(period.unavailableReason),
-        `Python performance ${contract.key} unavailable reason이 잘못되었습니다.`,
-      );
-    }
-    Object.entries(period.factors).forEach(([factor, metrics]) => {
-      validatePeriodMetric(metrics, 'net_of_costs_strategy', count, `${contract.key}/${factor}`);
-      if (contract.key === 'FULL') {
-        validateFullPeriodCurveParity(metrics, performance.factorCurves[factor], `팩터 ${factor}`, false);
-      }
-    });
-    Object.entries(period.benchmarks).forEach(([symbol, metrics]) => {
-      validatePeriodMetric(metrics, 'adjusted_close_buy_and_hold', count, `${contract.key}/${symbol}`);
-      if (contract.key === 'FULL') {
-        validateFullPeriodCurveParity(metrics, benchmarkCurves[symbol], `비교지수 ${symbol}`, true);
-      }
-    });
-  });
-  return performance;
-}
-
-function validateBacktestHeldPortfolio(payload) {
-  const held = payload.backtestHeldPortfolio;
-  const asOf = payload.data?.asOf;
-  requireCondition(
-    isRecord(held)
-      && held.factor === payload.selectedFactor
-      && held.weightingPolicyId === payload.selectedWeightingPolicy
-      && held.asOf === asOf
-      && requiredText(held.lastSignalDate)
-      && requiredText(held.lastExecutionDate)
-      && typeof held.valuationAvailable === 'boolean'
-      && Array.isArray(held.weights)
-      && strictJsonNumber(held.cashWeight)
-      && held.cashWeight >= 0
-      && held.cashWeight <= 1
-      && held.lastSignalDate <= held.lastExecutionDate
-      && held.lastExecutionDate <= asOf,
-    'backtestHeldPortfolio identity/date/allocation 계약이 잘못되었습니다.',
-  );
-  requireCondition(
-    held.valuationAvailable !== true || held.weights.length > 0,
-    '평가 가능한 backtestHeldPortfolio에 보유 종목이 없습니다.',
-  );
-  const symbols = new Set();
-  let total = held.cashWeight;
-  held.weights.forEach((row, index) => {
-    requireCondition(
-      isRecord(row)
-        && row.rank === index + 1
-        && requiredText(row.symbol)
-        && requiredText(row.name)
-        && !symbols.has(row.symbol)
-        && strictJsonNumber(row.weight)
-        && row.weight > 0
-        && row.weight <= 1
-        && (row.factorScore === null || strictJsonNumber(row.factorScore))
-        && (held.valuationAvailable !== true
-          || (strictJsonNumber(row.latestPrice) && row.latestPrice > 0)),
-      `backtestHeldPortfolio.weights[${index}] 행이 잘못되었습니다.`,
-    );
-    symbols.add(row.symbol);
-    total += row.weight;
-  });
-  requireCondition(
-    closeNumber(total, 1),
-    'backtestHeldPortfolio 비중과 현금의 합이 1이 아닙니다.',
-  );
-  return held;
-}
-
-function validateSelectedBacktestHoldingHistory(payload, held = validateBacktestHeldPortfolio(payload)) {
-  const history = payload.selectedBacktestHoldingHistory;
-  const expectedHistoryFields = [
-    'contractVersion',
-    'factor',
-    'weightingPolicyId',
-    'weightTiming',
-    'startDate',
-    'endDate',
-    'sessionCount',
-    'sessions',
-  ];
-  requireCondition(
-    exactRecordKeys(history, expectedHistoryFields)
-      && history.contractVersion === SELECTED_HOLDING_HISTORY_CONTRACT_VERSION
-      && history.factor === payload.selectedFactor
-      && history.weightingPolicyId === payload.selectedWeightingPolicy
-      && history.weightTiming === SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
-      && history.sessionCount === SELECTED_HOLDING_HISTORY_SESSION_COUNT
-      && Array.isArray(history.sessions)
-      && history.sessions.length === SELECTED_HOLDING_HISTORY_SESSION_COUNT,
-    'selectedBacktestHoldingHistory identity/session 계약이 잘못되었습니다.',
-  );
-  const sessionFields = [
-    'date',
-    'valuationAvailable',
-    'cashWeight',
-    'executionStatus',
-    'lastSignalDate',
-    'lastExecutionDate',
-    'weights',
-  ];
-  const weightFields = ['rank', 'symbol', 'name', 'weight'];
-  const allowedStatuses = new Set(HOLDING_EXECUTION_STATUSES);
-  const dates = [];
-  let previousMetadata = null;
-  history.sessions.forEach((session, sessionIndex) => {
-    const signalDate = session?.lastSignalDate;
-    const executionDate = session?.lastExecutionDate;
-    const metadata = [signalDate, executionDate];
-    requireCondition(
-      exactRecordKeys(session, sessionFields)
-        && requiredText(session.date)
-        && session.date <= payload.data.asOf
-        && typeof session.valuationAvailable === 'boolean'
-        && strictJsonNumber(session.cashWeight)
-        && session.cashWeight >= 0
-        && session.cashWeight <= 1
-        && allowedStatuses.has(session.executionStatus)
-        && ((signalDate === null && executionDate === null)
-          || (requiredText(signalDate)
-            && requiredText(executionDate)
-            && signalDate <= executionDate
-            && executionDate <= session.date)),
-      `selectedBacktestHoldingHistory.sessions[${sessionIndex}] metadata가 잘못되었습니다.`,
-    );
-    if (['executed', 'executed_partial_unpriceable_targets'].includes(session.executionStatus)) {
-      requireCondition(
-        executionDate === session.date,
-        `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 체결일이 세션일과 다릅니다.`,
-      );
-    } else if (sessionIndex > 0) {
-      requireCondition(
-        sameJson(metadata, previousMetadata),
-        `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 미체결 메타데이터가 변경되었습니다.`,
-      );
-    }
-    previousMetadata = metadata;
-    requireCondition(
-      Array.isArray(session.weights) && session.weights.length > 0,
-      `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 비중이 없습니다.`,
-    );
-    const symbols = new Set();
-    let total = session.cashWeight;
-    session.weights.forEach((row, index) => {
-      requireCondition(
-        exactRecordKeys(row, weightFields)
-          && row.rank === index + 1
-          && requiredText(row.symbol)
-          && requiredText(row.name)
-          && !symbols.has(row.symbol)
-          && strictJsonNumber(row.weight)
-          && row.weight > 0
-          && row.weight <= 1,
-        `selectedBacktestHoldingHistory.sessions[${sessionIndex}].weights[${index}]가 잘못되었습니다.`,
-      );
-      symbols.add(row.symbol);
-      total += row.weight;
-    });
-    requireCondition(
-      closeNumber(total, 1)
-        && sameJson(
-          session.weights.map((row) => [row.weight, row.symbol]),
-          [...session.weights]
-            .sort(compareWeightSymbolOrder)
-            .map((row) => [row.weight, row.symbol]),
-        ),
-      `selectedBacktestHoldingHistory.sessions[${sessionIndex}] 배분/정렬이 잘못되었습니다.`,
-    );
-    dates.push(session.date);
-  });
-  requireCondition(
-    new Set(dates).size === dates.length
-      && sameJson([...dates].sort(), dates)
-      && history.startDate === dates[0]
-      && history.endDate === dates.at(-1)
-      && dates.at(-1) === payload.data.asOf
-      && sameJson(
-        dates,
-        payload.performance.dates.slice(-SELECTED_HOLDING_HISTORY_SESSION_COUNT),
-      ),
-    'selectedBacktestHoldingHistory 날짜 범위가 performance 거래일과 다릅니다.',
-  );
-  const finalSession = history.sessions.at(-1);
-  const expectedFinalWeights = held.weights.map((row) => ({
-    rank: row.rank,
-    symbol: row.symbol,
-    name: row.name,
-    weight: row.weight,
-  }));
-  requireCondition(
-    sameJson(finalSession.weights, expectedFinalWeights)
-      && finalSession.cashWeight === held.cashWeight
-      && finalSession.valuationAvailable === held.valuationAvailable
-      && finalSession.lastSignalDate === held.lastSignalDate
-      && finalSession.lastExecutionDate === held.lastExecutionDate,
-    'selectedBacktestHoldingHistory 마지막 세션이 backtestHeldPortfolio와 다릅니다.',
-  );
-  return history;
-}
 
 function validateFactorHoldingHistorySidecarData(payload, data) {
   const expectedFields = [
     'contract',
     'contractVersion',
     'resultKey',
-    'selectedWeightingPolicy',
+    'weightingPolicy',
     'weightTiming',
     'startDate',
     'endDate',
@@ -1979,7 +1122,7 @@ function validateFactorHoldingHistorySidecarData(payload, data) {
       && data.contract === FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT
       && data.contractVersion === FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION
       && data.resultKey === payload.resultKey
-      && data.selectedWeightingPolicy === payload.selectedWeightingPolicy
+      && data.weightingPolicy === payload.weightingPolicy
       && data.weightTiming === SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
       && data.startDate === dates[0]
       && data.endDate === dates.at(-1)
@@ -2026,7 +1169,7 @@ function validateFactorHoldingHistorySidecarData(payload, data) {
     requireCondition(
       exactRecordKeys(factorHistory, ['factor', 'weightingPolicyId', 'resultKey', 'sessions'])
         && factorHistory.factor === factor
-        && factorHistory.weightingPolicyId === payload.selectedWeightingPolicy
+        && factorHistory.weightingPolicyId === payload.weightingPolicy
         && factorHistory.resultKey === payload.resultKey
         && Array.isArray(factorHistory.sessions)
         && factorHistory.sessions.length === dates.length,
@@ -2112,7 +1255,7 @@ function validateFactorHoldingHistorySidecarData(payload, data) {
           ),
         `팩터별 보유 이력 ${factor}/${date} 배분/정렬이 잘못되었습니다.`,
       );
-      if (factor === payload.selectedFactor) {
+      if (factor === payload.bestFactor) {
         selectedSessions.push({
           date,
           valuationAvailable: session.valuationAvailable,
@@ -2126,8 +1269,8 @@ function validateFactorHoldingHistorySidecarData(payload, data) {
     });
   });
   requireCondition(
-    sameJson(selectedSessions, payload.selectedBacktestHoldingHistory.sessions),
-    '팩터별 보유 이력 sidecar의 선택 팩터가 canonical history와 다릅니다.',
+    sameJson(selectedSessions, payload.bestFactorBacktestHoldingHistory.sessions),
+    '팩터별 보유 이력 sidecar의 최고 팩터가 Python history와 다릅니다.',
   );
   return data;
 }
@@ -2143,7 +1286,7 @@ function validateFactorHoldingHistorySidecarManifest(payload) {
     'sha256',
     'bytes',
     'resultKey',
-    'selectedWeightingPolicy',
+    'weightingPolicy',
     'weightTiming',
     'startDate',
     'endDate',
@@ -2165,10 +1308,10 @@ function validateFactorHoldingHistorySidecarManifest(payload) {
       && manifest.bytes >= 1
       && manifest.bytes <= MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES
       && manifest.resultKey === payload.resultKey
-      && manifest.selectedWeightingPolicy === payload.selectedWeightingPolicy
+      && manifest.weightingPolicy === payload.weightingPolicy
       && manifest.weightTiming === SELECTED_HOLDING_HISTORY_WEIGHT_TIMING
-      && manifest.startDate === payload.selectedBacktestHoldingHistory.startDate
-      && manifest.endDate === payload.selectedBacktestHoldingHistory.endDate
+      && manifest.startDate === payload.bestFactorBacktestHoldingHistory.startDate
+      && manifest.endDate === payload.bestFactorBacktestHoldingHistory.endDate
       && manifest.sessionCount === SELECTED_HOLDING_HISTORY_SESSION_COUNT
       && manifest.factorCount === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
       && manifest.independentFactorCount === EXPECTED_INDEPENDENT_FACTOR_COUNT
@@ -2182,345 +1325,59 @@ function validateFactorHoldingHistorySidecarManifest(payload) {
   return manifest;
 }
 
-function expectedGuardrailProfile(researchInputs) {
-  requireCondition(isRecord(researchInputs), 'guardrailProfile researchInputs가 없습니다.');
-  const thresholdFields = [
-    'selectionMinSharpe',
-    'selectionMaxDrawdown',
-    'selectionMaxAnnualizedCostDrag',
-    'selectionMinEffectiveNames',
-    'selectionMaxTargetHhi',
-    'selectionMaxTargetWeight',
-    'selectionMaxAbsSecurityDayContribution',
-    'selectionMaxSecurityAbsoluteContributionShare',
-    'selectionMaxLeaveOneSecurityCagrDelta',
-    'selectionExtremeEventPenaltyPoints',
-  ];
-  thresholdFields.forEach((field) => {
-    requireCondition(finite(researchInputs[field]), `researchInputs.${field}가 잘못되었습니다.`);
-  });
-  requireCondition(
-    ['warn', 'penalize', 'exclude'].includes(researchInputs.selectionExtremeEventAction),
-    'researchInputs.selectionExtremeEventAction이 잘못되었습니다.',
-  );
-  return {
-    id: ABSOLUTE_GUARDRAIL_VERSION,
-    version: 1,
-    policyNeutral: true,
-    rules: [
-      {
-        id: 'minimum_sharpe',
-        metric: 'sharpe',
-        operator: '>=',
-        threshold: researchInputs.selectionMinSharpe,
-        unit: 'ratio',
-      },
-      {
-        id: 'maximum_drawdown_magnitude',
-        metric: 'max_drawdown',
-        operator: '>=',
-        threshold: -Number(researchInputs.selectionMaxDrawdown),
-        unit: 'fraction',
-      },
-      {
-        id: 'maximum_annualized_cost_drag',
-        metric: 'annualized_cost_drag',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxAnnualizedCostDrag,
-        unit: 'fraction_per_year',
-      },
-      {
-        id: 'minimum_historical_target_effective_names',
-        metric: 'min_target_effective_names',
-        operator: '>=',
-        threshold: researchInputs.selectionMinEffectiveNames,
-        unit: 'names',
-      },
-      {
-        id: 'minimum_current_target_effective_names',
-        metric: 'current_target_effective_names',
-        operator: '>=',
-        threshold: researchInputs.selectionMinEffectiveNames,
-        unit: 'names',
-      },
-      {
-        id: 'maximum_historical_target_hhi',
-        metric: 'max_target_hhi',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxTargetHhi,
-        unit: 'fraction',
-      },
-      {
-        id: 'maximum_current_target_hhi',
-        metric: 'current_target_hhi',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxTargetHhi,
-        unit: 'fraction',
-      },
-      {
-        id: 'maximum_historical_target_weight',
-        metric: 'max_target_weight',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxTargetWeight,
-        unit: 'fraction',
-      },
-      {
-        id: 'maximum_current_target_weight',
-        metric: 'current_target_max_weight',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxTargetWeight,
-        unit: 'fraction',
-      },
-      {
-        id: 'maximum_security_day_contribution',
-        metric: 'max_abs_security_day_contribution',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxAbsSecurityDayContribution,
-        unit: 'portfolio_return_fraction',
-      },
-      {
-        id: 'maximum_security_absolute_contribution_share',
-        metric: 'max_security_absolute_contribution_share',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxSecurityAbsoluteContributionShare,
-        unit: 'fraction',
-      },
-      {
-        id: 'maximum_leave_one_security_cagr_delta',
-        metric: 'max_abs_leave_one_security_cagr_delta',
-        operator: '<=',
-        threshold: researchInputs.selectionMaxLeaveOneSecurityCagrDelta,
-        unit: 'cagr_fraction',
-      },
-    ],
-    requiredContracts: {
-      completePolicyInputs: true,
-      completeExecutionCoverage: true,
-      currentTargetAvailable: true,
-      contributionDiagnosticsComplete: true,
-    },
-    extremeEventAction: researchInputs.selectionExtremeEventAction,
-    extremeEventPenaltyPoints: researchInputs.selectionExtremeEventPenaltyPoints,
-  };
-}
-
-function validateGuardrailProfile(payload) {
-  const profile = payload.selectionDecision?.guardrailProfile;
-  requireCondition(isRecord(profile), 'selectionDecision.guardrailProfile이 없습니다.');
-  requireCondition(
-    Array.isArray(profile.rules) && profile.rules.length === 12,
-    'guardrailProfile은 정확히 12개 규칙이어야 합니다.',
-  );
-  requireCondition(
-    sameJson(profile, expectedGuardrailProfile(payload.researchInputs)),
-    'guardrailProfile이 researchInputs 기반 exact 계약과 다릅니다.',
-  );
-  return profile;
-}
-
-function concentrationGuardrailExpectations(row, researchInputs) {
-  return {
-    guardrail_historical_effective_names:
-      Number(row.min_target_effective_names) >= Number(researchInputs.selectionMinEffectiveNames),
-    guardrail_current_effective_names:
-      Number(row.current_target_effective_names) >= Number(researchInputs.selectionMinEffectiveNames),
-    guardrail_historical_target_hhi:
-      Number(row.max_target_hhi) <= Number(researchInputs.selectionMaxTargetHhi),
-    guardrail_current_target_hhi:
-      Number(row.current_target_hhi) <= Number(researchInputs.selectionMaxTargetHhi),
-    guardrail_historical_target_weight:
-      Number(row.max_target_weight) <= Number(researchInputs.selectionMaxTargetWeight),
-    guardrail_current_target_weight:
-      Number(row.current_target_max_weight) <= Number(researchInputs.selectionMaxTargetWeight),
-  };
-}
-
-function validateRankingConcentrationGuardrails(payload) {
-  const metricDomains = {
-    min_target_effective_names: (value) => value >= 0,
-    current_target_effective_names: (value) => value >= 0,
-    max_target_hhi: (value) => value >= 0 && value <= 1,
-    current_target_hhi: (value) => value >= 0 && value <= 1,
-    max_target_weight: (value) => value >= 0 && value <= 1,
-    current_target_max_weight: (value) => value >= 0 && value <= 1,
-  };
-  payload.factorPolicyRanking.forEach((row, index) => {
-    Object.entries(metricDomains).forEach(([field, validDomain]) => {
-      const value = Number(row[field]);
-      requireCondition(
-        finite(row[field]) && validDomain(value),
-        `factorPolicyRanking[${index}].${field}가 잘못되었습니다.`,
-      );
-    });
-    Object.entries(concentrationGuardrailExpectations(row, payload.researchInputs)).forEach(
-      ([field, expected]) => {
-        requireCondition(
-          row[field] === expected,
-          `factorPolicyRanking[${index}].${field}가 집중도 임계값과 다릅니다.`,
-        );
-      },
-    );
-  });
-}
-
-function validateSelectedConcentrationGuardrails(payload, row, target) {
-  const concentration = target.concentration;
-  const metrics = {
-    min_target_effective_names: Number(row.min_target_effective_names),
-    current_target_effective_names: Number(row.current_target_effective_names),
-    max_target_hhi: Number(row.max_target_hhi),
-    current_target_hhi: Number(row.current_target_hhi),
-    max_target_weight: Number(row.max_target_weight),
-    current_target_max_weight: Number(row.current_target_max_weight),
-  };
-  Object.entries(metrics).forEach(([field, value]) => {
-    requireCondition(finite(value), `선택 행 집중도 지표가 잘못되었습니다: ${field}`);
-  });
-  requireCondition(
-    closeNumber(metrics.current_target_effective_names, concentration.effectiveNames)
-      && closeNumber(metrics.current_target_hhi, concentration.riskySleeveHhi)
-      && closeNumber(metrics.current_target_max_weight, concentration.maxWeight),
-    '선택 행의 현재 집중도 지표가 currentResearchTarget과 다릅니다.',
-  );
-  const expected = concentrationGuardrailExpectations(row, payload.researchInputs);
-  requireCondition(
-    Object.values(expected).every(Boolean),
-    '선택 조합이 역사상 최악값 또는 현재 집중도 절대 가드레일을 통과하지 못했습니다.',
-  );
-  requireCondition(
-    row.absolute_guardrail_pass === true
-      && row.selection_eligible === true
-      && row.selection_status === 'eligible'
-      && row.selected === true,
-    '선택 행이 pass/eligible/selected 계약을 충족하지 않습니다.',
-  );
-}
-
-function validateGridAccounting(payload) {
-  const accounting = payload.gridAccounting;
-  const ranking = payload.factorPolicyRanking;
-  requireCondition(isRecord(accounting), 'gridAccounting이 없습니다.');
-  requireCondition(Array.isArray(ranking), 'factorPolicyRanking이 배열이 아닙니다.');
-  const exactCounts = {
-    independentFactorCount: EXPECTED_INDEPENDENT_FACTOR_COUNT,
-    policyCount: EXPECTED_POLICY_COUNT,
-    expectedIndependentPairCount: EXPECTED_INDEPENDENT_PAIR_COUNT,
-    evaluatedIndependentPairCount: EXPECTED_INDEPENDENT_PAIR_COUNT,
-    missingIndependentPairCount: 0,
-    diagnosticAliasFactorCount: EXPECTED_ALIAS_FACTOR_COUNT,
-    diagnosticAliasPairCount: EXPECTED_ALIAS_PAIR_COUNT,
-  };
-  Object.entries(exactCounts).forEach(([field, expected]) => {
-    requireCondition(
-      accounting[field] === expected,
-      `gridAccounting.${field}가 ${expected}이 아닙니다.`,
-    );
-  });
-  requireCondition(
-    accounting.availableIndependentPairCount + accounting.excludedIndependentPairCount
-      === EXPECTED_INDEPENDENT_PAIR_COUNT,
-    'gridAccounting available + excluded가 244와 다릅니다.',
-  );
-  requireCondition(
-    ranking.length === EXPECTED_INDEPENDENT_PAIR_COUNT + EXPECTED_ALIAS_PAIR_COUNT,
-    'factorPolicyRanking 전체 행 수가 256이 아닙니다.',
-  );
-
-  const pairs = new Set();
-  ranking.forEach((row) => {
-    requireCondition(
-      isRecord(row) && typeof row.factor === 'string' && typeof row.policy_id === 'string',
-      'factorPolicyRanking 식별자가 잘못되었습니다.',
-    );
-    const key = pairKey(row);
-    requireCondition(!pairs.has(key), `중복 factor-policy 행입니다: ${key}`);
-    pairs.add(key);
-  });
-  const aliasRows = ranking.filter((row) => row.comparison_status === 'duplicate_alias');
-  const independentRows = ranking.filter((row) => row.comparison_status !== 'duplicate_alias');
-  requireCondition(aliasRows.length === EXPECTED_ALIAS_PAIR_COUNT, 'diagnostic alias 행 수가 12가 아닙니다.');
-  requireCondition(
-    new Set(aliasRows.map((row) => row.factor)).size === EXPECTED_ALIAS_FACTOR_COUNT,
-    'diagnostic alias 팩터 수가 3이 아닙니다.',
-  );
-  requireCondition(
-    independentRows.length === EXPECTED_INDEPENDENT_PAIR_COUNT,
-    '독립 factor-policy 행 수가 244가 아닙니다.',
-  );
-  requireCondition(
-    new Set(independentRows.map((row) => row.factor)).size === EXPECTED_INDEPENDENT_FACTOR_COUNT,
-    '독립 팩터 수가 61이 아닙니다.',
-  );
-  requireCondition(
-    new Set(independentRows.map((row) => row.policy_id)).size === EXPECTED_POLICY_COUNT,
-    '비중 정책 수가 4가 아닙니다.',
-  );
-  const policyIds = [...new Set(independentRows.map((row) => row.policy_id))].sort();
-  const rowsByFactor = new Map();
-  independentRows.forEach((row) => {
-    if (!rowsByFactor.has(row.factor)) rowsByFactor.set(row.factor, []);
-    rowsByFactor.get(row.factor).push(row);
-  });
-  rowsByFactor.forEach((rows, factor) => {
-    requireCondition(
-      sameJson(rows.map((row) => row.policy_id).sort(), policyIds),
-      `독립 팩터의 4개 정책 grid가 불완전합니다: ${factor}`,
-    );
-  });
-  const commonComparableFactorCount = [...rowsByFactor.values()].filter(
-    (rows) => rows.every((row) => row.comparison_status === 'available'),
-  ).length;
-  requireCondition(
-    commonComparableFactorCount === accounting.commonComparableFactorCount,
-    'commonComparableFactorCount가 ranking과 다릅니다.',
-  );
-
-  const availableRows = independentRows.filter((row) => row.comparison_status === 'available');
-  const excludedRows = independentRows.filter((row) => row.comparison_status !== 'available');
-  requireCondition(
-    availableRows.length === accounting.availableIndependentPairCount,
-    'availableIndependentPairCount가 ranking과 다릅니다.',
-  );
-  requireCondition(
-    excludedRows.length === accounting.excludedIndependentPairCount,
-    'excludedIndependentPairCount가 ranking과 다릅니다.',
-  );
-  const observedReasonCounts = {};
-  excludedRows.forEach((row) => {
-    requireCondition(
-      Array.isArray(row.exclusion_reason_codes) && row.exclusion_reason_codes.length > 0,
-      `제외 행에 exact reason code가 없습니다: ${pairKey(row)}`,
-    );
-    requireCondition(
-      Array.isArray(row.exclusion_reasons) && row.exclusion_reasons.length > 0,
-      `제외 행에 structured reason이 없습니다: ${pairKey(row)}`,
-    );
-    const structuredCodes = row.exclusion_reasons.map((reason) => reason?.code);
-    requireCondition(
-      sameJson(
-        [...new Set(structuredCodes)].sort(),
-        [...new Set(row.exclusion_reason_codes)].sort(),
-      ),
-      `제외 행의 reason code와 structured reason이 다릅니다: ${pairKey(row)}`,
-    );
-    row.exclusion_reason_codes.forEach((code) => {
-      requireCondition(typeof code === 'string' && code, `빈 제외 reason code입니다: ${pairKey(row)}`);
-      observedReasonCounts[code] = (observedReasonCounts[code] || 0) + 1;
-    });
-  });
-  requireCondition(
-    sameJson(observedReasonCounts, accounting.exclusionReasonCounts || {}),
-    'gridAccounting.exclusionReasonCounts가 ranking exact reasons와 다릅니다.',
-  );
-  return accounting;
-}
 
 async function validateResult(entry, payload, summary = null, options = {}) {
   const apiResult = options.source === 'local_api';
   requireCondition(
     isRecord(payload) && payload.schemaVersion === RESULT_SCHEMA_VERSION,
-    'detail schemaVersion 4가 아닙니다.',
+    `detail schemaVersion ${RESULT_SCHEMA_VERSION}가 아닙니다.`,
   );
+  const forbidden = [
+    'selectedFactor',
+    'selectedWeightingPolicy',
+    'selectedReason',
+    'selectionDecision',
+    'factorPolicyRanking',
+    'policyDiagnostics',
+    'weightingPolicyRegistry',
+    'gridAccounting',
+    'currentResearchTarget',
+    'currentTransition',
+    'selectedBacktestHoldingHistory',
+  ];
+  requireCondition(
+    forbidden.every((field) => !Object.prototype.hasOwnProperty.call(payload, field)),
+    'detail에 제거된 현재 Python/팩터×정책 계약 필드가 남아 있습니다.',
+  );
+  const required = [
+    'bestFactor',
+    'weightingPolicy',
+    'bestFactorReason',
+    'factorSelectionDecision',
+    'factorAccounting',
+    'factorRanking',
+    'weightingMethodology',
+    'allocationMethod',
+    'bestFactorPortfolio',
+    'factorPortfolios',
+    'bestFactorTransition',
+    'performance',
+    'backtestHeldPortfolio',
+    'bestFactorBacktestHoldingHistory',
+    'factorHoldingHistorySidecar',
+    'factorDefinitions',
+    'factorDiagnostics',
+    'researchInputs',
+    'researchScope',
+    'config',
+    'meta',
+    'data',
+  ];
+  required.forEach((field) => requireCondition(
+    Object.prototype.hasOwnProperty.call(payload, field),
+    `detail 필드가 없습니다: ${field}`,
+  ));
+
   validateIdentity(payload.resultIdentity, entry.resultKey, 'detail', {
     requireCanonicalTransport: !apiResult,
   });
@@ -2530,218 +1387,32 @@ async function validateResult(entry, payload, summary = null, options = {}) {
       ? 'detail resultIdentity가 로컬 API 응답 identity와 다릅니다.'
       : 'detail resultIdentity가 manifest와 다릅니다.',
   );
+  requireCondition(payload.resultKey === entry.resultKey, 'detail resultKey가 다릅니다.');
+  const data = payload.data;
   requireCondition(
-    payload.resultKey === undefined || payload.resultKey === entry.resultKey,
-    'detail top-level resultKey가 다릅니다.',
+    isRecord(data)
+      && data.synthetic === false
+      && data.mode === 'live_market'
+      && integer(data.analyzedSecurityCount)
+      && Number(data.analyzedSecurityCount) >= 2700
+      && requiredText(data.asOf),
+    '결과는 2,700개 이상 종목의 실제시장 비합성 실행이어야 합니다.',
   );
-  requireCondition(
-    isRecord(payload.data)
-      && payload.data.synthetic === false
-      && payload.data.mode === 'live_market',
-    '결과는 실제 시장 비합성 실행이어야 합니다.',
-  );
-  requireCondition(
-    integer(payload.data.analyzedSecurityCount)
-      && Number(payload.data.analyzedSecurityCount) >= 2700,
-    '결과는 2,700개 이상 종목을 분석해야 합니다.',
-  );
-  requireCondition(
-    typeof payload.data.asOf === 'string' && payload.data.asOf,
-    'detail data.asOf가 없습니다.',
-  );
-  const observedHashFields = isRecord(payload.data.inputSha256)
-    ? Object.keys(payload.data.inputSha256).sort()
+  const observedHashFields = isRecord(data.inputSha256)
+    ? Object.keys(data.inputSha256).sort()
     : [];
-  const supportedHashContract = sameJson(observedHashFields, [...LIVE_INPUT_HASH_FIELDS].sort())
-    || sameJson(observedHashFields, [...LIVE_INPUT_HASH_FIELDS_V2].sort());
   requireCondition(
-    supportedHashContract
-      && observedHashFields.every((field) => validSha256(payload.data.inputSha256[field])),
-    '실제시장 provenance 입력 해시가 없습니다.',
+    sameJson(observedHashFields, [...LIVE_INPUT_HASH_FIELDS].sort())
+      && observedHashFields.every((field) => validSha256(data.inputSha256[field])),
+    '실제시장 provenance 입력 해시가 현재 시장가치 계약과 다릅니다.',
   );
   requireCondition(
-    Array.isArray(payload.priceSources) && payload.priceSources.length > 0,
-    'priceSources가 비어 있습니다.',
-  );
-  const priceSourceSymbols = new Set();
-  payload.priceSources.forEach((row) => {
-    const symbol = typeof row?.symbol === 'string' ? row.symbol.trim().toUpperCase() : '';
-    requireCondition(
-      isRecord(row)
-        && symbol
-        && typeof row.price_source === 'string'
-        && row.price_source.trim()
-        && !priceSourceSymbols.has(symbol),
-      'priceSources 행 또는 종목 유일성 계약이 잘못되었습니다.',
-    );
-    priceSourceSymbols.add(symbol);
-  });
-  requireCondition(Array.isArray(payload.data.analyzedSymbols), 'analyzedSymbols가 배열이 아닙니다.');
-  const analyzedSymbols = payload.data.analyzedSymbols.map((value) => (
-    typeof value === 'string' ? value.trim().toUpperCase() : ''
-  ));
-  requireCondition(
-    analyzedSymbols.length === Number(payload.data.analyzedSecurityCount)
-      && analyzedSymbols.every((symbol, index) => (
-        symbol
-        && symbol === payload.data.analyzedSymbols[index]
-        && priceSourceSymbols.has(symbol)
-      ))
-      && new Set(analyzedSymbols).size === analyzedSymbols.length,
-    'analyzedSymbols 순서·유일성·priceSources coverage가 잘못되었습니다.',
-  );
-  const candidateSymbolsSha256 = await sha256Hex(
-    new TextEncoder().encode(canonicalString(analyzedSymbols)),
-  );
-  requireCondition(
-    Array.isArray(payload.sourceHealth) && payload.sourceHealth.length > 0,
-    'sourceHealth가 비어 있습니다.',
-  );
-  payload.sourceHealth.forEach((row) => {
-    requireCondition(
-      isRecord(row)
-        && typeof row.source === 'string'
-        && row.source.trim()
-        && typeof row.status === 'string'
-        && row.status.trim(),
-      'sourceHealth 행의 source/status가 잘못되었습니다.',
-    );
-  });
-  const [priceSourcesSha256, dataSourcesSha256] = await Promise.all([
-    canonicalSha256(payload.priceSources),
-    canonicalSha256(payload.sourceHealth),
-  ]);
-  requireCondition(
-    priceSourcesSha256 === payload.data.inputSha256.priceSources,
-    'priceSources RFC 8785 JCS SHA-256이 inputSha256.priceSources와 다릅니다.',
-  );
-  requireCondition(
-    dataSourcesSha256 === payload.data.inputSha256.dataSources,
-    'sourceHealth RFC 8785 JCS SHA-256이 inputSha256.dataSources와 다릅니다.',
-  );
-  const marketSnapshot = payload.resultIdentity?.keyParts?.marketSnapshot;
-  const expectedMarketSnapshot = {
-    sourceMode: payload.data.mode,
-    sourceLabel: payload.data.sourceLabel,
-    provider: payload.data.provider,
-    priceBasis: payload.data.priceBasis,
-    volumeBasis: payload.data.volumeBasis,
-    rawCloseProxySymbolCount: payload.data.rawCloseProxySymbolCount,
-    requestedThrough: payload.data.requestedThrough,
-    dataAsOf: payload.data.asOf,
-    inputSha256: payload.data.inputSha256,
-    requestedCandidateCount: payload.data.requestedCandidateCount,
-    providerReturnedCandidateCount: payload.data.providerReturnedCandidateCount,
-    analyzedSecurityCount: payload.data.analyzedSecurityCount,
-    candidateSymbolsSha256,
-  };
-  const dataHasComparison = Object.prototype.hasOwnProperty.call(payload.data, 'comparisonSymbols')
-    && Object.prototype.hasOwnProperty.call(payload.data, 'comparisonPricesSha256');
-  const identityHasComparison = Object.prototype.hasOwnProperty.call(
-    marketSnapshot || {},
-    'comparisonSymbols',
-  ) && Object.prototype.hasOwnProperty.call(marketSnapshot || {}, 'comparisonPricesSha256');
-  const hashContractHasComparison = observedHashFields.includes('comparisonPrices');
-  requireCondition(
-    dataHasComparison === identityHasComparison
-      && dataHasComparison === hashContractHasComparison,
-    '비교지수 가격 provenance 필드 범위가 서로 다릅니다.',
-  );
-  if (dataHasComparison) {
-    expectedMarketSnapshot.comparisonSymbols = payload.data.comparisonSymbols;
-    expectedMarketSnapshot.comparisonPricesSha256 = payload.data.comparisonPricesSha256;
-    requireCondition(
-      Array.isArray(payload.data.comparisonSymbols)
-        && payload.data.comparisonSymbols.length > 0
-        && validSha256(payload.data.comparisonPricesSha256)
-        && payload.data.comparisonPricesSha256 === payload.data.inputSha256.comparisonPrices,
-      '비교지수 가격 provenance 계약이 잘못되었습니다.',
-    );
-  }
-  requireCondition(
-    isRecord(marketSnapshot)
-      && Object.entries(expectedMarketSnapshot).every(
-        ([field, value]) => sameJson(marketSnapshot[field], value),
-      ),
-    'resultIdentity marketSnapshot이 detail data와 다릅니다.',
-  );
-  if (!apiResult) {
-    requireCondition(
-      isRecord(summary) && summary.schemaVersion === RESULT_SCHEMA_VERSION,
-      'summary schemaVersion 4가 아닙니다.',
-    );
-    validateIdentity(summary.resultIdentity, entry.resultKey, 'summary');
-    requireCondition(
-      sameJson(summary.resultIdentity, entry.identity),
-      'summary resultIdentity가 manifest와 다릅니다.',
-    );
-    requireCondition(
-      summary.resultKey === undefined || summary.resultKey === entry.resultKey,
-      'summary top-level resultKey가 다릅니다.',
-    );
-    requireCondition(
-      summary.dataAsOf === payload.data.asOf
-        && summary.dataMode === payload.data.mode
-        && summary.synthetic === false,
-      'summary/detail 데이터 기준이 다릅니다.',
-    );
-    requireCondition(
-      summary.analyzedSecurityCount === payload.data.analyzedSecurityCount,
-      'summary/detail 분석 종목 수가 다릅니다.',
-    );
-    requireCondition(
-      summary.selectedFactor === payload.selectedFactor
-        && summary.selectedWeightingPolicy === payload.selectedWeightingPolicy,
-      'summary/detail 선택 조합이 다릅니다.',
-    );
-  }
-
-  const required = [
-    'selectedFactor',
-    'selectedWeightingPolicy',
-    'selectedReason',
-    'selectionDecision',
-    'factorPolicyRanking',
-    'policyDiagnostics',
-    'weightingPolicyRegistry',
-    'currentResearchTarget',
-    'factorPortfolios',
-    'currentTransition',
-    'selectionMethod',
-    'performance',
-    'backtestHeldPortfolio',
-    'selectedBacktestHoldingHistory',
-    'factorHoldingHistorySidecar',
-    'factorDefinitions',
-    'factorDiagnostics',
-    'researchInputs',
-    'researchScope',
-    'config',
-    'meta',
-  ];
-  required.forEach((key) => {
-    requireCondition(
-      Object.prototype.hasOwnProperty.call(payload, key),
-      `detail 필드가 없습니다: ${key}`,
-    );
-  });
-  requireCondition(
-    Array.isArray(payload.factorPolicyRanking) && payload.factorPolicyRanking.length > 0,
-    'factorPolicyRanking이 비어 있습니다.',
-  );
-  requireCondition(Array.isArray(payload.policyDiagnostics), 'policyDiagnostics가 배열이 아닙니다.');
-  requireCondition(
-    isRecord(payload.weightingPolicyRegistry)
-      && isRecord(payload.weightingPolicyRegistry.policies),
-    'weightingPolicyRegistry가 없습니다.',
-  );
-  requireCondition(
-    isRecord(payload.weightingPolicyRegistry.policies[payload.selectedWeightingPolicy]),
-    '선택 정책이 registry에 없습니다.',
-  );
-  requireCondition(
-    payload.selectionMethod.name === 'joint_factor_policy_absolute_guardrails',
-    '공동 팩터×정책 선택 계약이 아닙니다.',
+    data.pointInTimeMarketCapAvailable === true
+      && integer(data.latestMarketCapSecurityCount)
+      && Number(data.latestMarketCapSecurityCount) > 0
+      && Number(data.latestMarketCapSecurityCount) / Number(data.analyzedSecurityCount)
+        >= Number(payload.config.market_cap_min_universe_coverage),
+    'PIT 시가총액 커버리지가 설정 임계값을 충족하지 않습니다.',
   );
   requireCondition(
     isRecord(payload.researchInputs)
@@ -2753,15 +1424,9 @@ async function validateResult(entry, payload, summary = null, options = {}) {
       Object.prototype.hasOwnProperty.call(payload.researchInputs, publicKey)
         && Object.prototype.hasOwnProperty.call(entry.normalizedInputs, normalizedKey)
         && sameJson(payload.researchInputs[publicKey], entry.normalizedInputs[normalizedKey]),
-      `researchInputs.${publicKey}가 manifest normalizedInputs와 다릅니다.`,
+      `researchInputs.${publicKey}가 요청 입력과 다릅니다.`,
     );
   });
-  requireCondition(
-    integer(payload.researchInputs.evaluationYears)
-      && Number(payload.researchInputs.evaluationYears) * 252
-        === Number(payload.researchInputs.evaluationWindowDays),
-    'researchInputs 평가 연수와 거래일 창이 다릅니다.',
-  );
   if (apiResult) {
     requireCondition(
       sameJson(payload.researchInputs, options.expectedResearchInputs),
@@ -2769,73 +1434,132 @@ async function validateResult(entry, payload, summary = null, options = {}) {
     );
   }
 
-  validateGuardrailProfile(payload);
-  validatePerformance(payload);
-  validateFactorDiagnostics(payload);
-  validateGridAccounting(payload);
-  validateRankingConcentrationGuardrails(payload);
-  const selectedRows = payload.factorPolicyRanking.filter((row) => (
-    row.factor === payload.selectedFactor
-      && row.policy_id === payload.selectedWeightingPolicy
-  ));
+  const policyId = 'score_liquidity_market_cap_rank';
+  const policy = payload.weightingMethodology;
+  const allocation = payload.allocationMethod;
+  const config = payload.config;
+  requireCondition(
+    payload.weightingPolicy === policyId
+      && isRecord(policy)
+      && policy.policyId === policyId
+      && policy.optimized === false
+      && Object.keys(policy).every((key) => ['registryVersion', 'policyId', 'policy', 'optimized'].includes(key))
+      && isRecord(policy.policy)
+      && policy.policy.selectionRole === 'fixed_methodology_not_optimized'
+      && isRecord(allocation)
+      && allocation.policyId === policyId
+      && allocation.fixed === true,
+    '비중 방식은 고정 팩터·유동성·PIT 시가총액 방법이어야 합니다.',
+  );
+  const parameters = allocation.parameters;
+  requireCondition(
+    isRecord(parameters)
+      && closeNumber(parameters.factorScoreWeight, 0.50)
+      && closeNumber(parameters.liquidityWeight, 0.30)
+      && closeNumber(parameters.marketCapWeight, 0.20)
+      && closeNumber(parameters.rankFloor, 0.05)
+      && closeNumber(config.allocation_score_weight, 0.50)
+      && closeNumber(config.allocation_liquidity_weight, 0.30)
+      && closeNumber(config.allocation_market_cap_weight, 0.20)
+      && closeNumber(config.allocation_rank_floor, 0.05)
+      && parameters.topN === config.top_n
+      && closeNumber(parameters.maxWeight, config.max_weight),
+    '고정 비중 방법의 50/30/20 입력 또는 상한이 다릅니다.',
+  );
+
+  const definitions = payload.factorDefinitions;
+  const ranking = payload.factorRanking;
+  const portfolios = payload.factorPortfolios;
+  requireCondition(
+    Array.isArray(definitions)
+      && definitions.length === EXPECTED_INDEPENDENT_FACTOR_COUNT + EXPECTED_ALIAS_FACTOR_COUNT
+      && Array.isArray(ranking)
+      && ranking.length === definitions.length
+      && isRecord(portfolios)
+      && Object.keys(portfolios).length === definitions.length,
+    '팩터 정의·랭킹·포트폴리오의 64개 coverage가 다릅니다.',
+  );
+  const factors = definitions.map((row) => row?.factor);
+  requireCondition(
+    factors.every(requiredText)
+      && new Set(factors).size === factors.length
+      && sameJson(Object.keys(portfolios).sort(), [...factors].sort()),
+    '팩터 식별자 또는 포트폴리오 coverage가 잘못되었습니다.',
+  );
+  requireCondition(
+    ranking.every((row) => isRecord(row) && factors.includes(row.factor) && row.policy_id === policyId)
+      && new Set(ranking.map((row) => row.factor)).size === ranking.length,
+    'factorRanking은 고정 정책 아래 팩터별 한 행이어야 합니다.',
+  );
+  const selectedRows = ranking.filter((row) => row.selected === true);
   requireCondition(
     selectedRows.length === 1
-      && selectedRows[0].selected === true
-      && selectedRows[0].absolute_guardrail_pass === true
+      && selectedRows[0].factor === payload.bestFactor
       && selectedRows[0].selection_eligible === true
       && selectedRows[0].selection_status === 'eligible'
-      && selectedRows[0].comparison_status === 'available'
       && finite(selectedRows[0].selection_score),
-    '선택 팩터×정책 행이 정확히 하나의 pass/eligible/selected available 행이 아닙니다.',
+    'Python 최고 팩터 선택 행이 정확히 하나가 아닙니다.',
   );
+  const accounting = payload.factorAccounting;
   requireCondition(
-    payload.factorPolicyRanking.filter((row) => row.selected === true).length === 1,
-    'factorPolicyRanking에 선택 행이 하나가 아닙니다.',
-  );
-  requireCondition(
-    payload.meta.policyFactorRunCount === payload.factorPolicyRanking.length,
-    'factorPolicyRanking 개수가 meta와 다릅니다.',
+    isRecord(accounting)
+      && accounting.expectedIndependentFactorCount === EXPECTED_INDEPENDENT_FACTOR_COUNT
+      && accounting.evaluatedIndependentFactorCount === EXPECTED_INDEPENDENT_FACTOR_COUNT
+      && accounting.diagnosticAliasFactorCount === EXPECTED_ALIAS_FACTOR_COUNT
+      && accounting.availableIndependentFactorCount + accounting.excludedIndependentFactorCount
+        === EXPECTED_INDEPENDENT_FACTOR_COUNT,
+    'factorAccounting이 61개 독립 팩터 계약과 다릅니다.',
   );
 
   const { target, maxWeight } = validateTargetAllocation(payload);
-  validateFactorPortfolios(payload);
-  const held = validateBacktestHeldPortfolio(payload);
-  validateSelectedBacktestHoldingHistory(payload, held);
-  validateFactorHoldingHistorySidecarManifest(payload);
   requireCondition(
-    target.factor === payload.selectedFactor
-      && target.weightingPolicyId === payload.selectedWeightingPolicy,
-    'currentResearchTarget이 선택 조합과 다릅니다.',
+    target === payload.bestFactorPortfolio
+      && sameJson(target, portfolios[payload.bestFactor])
+      && target.factor === payload.bestFactor
+      && target.weightingPolicyId === policyId
+      && target.targetType === 'factor_portfolio'
+      && target.asOf === data.asOf
+      && target.signalDate === data.asOf,
+    '동일 입력 최고 팩터 포트폴리오가 팩터 결과와 다릅니다.',
   );
+  target.weights.forEach((row) => {
+    const components = [row.scoreComponent, row.liquidityComponent, row.marketCapComponent];
+    requireCondition(
+      components.every((value) => finite(value) && Number(value) >= 0 && Number(value) <= 1)
+        && finite(row.trailingDollarVolume)
+        && Number(row.trailingDollarVolume) > 0
+        && finite(row.trailingMarketCap)
+        && Number(row.trailingMarketCap) > 0,
+      '포트폴리오에 팩터·유동성·시가총액 구성값이 없습니다.',
+    );
+    const expectedRaw = 0.05
+      + 0.50 * Number(row.scoreComponent)
+      + 0.30 * Number(row.liquidityComponent)
+      + 0.20 * Number(row.marketCapComponent);
+    requireCondition(closeNumber(row.rawPolicyScore, expectedRaw), '고정 비중 raw score가 다릅니다.');
+  });
+
   requireCondition(
-    target.asOf === payload.data.asOf && target.signalDate === payload.data.asOf,
-    'currentResearchTarget 기준일이 다릅니다.',
+    isRecord(payload.performance)
+      && payload.performance.weightingPolicyId === policyId
+      && Array.isArray(payload.performance.dates)
+      && payload.performance.dates.length === Number(config.evaluation_window_days) + 1
+      && isRecord(payload.performance.factorCurves)
+      && sameJson(Object.keys(payload.performance.factorCurves).sort(), [...factors].sort()),
+    'Python 성과 곡선의 입력 기간 또는 팩터 coverage가 다릅니다.',
   );
-  validateSelectedConcentrationGuardrails(payload, selectedRows[0], target);
   if (!apiResult) {
     requireCondition(
-      sameJson(summary.currentResearchTarget, target),
-      'summary/detail currentResearchTarget이 다릅니다.',
-    );
-    requireCondition(
-      sameJson(summary.weights, target.weights),
-      'summary/detail weights가 다릅니다.',
-    );
-    requireCondition(
-      closeNumber(summary.cashWeight, target.cashWeight),
-      'summary/detail cashWeight가 다릅니다.',
-    );
-    requireCondition(
-      closeNumber(summary.maxWeight, maxWeight),
-      'summary/detail maxWeight가 다릅니다.',
-    );
-    requireCondition(
-      summary.portfolioSize === target.selectedSecurityCount,
-      'summary/detail portfolioSize가 다릅니다.',
-    );
-    requireCondition(
-      sameJson(summary.concentration, target.concentration),
-      'summary/detail concentration이 다릅니다.',
+      isRecord(summary)
+        && summary.schemaVersion === RESULT_SCHEMA_VERSION
+        && sameJson(summary.resultIdentity, payload.resultIdentity)
+        && summary.bestFactor === payload.bestFactor
+        && summary.weightingPolicy === policyId
+        && sameJson(summary.bestFactorPortfolio, target)
+        && sameJson(summary.weights, target.weights)
+        && closeNumber(summary.cashWeight, target.cashWeight)
+        && closeNumber(summary.maxWeight, maxWeight),
+      'summary/detail 최고 팩터 또는 포트폴리오가 다릅니다.',
     );
   }
   return selectedRows[0];
@@ -3031,8 +1755,14 @@ function runPayloadGeneratedAt(run) {
 }
 
 function uniqueDates(run) {
-  const source = (run.factor_leaders || []).length ? run.factor_leaders : (run.holdings || []);
-  return [...new Set(source.map((row) => row.date).filter(Boolean))].sort().reverse();
+  const historyDates = Object.values(run.factor_holding_histories || {})
+    .flatMap((history) => history?.sessions || [])
+    .map((session) => session?.date)
+    .filter(Boolean);
+  return [...new Set([
+    run.summary?.data_as_of,
+    ...historyDates,
+  ].filter(Boolean))].sort().reverse();
 }
 
 function selectedDate() {
@@ -3040,7 +1770,7 @@ function selectedDate() {
 }
 
 function selectedWindow() {
-  return document.querySelector('#window-select').value;
+  return document.querySelector('#window-select')?.value || 'FULL';
 }
 
 function selectedFactor() {
@@ -3049,21 +1779,21 @@ function selectedFactor() {
 }
 
 function selectedLookbackMonths() {
-  const sessions = Number(state.v4Payload?.config?.evaluation_window_days);
+  const sessions = Number(state.payload?.config?.evaluation_window_days);
   return Number.isFinite(sessions) ? Math.max(1, Math.round(sessions / 21)) : DASHBOARD_INPUT_DEFAULTS.lookbackMonths;
 }
 
 function selectedRebalanceFrequency() {
-  const value = state.v4Payload?.config?.rebalance_frequency || DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+  const value = state.payload?.config?.rebalance_frequency || DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
   return ['W', 'ME', 'QE'].includes(value) ? value : DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
 }
 
 function clampedTransactionCostBps() {
-  return clampNumber(state.v4Payload?.config?.transaction_cost_bps, 0, 200, DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
+  return clampNumber(state.payload?.config?.transaction_cost_bps, 0, 200, DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
 }
 
 function clampedSlippageBps() {
-  return clampNumber(state.v4Payload?.config?.slippage_bps, 0, 200, DASHBOARD_INPUT_DEFAULTS.slippageBps);
+  return clampNumber(state.payload?.config?.slippage_bps, 0, 200, DASHBOARD_INPUT_DEFAULTS.slippageBps);
 }
 
 function clampNumber(value, minValue, maxValue, fallback) {
@@ -3079,7 +1809,7 @@ function optionalNumber(value) {
 }
 
 function clampedTopN() {
-  return Math.round(clampNumber(state.v4Payload?.config?.top_n, 1, 50, DASHBOARD_INPUT_DEFAULTS.topN));
+  return Math.round(clampNumber(state.payload?.config?.top_n, 1, 50, DASHBOARD_INPUT_DEFAULTS.topN));
 }
 
 function storedScenarioRowLimit(run = currentRun(), factor = selectedFactor()) {
@@ -3098,7 +1828,7 @@ function syncTopNAvailability(run = currentRun(), factor = selectedFactor()) {
 }
 
 function clampedMaxWeight() {
-  return clampNumber(state.v4Payload?.config?.max_weight, 0.01, 1, DASHBOARD_INPUT_DEFAULTS.maxWeightPercent / 100);
+  return clampNumber(state.payload?.config?.max_weight, 0.01, 1, DASHBOARD_INPUT_DEFAULTS.maxWeightPercent / 100);
 }
 
 function inputScenarioParameters() {
@@ -3531,7 +2261,8 @@ function bestFactorSignalRows(run, date, windowKey, topN, maxWeight) {
 }
 
 function setText(selector, value) {
-  document.querySelector(selector).textContent = textValue(value);
+  const target = document.querySelector(selector);
+  if (target) target.textContent = textValue(value);
 }
 
 function appendDefinition(target, label, value) {
@@ -3683,7 +2414,7 @@ function appendFactorHoldingHistoryLoadStatus(target, payload) {
   appendStatusLine(
     target,
     '팩터별 보유 이력',
-    `검증 실패 · canonical 이외 팩터 이력은 표시하지 않음 (${error})`,
+    `검증 실패 · 추가 팩터 이력을 표시하지 않음 (${error})`,
   );
 }
 
@@ -3723,6 +2454,7 @@ function appendCell(tr, value, options = {}) {
 
 function appendEmpty(selector, message) {
   const target = document.querySelector(selector);
+  if (!target) return;
   target.replaceChildren();
   const empty = document.createElement('div');
   empty.className = 'empty-state';
@@ -3805,7 +2537,7 @@ function scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeig
 
 function portfolioHoldingsFromPayload(payload, factor) {
   const target = payload.factorPortfolios?.[factor]
-    || (factor === payload.selectedFactor ? payload.currentResearchTarget : null)
+    || (factor === payload.bestFactor ? payload.bestFactorPortfolio : null)
     || {};
   const rows = Array.isArray(target.weights) ? target.weights : [];
   const weighted = rows.map((row, index) => ({
@@ -3826,7 +2558,7 @@ function portfolioHoldingsFromPayload(payload, factor) {
     maxWeight: Number(payload.config?.max_weight) || 0,
     availableCount: Number(target.eligibleSecurityCount) || weighted.length,
     selectedFactor: factor || target.factor || '-',
-    weightingPolicyId: payload.selectedWeightingPolicy || target.weightingPolicyId || '-',
+    weightingPolicyId: payload.weightingPolicy || target.weightingPolicyId || '-',
     scoreDate: target.signalDate || target.asOf || payload.data?.asOf || null,
     missingReason: target.status === 'available' && weighted.length
       ? null
@@ -3835,12 +2567,17 @@ function portfolioHoldingsFromPayload(payload, factor) {
 }
 
 function weightedHoldingsForFactor(factor) {
-  return portfolioHoldingsFromPayload(state.v4Payload || {}, factor);
+  return portfolioHoldingsFromPayload(state.payload || {}, factor);
 }
 
 function currentWeightedHoldings() {
-  const payload = state.v4Payload || {};
-  return weightedHoldingsForFactor(payload.selectedFactor || payload.currentResearchTarget?.factor);
+  const payload = state.payload || {};
+  return weightedHoldingsForFactor(selectedFactor() || payload.bestFactor);
+}
+
+function bestWeightedHoldings() {
+  const payload = state.payload || {};
+  return weightedHoldingsForFactor(payload.bestFactor || payload.bestFactorPortfolio?.factor);
 }
 
 function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
@@ -3867,12 +2604,10 @@ function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
 }
 
 function factorAvailableDates(run, factor) {
-  const byFactor = run.scenario_available_dates_by_factor || {};
-  const hasFactorSpecificDates = Object.keys(byFactor).length > 0;
-  const dates = [...(hasFactorSpecificDates ? (byFactor[factor] || []) : (run.scenario_available_dates || []))];
-  if (!dates.length && latestOutputMatchesFactor(run, factor) && run.summary?.data_as_of) {
-    dates.push(run.summary.data_as_of);
-  }
+  const dates = (run.factor_holding_histories?.[factor]?.sessions || [])
+    .map((session) => session?.date)
+    .filter(Boolean);
+  if (run.summary?.data_as_of) dates.push(run.summary.data_as_of);
   return new Set(dates);
 }
 
@@ -3898,8 +2633,7 @@ function syncFactorDependentControls(run, factor, preferredDate = null) {
 }
 
 function factorOptionLabel(item, bestDefaultFactor, run) {
-  if (item.factor === bestDefaultFactor) return `${item.factor} · 현재 기준 최고 팩터`;
-  if (item.factor === run.summary?.selected_factor) return `${item.factor} · 실행 저장 선택`;
+  if (item.factor === run.summary?.selected_factor) return `${item.factor} · 동일 입력 Python 최고`;
   if (item.selection_eligible === false) {
     const reason = item.selection_status === 'extreme_event_excluded' ? '극단사건 제외' : '선정 제외';
     return `${item.factor} · ${reason} · 진단용`;
@@ -3928,11 +2662,9 @@ function syncDefaultFactorToCurrentBasis() {
   const run = currentRun();
   const factorSelect = document.querySelector('#factor-select');
   if (!run || !factorSelect) return;
-  const bestDefaultFactor = periodBestStats(run, selectedDate(), selectedWindow())?.factor;
+  const bestDefaultFactor = run.summary?.selected_factor;
   updateFactorOptionLabels(run, bestDefaultFactor);
-  // A period leader is an ex-post comparison series, not the current research
-  // target.  Changing the date/window must never silently replace the factor
-  // the user is inspecting (or the canonical Python-selected default).
+  // Date/window browsing never replaces the factor the user is inspecting.
   fillDateOptions(run, selectedDate(), factorSelect.value);
 }
 
@@ -3956,21 +2688,8 @@ function fillControls() {
   }
 
   const run = currentRun();
-  const windows = run.periods || [];
   const windowSelect = document.querySelector('#window-select');
-  const previousWindow = windowSelect?.value || '';
-  windowSelect.replaceChildren();
-  windows.forEach((period) => {
-    const option = document.createElement('option');
-    option.value = period.key;
-    option.textContent = period.label;
-    windowSelect.appendChild(option);
-  });
-  const windowKeys = windows.map((period) => period.key);
-  const defaultWindow = windowKeys.includes(DASHBOARD_INPUT_DEFAULTS.window)
-    ? DASHBOARD_INPUT_DEFAULTS.window
-    : (windowKeys.includes('1Y') ? '1Y' : (windowKeys.at(-1) || windowKeys[0] || '1M'));
-  windowSelect.value = windowKeys.includes(previousWindow) ? previousWindow : defaultWindow;
+  if (windowSelect) windowSelect.value = 'FULL';
 
   const previousDate = document.querySelector('#date-select')?.value || null;
   fillDateOptions(run, previousDate);
@@ -3980,7 +2699,7 @@ function fillControls() {
   const previousFactor = state.hasUserSelectedFactor ? factorSelect?.value || '' : '';
   factorSelect.replaceChildren();
   const options = factorOptions(run);
-  const bestDefaultFactor = periodBestStats(run, dateForDefault, windowSelect.value)?.factor;
+  const bestDefaultFactor = run.summary?.selected_factor;
   options.forEach((item) => {
     const option = document.createElement('option');
     option.value = item.factor;
@@ -3997,25 +2716,23 @@ function renderSummary() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const payload = state.v4Payload || {};
-  const officialFactor = payload.selectedFactor || run.summary?.selected_factor;
-  const selectedRow = canonicalSelectedRow(payload);
+  const payload = state.payload || {};
+  const officialFactor = payload.bestFactor || run.summary?.selected_factor;
+  const selectedRow = bestFactorRow(payload);
   const comparisonFactor = selectedFactor();
-  const comparisonStats = periodFactorStats(run, date, windowKey, comparisonFactor);
+  const comparisonFull = fullPythonPeriod()?.factors?.[comparisonFactor];
   const summary = run.summary || {};
   const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
   const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
   setText('#best-factor', officialFactor || '-');
   setText(
     '#best-factor-detail',
-    `${canonicalPolicyLabel(payload, payload.selectedWeightingPolicy)} · 합성 점수 ${formatNumber(selectedRow?.selection_score)} / 100`,
+    `${fixedPolicyLabel(payload, payload.weightingPolicy)} · 합성 점수 ${formatNumber(selectedRow?.selection_score)} / 100`,
   );
   setText('#selected-factor', comparisonFactor || '-');
   setText(
     '#selected-factor-detail',
-    comparisonStats && comparisonStats.rank
-      ? `${comparisonStats.window_label} Python 기간 수익률 순위 ${comparisonStats.rank}/${comparisonStats.factor_count || '-'} · ${formatPercent(comparisonStats.period_return)} · ${factorDescription(comparisonFactor, run)}`
-      : `자료 없음 · ${factorDescription(comparisonFactor, run)}`,
+    `${factorDescription(comparisonFactor, run)} · 전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(comparisonFull, 'cumulativeReturn'))}`,
   );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
@@ -4033,7 +2750,7 @@ function renderSummary() {
   appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
   appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
   appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
-  appendFactorHoldingHistoryLoadStatus(statusCard, state.v4Payload);
+  appendFactorHoldingHistoryLoadStatus(statusCard, state.payload);
 
   setText('#generated-at', `사이트 빌드 시각: ${formatKoreanDateTime(state.data.generated_at_utc)}`);
 }
@@ -4131,7 +2848,7 @@ function renderRankIcEvidence(target, diagnostics) {
   }
   const selected = selectedFactor();
   const selectedAlias = (diagnostics.aliases || []).find((row) => row.factor === selected);
-  const diagnosticSelected = selectedAlias?.canonicalFactor || selected;
+  const diagnosticSelected = selectedAlias?.bestFactorName || selected;
   const availableRows = rows.filter((row) => (
     row.available === true && Number.isFinite(Number(row.mean_rank_ic))
   ));
@@ -4192,7 +2909,7 @@ function renderRedundancyEvidence(target, diagnostics) {
   }
   const selected = selectedFactor();
   const selectedAlias = (diagnostics.aliases || []).find((row) => row.factor === selected);
-  const diagnosticSelected = selectedAlias?.canonicalFactor || selected;
+  const diagnosticSelected = selectedAlias?.bestFactorName || selected;
   const threshold = Number(diagnostics.redundancy_threshold_abs) || 0.95;
   const top = pairs.slice(0, 8).map((row) => ({
     ...row,
@@ -4401,26 +3118,6 @@ function renderDiagnostics() {
   renderRedundancyEvidence(redundancyTarget, diagnostics);
 }
 
-function renderFactorTable() {
-  const run = currentRun();
-  const windowKey = selectedWindow();
-  const factor = selectedFactor();
-  const rows = (run.factor_leaders || []).filter((row) => row.window === windowKey).slice(-30).reverse();
-  const tbody = document.querySelector('#factor-table tbody');
-  tbody.replaceChildren();
-  rows.forEach((row) => {
-    const bestStats = periodBestStats(run, row.date, row.window);
-    const selectedStats = periodFactorStats(run, row.date, row.window, factor);
-    const tr = document.createElement('tr');
-    appendCell(tr, row.date);
-    appendCell(tr, row.window_label, { badge: true });
-    appendCell(tr, bestStats?.factor || row.best_factor);
-    appendCell(tr, bestStats?.period_return == null ? '자료 없음' : formatPercent(bestStats.period_return), { className: classForNumber(bestStats?.period_return) });
-    appendCell(tr, selectedStats?.period_return == null ? '자료 없음' : formatPercent(selectedStats.period_return), { className: classForNumber(selectedStats?.period_return) });
-    appendCell(tr, selectedStats?.rank ? `${selectedStats.rank}/${selectedStats.factor_count || '-'}` : '자료 없음');
-    tbody.appendChild(tr);
-  });
-}
 
 function renderHoldingsTable() {
   const {
@@ -4436,7 +3133,7 @@ function renderHoldingsTable() {
   } = currentWeightedHoldings();
   setText(
     '#holdings-availability',
-    missingReason || `${scoreDate || '-'} 신호 · ${factor} × ${canonicalPolicyLabel(state.v4Payload || {}, weightingPolicyId)} · Top ${formatInteger(topN)} · 상한 ${formatPercent(maxWeight)} · 투자 ${formatPercent(investedTotal)} · 현금 ${formatPercent(cashTotal)}. 모든 값은 Python 결과입니다.`,
+    missingReason || `${scoreDate || '-'} 신호 · ${factor} × ${fixedPolicyLabel(state.payload || {}, weightingPolicyId)} · Top ${formatInteger(topN)} · 상한 ${formatPercent(maxWeight)} · 투자 ${formatPercent(investedTotal)} · 현금 ${formatPercent(cashTotal)}. 모든 값은 Python 결과입니다.`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
@@ -4463,40 +3160,38 @@ function renderHoldingsTable() {
 }
 
 function renderFactorReturnChart() {
-  const run = currentRun();
-  const date = selectedDate();
-  const windowKey = selectedWindow();
   const factor = selectedFactor();
-  let rows = rawPeriodRows(run, date, windowKey);
-  const best = rows[0] || periodBestStats(run, date, windowKey);
+  const bestFactor = state.payload?.bestFactor;
+  let rows = [...(state.payload?.factorRanking || [])]
+    .filter((row) => finite(row.selection_score))
+    .sort((left, right) => Number(left.rank || 9999) - Number(right.rank || 9999));
   const selectedRow = rows.find((row) => row.factor === factor);
   rows = rows.slice(0, 10);
   if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
   const target = document.querySelector('#factor-return-chart');
   target.replaceChildren();
-  const windowLabel = rows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || '-';
   setText(
     '#factor-chart-meta',
-    `${date || '-'} · ${windowLabel} · Python 기간 성과 · 비교 ${factor || '-'} · 공식 선택 ${state.v4Payload?.selectedFactor || '-'}`,
+    `현재 입력 · 고정 비중 방법 · 선택 ${factor || '-'} · Python 최고 ${bestFactor || '-'}`,
   );
   if (!rows.length) {
-    appendEmpty('#factor-return-chart', '선택한 기준일과 기간에 표시할 팩터 수익률 데이터가 없습니다.');
+    appendEmpty('#factor-return-chart', '현재 입력에서 비교 가능한 팩터 점수가 없습니다.');
     return;
   }
-  const maxAbs = Math.max(...rows.map((row) => Math.abs(Number(row.period_return) || 0)), 0.01);
+  const maxAbs = 100;
   rows.forEach((row) => appendBarRow(
     target,
     `${row.rank}. ${row.factor}`,
-    formatPercent(row.period_return),
-    row.period_return,
+    `${formatNumber(row.selection_score)} / 100`,
+    row.selection_score,
     maxAbs,
     {
       className: [
         row.factor === factor ? 'is-selected' : '',
-        row.factor === best?.factor ? 'is-best' : '',
+        row.factor === bestFactor ? 'is-best' : '',
         factorComparisonBarClass({
           selected: row.factor === factor,
-          best: row.factor === best?.factor,
+          best: row.factor === bestFactor,
         }),
       ].filter(Boolean).join(' '),
     },
@@ -4504,74 +3199,11 @@ function renderFactorReturnChart() {
   if (!selectedRow) {
     const missingNote = document.createElement('div');
     missingNote.className = 'scenario-note';
-    missingNote.textContent = '선택 팩터가 이 기준일/기간의 내보낸 순위 데이터에 없습니다. 팩터 비교는 가능한 데이터 범위 안에서만 표시됩니다.';
+    missingNote.textContent = '선택 팩터는 현재 가드레일 또는 데이터 조건 때문에 상대 점수를 표시할 수 없습니다.';
     target.appendChild(missingNote);
   }
 }
 
-function renderWindowComparisonChart() {
-  const run = currentRun();
-  const date = selectedDate();
-  const selectedFactorName = selectedFactor();
-  const periodOrder = (run.periods || []).map((period) => period.key);
-  const rows = (run.factor_leaders || [])
-    .filter((row) => row.date === date)
-    .sort((a, b) => periodOrder.indexOf(a.window) - periodOrder.indexOf(b.window));
-  const target = document.querySelector('#window-comparison-chart');
-  target.replaceChildren();
-  if (!rows.length) {
-    appendEmpty('#window-comparison-chart', '선택한 기준일에 기간별 최고 팩터 데이터가 없습니다.');
-    return;
-  }
-  rows.forEach((row) => {
-    const chip = document.createElement('div');
-    chip.className = 'window-chip';
-    const label = document.createElement('span');
-    label.textContent = row.window_label || row.window;
-    const best = periodBestStats(run, row.date, row.window);
-    const selectedStats = periodFactorStats(run, row.date, row.window, selectedFactorName);
-    const factorNode = document.createElement('strong');
-    factorNode.textContent = best?.factor || row.best_factor || '-';
-    const detail = document.createElement('small');
-    detail.textContent = selectedStats?.rank
-      ? `기간 1위 ${formatPercent(best?.period_return)} · 비교 팩터 ${formatPercent(selectedStats.period_return)} · 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
-      : `기간 1위 ${formatPercent(best?.period_return)} · 비교 팩터 자료 없음`;
-    chip.append(label, factorNode, detail);
-    target.appendChild(chip);
-  });
-}
-
-function renderLeaderTrendChart() {
-  const run = currentRun();
-  const windowKey = selectedWindow();
-  const rows = (run.factor_leaders || [])
-    .filter((row) => row.window === windowKey)
-    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-    .slice(-30);
-  const target = document.querySelector('#leader-trend-chart');
-  target.replaceChildren();
-  if (!rows.length) {
-    appendEmpty('#leader-trend-chart', '선택한 기간에 최근 리더 추이 데이터가 없습니다.');
-    return;
-  }
-  const maxAbs = Math.max(...rows.map((row) => Math.abs(Number(row.best_return) || 0)), 0.01);
-  const bars = document.createElement('div');
-  bars.className = 'trend-bars';
-  rows.forEach((row) => {
-    const bar = document.createElement('div');
-    bar.className = 'trend-bar';
-    bar.title = `${row.date} · ${row.best_factor} · ${formatPercent(row.best_return)} · Python 기간 성과`;
-    const fill = document.createElement('div');
-    fill.className = `trend-fill chart-trend-focal ${Number(row.best_return) < 0 ? 'negative' : ''}`.trim();
-    fill.style.setProperty('--bar-height', barWidth(row.best_return, maxAbs));
-    const label = document.createElement('div');
-    label.className = 'trend-label';
-    label.textContent = String(row.date || '').slice(5);
-    bar.append(fill, label);
-    bars.appendChild(bar);
-  });
-  target.appendChild(bars);
-}
 
 function renderPortfolioWeightChart({
   selector,
@@ -4591,7 +3223,7 @@ function renderPortfolioWeightChart({
   target.replaceChildren();
   setText(
     metaSelector,
-    `${factor} · ${canonicalPolicyLabel(state.v4Payload || {}, weightingPolicyId)} · ${formatInteger(weighted.length)}종목`,
+    `${factor} · ${fixedPolicyLabel(state.payload || {}, weightingPolicyId)} · ${formatInteger(weighted.length)}종목`,
   );
   if (!weighted.length) {
     appendEmpty(selector, emptyMessage);
@@ -4629,12 +3261,12 @@ function renderWeightChart() {
     metaSelector: '#comparison-weight-chart-meta',
     portfolio: weightedHoldingsForFactor(comparisonFactor),
     className: CHART_PALETTE_CLASS_MAP.bars.focal,
-    emptyMessage: '비교 팩터의 Python 포트폴리오가 없습니다.',
+    emptyMessage: '사용자 선택 팩터의 Python 포트폴리오가 없습니다.',
   });
   renderPortfolioWeightChart({
     selector: '#weight-chart',
     metaSelector: '#weight-chart-meta',
-    portfolio: currentWeightedHoldings(),
+    portfolio: bestWeightedHoldings(),
     className: CHART_PALETTE_CLASS_MAP.bars.best,
     emptyMessage: 'Python 최고 팩터 포트폴리오가 없습니다.',
   });
@@ -4680,7 +3312,7 @@ function normalizedLine(points) {
   return points.map((point) => ({ ...point, normalized: base ? point.equity / base : point.equity }));
 }
 
-function v4CommonEvaluationPeriod(payload) {
+function commonEvaluationPeriodFromPayload(payload) {
   const dates = Array.isArray(payload?.performance?.dates) ? payload.performance.dates : [];
   const full = (payload?.performance?.periods || []).find((period) => period?.key === 'FULL');
   if (!full || !dates.length) return null;
@@ -5208,7 +3840,7 @@ function chartSeriesModel(points = [], segments = null, extra = {}) {
 }
 
 function fullPythonPeriod() {
-  return (state.v4Payload?.performance?.periods || []).find((period) => period?.key === 'FULL') || null;
+  return (state.payload?.performance?.periods || []).find((period) => period?.key === 'FULL') || null;
 }
 
 function appendComparisonSummaryItem(target, titleText, valueText, detailText, className = '') {
@@ -5225,36 +3857,30 @@ function appendComparisonSummaryItem(target, titleText, valueText, detailText, c
 }
 
 function renderBacktestComparisonSummary(run, {
-  date,
-  windowKey,
   factor,
   best,
 }) {
   const target = document.querySelector('#backtest-comparison-summary');
   if (!target) return;
   target.replaceChildren();
-  const selectedStats = periodFactorStatsIncludingDiagnostic(run, date, windowKey, factor);
-  const windowLabel = selectedStats?.window_label || best?.window_label || windowKey;
-  const official = factor === state.v4Payload?.selectedFactor;
-  const selectedRankDetail = selectedStats?.rank
-    ? `순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
-    : selectedStats?.diagnostic_fallback && selectedStats?.selection_eligible !== true
-      ? '선정 제외 진단 팩터 · 순위 산정 제외'
-      : '순위 자료 없음';
+  const full = fullPythonPeriod();
+  const selectedMetrics = full?.factors?.[factor];
+  const bestMetrics = full?.factors?.[best?.factor];
+  const official = factor === state.payload?.bestFactor;
   appendComparisonSummaryItem(
     target,
-    official ? '비교 팩터 · Python 최고와 동일' : '비교 팩터',
+    official ? '사용자 선택 팩터 · Python 최고와 동일' : '사용자 선택 팩터',
     factor || '-',
-    `${windowLabel} ${formatPercent(selectedStats?.period_return)} · ${selectedRankDetail}`,
+    `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(selectedMetrics, 'cumulativeReturn'))}`,
     'selected',
   );
   appendComparisonSummaryItem(
     target,
-    `${windowLabel} 기간 수익률 1위`,
+    '동일 입력 Python 최고 팩터',
     best?.factor || '-',
     best?.factor
-      ? `${formatPercent(best.period_return)} · ${formatInteger(best.factor_count)}개 중 1위`
-      : '같은 기간의 비교 팩터 자료 없음',
+      ? `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(bestMetrics, 'cumulativeReturn'))} · 선택 점수 ${formatNumber(best.selectionScore)} / 100`
+      : 'Python 최고 팩터 자료 없음',
     'best',
   );
 }
@@ -5269,7 +3895,11 @@ function renderBacktestChart() {
     ? run.comparison_benchmark_series
     : (benchmark ? [benchmark] : []);
   const commonPeriod = run.common_evaluation_period;
-  const best = periodBestStats(run, date, windowKey);
+  const bestRow = (state.payload?.factorRanking || []).find((row) => row.selected === true);
+  const best = {
+    factor: state.payload?.bestFactor,
+    selectionScore: bestRow?.selection_score,
+  };
   const selectedModel = commonPeriod
     ? commonEvaluationSeriesSegments(factorBacktestSeries(run, factor), commonPeriod)
     : chartSeriesModel([]);
@@ -5284,7 +3914,7 @@ function renderBacktestChart() {
   const benchmarkSeriesList = benchmarks.map((series) => ({
     key: `benchmark-${series.symbol}`,
     symbol: series.symbol,
-    label: series.label_ko || V4_BENCHMARK_LABELS[series.symbol] || series.symbol,
+    label: series.label_ko || BENCHMARK_LABELS[series.symbol] || series.symbol,
     model: commonPeriod
       ? commonEvaluationSeriesSegments(series, commonPeriod)
       : chartSeriesModel([]),
@@ -5294,12 +3924,10 @@ function renderBacktestChart() {
   setText(
     '#backtest-chart-meta',
     commonPeriod
-      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · 판정 ${date || '-'} · ${windowKey}`
+      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · 동일 입력 Python 원자료`
       : '공통 평가기간 없음'
   );
   renderBacktestComparisonSummary(run, {
-    date,
-    windowKey,
     factor,
     best,
     commonPeriod,
@@ -5311,7 +3939,7 @@ function renderBacktestChart() {
     {
       key: 'best',
       factor: best?.factor,
-      label: `${best?.window_label || windowKey} 기간 최고 팩터 ${best?.factor || '-'}`,
+      label: `Python 최고 팩터 ${best?.factor || '-'}`,
       points: bestMetricSeries,
     },
     ...benchmarkSeriesList.map((series) => ({
@@ -5325,7 +3953,7 @@ function renderBacktestChart() {
   if (!allPoints.length) {
     appendEmpty(
       '#backtest-chart',
-      '선택 팩터·기간 최고 팩터·비교지수의 Python 공통 평가기간 원자료가 없습니다. 브라우저 추정값으로 대체하지 않습니다.',
+      '선택 팩터·Python 최고 팩터·비교지수의 공통 평가기간 원자료가 없습니다.',
     );
     renderPerformanceMetricsTable(performanceSeries);
     return;
@@ -5347,7 +3975,7 @@ function renderBacktestChart() {
   svg.setAttribute('role', 'img');
   svg.setAttribute(
     'aria-label',
-    `선택 팩터, 기간 최고 팩터, ${benchmarkSeriesList.map((series) => series.symbol).join(', ')} 비교지수의 ${commonPeriod ? '전체 공통 평가기간' : '최근 백테스트'} 누적 성과 비교`,
+    `선택 팩터, Python 최고 팩터, ${benchmarkSeriesList.map((series) => series.symbol).join(', ')} 비교지수의 ${commonPeriod ? '전체 공통 평가기간' : '최근 백테스트'} 누적 성과 비교`,
   );
   const yFor = (value) => height - plot.bottom - ((value - minValue) / Math.max(0.000001, maxValue - minValue)) * plotHeight;
   const xFor = (point) => {
@@ -5433,12 +4061,12 @@ function renderBacktestChart() {
     const bestDot = document.createElement('span');
     bestDot.className = 'legend-dot best';
     bestLegend.appendChild(bestDot);
-    bestLegend.append(`${best?.window_label || windowKey} 1위 ${best.factor} · 누적 ${formatPercent(bestReturn)}`);
+    bestLegend.append(`Python 최고 ${best.factor} · 누적 ${formatPercent(bestReturn)}`);
     legend.appendChild(bestLegend);
   } else if (best?.factor === factor) {
     const sameLegend = document.createElement('span');
     sameLegend.className = 'same-series-note';
-    sameLegend.textContent = `비교 팩터 = ${best?.window_label || windowKey} 1위`;
+    sameLegend.textContent = '사용자 선택 팩터 = Python 최고 팩터';
     legend.appendChild(sameLegend);
   }
   benchmarkSeriesList.forEach((series) => {
@@ -5530,7 +4158,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
     wrap.setAttribute('aria-describedby', 'python-performance-metrics-note');
     const table = document.createElement('table');
     table.className = 'performance-table';
-    table.setAttribute('aria-label', `${period.label || period.key} 선택 팩터, 기간 최고 팩터, SPY, QQQ 성과 비교`);
+    table.setAttribute('aria-label', `${period.label || period.key} 선택 팩터, Python 최고 팩터, SPY, QQQ 성과 비교`);
     const thead = document.createElement('thead');
     const header = document.createElement('tr');
     appendHeader(header, '지표');
@@ -5543,7 +4171,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
         : (series.symbol === 'QQQ' ? 'benchmark-qqq' : series.key);
       label.className = `series-name ${seriesClass}`;
       const role = document.createElement('strong');
-      role.textContent = series.symbol || (series.key === 'selected' ? '선택 팩터' : '선택 기간 최고');
+      role.textContent = series.symbol || (series.key === 'selected' ? '선택 팩터' : 'Python 최고 팩터');
       const identity = document.createElement('small');
       identity.textContent = series.factor || (series.label && series.label !== series.symbol ? series.label : '조정가격 보유');
       label.title = series.label || `${role.textContent} ${identity.textContent}`;
@@ -5582,7 +4210,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
 function renderPerformanceMetricsTable(seriesList) {
   const target = document.querySelector('#performance-metrics-table');
   if (!target) return;
-  const pythonPeriods = state.v4Payload?.performance?.periods;
+  const pythonPeriods = state.payload?.performance?.periods;
   if (Array.isArray(pythonPeriods) && pythonPeriods.length) {
     renderPythonPerformanceMetricsTable(target, seriesList, pythonPeriods);
     return;
@@ -5642,13 +4270,13 @@ function normalizeDailyActualRows(sourceRows, sourceMeta = {}) {
 }
 
 function selectedDailyWeightRows(run, date, windowKey, factor) {
-  const canonicalFactor = run.summary?.selected_factor;
-  const canonicalTarget = run.current_research_target || {};
-  const factorTarget = run.factor_current_research_targets?.[factor];
+  const bestFactorName = run.summary?.selected_factor;
+  const bestTarget = run.best_factor_portfolio || {};
+  const factorTarget = run.factor_portfolios?.[factor];
   const target = factorTarget?.factor === factor
     ? factorTarget
-    : (factor === canonicalFactor && canonicalTarget.factor === factor
-      ? canonicalTarget
+    : (factor === bestFactorName && bestTarget.factor === factor
+      ? bestTarget
       : {
       factor,
       status: 'unavailable_factor_target',
@@ -5658,7 +4286,7 @@ function selectedDailyWeightRows(run, date, windowKey, factor) {
       reasons: ['factor_portfolio_unavailable'],
     });
   const historyMeta = run.factor_holding_histories?.[factor]
-    || (factor === canonicalFactor ? run.backtest_holding_history : null);
+    || (factor === bestFactorName ? run.backtest_holding_history : null);
   let sessions = (historyMeta?.sessions || [])
     .filter((session) => String(session.date || '') <= String(date || '9999-99-99'))
     .sort((left, right) => String(right.date || '').localeCompare(String(left.date || '')))
@@ -5727,7 +4355,7 @@ function selectedDailyWeightRows(run, date, windowKey, factor) {
     sourceKind: historyMeta?.sourceKind || (sessions.length ? 'historical_holdings' : 'factor_history_unavailable'),
     dateCount: sessions.length,
     exactDate: sessions.some((session) => session.date === date),
-    canonicalFactor,
+    bestFactorName,
     historyMeta,
     target,
   };
@@ -5746,22 +4374,21 @@ function renderDailyWeightsAnalysis() {
     dateCount,
     historyMeta,
     target,
-    canonicalFactor,
+    bestFactorName,
   } = selectedDailyWeightRows(run, date, windowKey, factor);
 
+  const currentPortfolioSummary = target.status === 'available'
+    ? `현재 입력 포트폴리오 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목 · 현금 ${formatPercent(target.cashWeight)}`
+    : `현재 입력 포트폴리오 자료 없음${target.reasons?.length ? ` (${target.reasons.join(', ')})` : ''}`;
   setText(
     '#daily-weight-analysis-note',
     sourceKind === 'factor_history_unavailable'
-      ? `${factor || '-'}의 검증된 실제 백테스트 보유 이력을 불러오지 못했습니다. ${target.status === 'available'
-        ? `${target.signalDate || '-'} 신호의 같은 팩터 현재 연구 목표 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목은 과거 보유와 구분해 현재 목표 전용 행으로 표시합니다.`
-        : target.status === 'unavailable' && Number.isFinite(Number(target.cashWeight))
-          ? `같은 팩터 목표는 실패-폐쇄 상태이며 주식 목표를 '-'로, 현금 목표 ${formatPercent(target.cashWeight)}를 명시합니다${target.reasons?.length ? ` (${target.reasons.join(', ')})` : ''}.`
-          : '다른 팩터의 이력이나 현재 연구 목표로 대체하지 않습니다.'}`
+      ? `${factor || '-'} · 백테스트 보유 이력 없음 · ${currentPortfolioSummary}`
       : sourceKind === 'legacy_backtest_held_fallback'
-      ? `${factor || '-'} × ${historyMeta?.weightingPolicyId || '-'} · 과거 21일 계약이 없는 이전 결과이므로 실제 backtestHeldPortfolio 한 날짜만 표시합니다. 신호일은 목표를 계산한 종가, 체결일은 다음 거래일 종가 처리일이며, ${target.status === 'available' ? `${target.signalDate || '-'} 신호의 같은 팩터 현재 연구 목표 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목` : '같은 팩터의 현재 연구 목표는 자료 없음'}을 별도 열로 구분합니다.`
+      ? `${factor || '-'} · 마지막 백테스트 보유 1개 세션 · ${currentPortfolioSummary}`
       : sessions.length
-      ? `${factor || '-'} × ${historyMeta?.weightingPolicyId || '-'} · ${dateCount}개 실제 백테스트 보유 세션을 최신순으로 표시합니다. 신호일은 목표를 계산한 종가, 체결일은 다음 거래일 종가 처리일, 보유 기준일은 종가 체결 처리 완료 후 확정된 비중(weightTiming: ${historyMeta?.weightTiming || '-'})입니다. ${target.status === 'available' ? `현재 연구 목표는 ${target.signalDate || '-'} 신호의 같은 팩터 ${formatInteger(target.selectedSecurityCount ?? targetRows.length)}종목 · 투자 ${formatPercent(target.concentration?.investedWeight ?? (1 - Number(target.cashWeight || 0)))} · 현금 ${formatPercent(target.cashWeight)} · 유효 종목수 ${formatNumber(target.concentration?.effectiveNames)}이며 과거 보유가 아닙니다.` : `같은 팩터의 현재 연구 목표는 사용할 수 없습니다${target.reasons?.length ? ` (${target.reasons.join(', ')})` : ''}. 다른 팩터 목표로 대체하지 않습니다.`}`
-      : `${factor || '-'}의 실제 백테스트 보유 이력이 없습니다. ${target.status === 'available' ? `${target.signalDate || '-'} 신호의 같은 팩터 현재 연구 목표만 확인할 수 있습니다.` : '다른 팩터의 현재 연구 목표를 복제하지 않습니다.'}`,
+      ? `${factor || '-'} · 실제 백테스트 보유 ${dateCount}개 세션 · ${currentPortfolioSummary}`
+      : `${factor || '-'} · 백테스트 보유 없음 · ${currentPortfolioSummary}`,
   );
 
   const table = document.querySelector('#daily-weights-table');
@@ -5775,7 +4402,7 @@ function renderDailyWeightsAnalysis() {
     target,
     sourceKind,
     factor,
-    canonicalFactor,
+    bestFactorName,
   });
 }
 
@@ -5794,7 +4421,7 @@ function renderDailyWeightsTable(thead, tbody, {
   target,
   sourceKind,
   factor,
-  canonicalFactor,
+  bestFactorName,
 }) {
   tbody.replaceChildren();
   const targetBySymbol = new Map(targetRows.map((row) => [String(row.symbol), row]));
@@ -5804,10 +4431,10 @@ function renderDailyWeightsTable(thead, tbody, {
   appendHeaderCell(headerRow, '신호일 · 체결일');
   symbols.forEach((symbol) => {
     appendHeaderCell(headerRow, `${symbol} 백테스트 보유`);
-    appendHeaderCell(headerRow, `${symbol} 현재 연구 목표`);
+    appendHeaderCell(headerRow, `${symbol} 현재 입력 포트폴리오`);
   });
   appendHeaderCell(headerRow, '현금 백테스트 보유');
-  appendHeaderCell(headerRow, '현금 현재 연구 목표');
+  appendHeaderCell(headerRow, '현금 현재 입력 포트폴리오');
   thead.replaceChildren(headerRow);
 
   if (!sessions.length) {
@@ -5816,7 +4443,7 @@ function renderDailyWeightsTable(thead, tbody, {
       && Number.isFinite(Number(target?.cashWeight));
     if (exactTarget) {
       const tr = document.createElement('tr');
-      appendCell(tr, target.signalDate || target.asOf || '현재 목표', { strong: true });
+      appendCell(tr, target.signalDate || target.asOf || '현재 입력 포트폴리오', { strong: true });
       appendCurrentTargetTimingCell(tr, target);
       symbols.forEach((symbol) => {
         const targetRow = target.status === 'available'
@@ -5843,7 +4470,7 @@ function renderDailyWeightsTable(thead, tbody, {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
     td.colSpan = Math.max(symbols.length * 2 + 4, 4);
-    td.textContent = `선택한 ${factor || '-'} 팩터에는 검증된 실제 보유 이력이 없습니다. 같은 팩터의 현재 연구 목표도 없어 다른 팩터 값으로 대체하지 않습니다.`;
+    td.textContent = `선택한 ${factor || '-'} 팩터에는 검증된 실제 보유 이력이 없습니다. 같은 팩터의 현재 입력 포트폴리오도 없어 다른 팩터 값으로 대체하지 않습니다.`;
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
@@ -5886,7 +4513,7 @@ function appendCurrentTargetTimingCell(tr, target) {
   const td = document.createElement('td');
   td.className = 'holding-timing-cell';
   const signal = document.createElement('strong');
-  signal.textContent = `현재 목표 신호 ${target.signalDate || target.asOf || '-'}`;
+  signal.textContent = `현재 입력 포트폴리오 신호 ${target.signalDate || target.asOf || '-'}`;
   const execution = document.createElement('small');
   execution.textContent = target.status === 'unavailable'
     ? '실패-폐쇄 · 주식 0% · 현금 보존'
@@ -5951,9 +4578,9 @@ function appendWeightMatrixCells(tr, row, targetRow = null) {
     const parts = [];
     if (row && row.actualWeight !== null) parts.push(`보유 대비 ${formatPercent(targetWeight - row.actualWeight)}`);
     if (Number.isFinite(Number(targetRow?.factorScore))) parts.push(`신호 ${formatNumber(targetRow.factorScore)}`);
-    if (targetRow?.targetState === 'not_selected') parts.push('현재 목표 미편입');
+    if (targetRow?.targetState === 'not_selected') parts.push('현재 입력 포트폴리오 미편입');
     if (targetRow?.targetState === 'fail_closed') parts.push('실패-폐쇄 현금');
-    secondary.textContent = parts.join(' · ') || '현재 Python 연구 목표';
+    secondary.textContent = parts.join(' · ') || '현재 입력 Python 포트폴리오';
     target.append(primary, secondary);
   } else {
     target.textContent = '-';
@@ -6111,72 +4738,44 @@ function renderSelectedFactorMethod() {
     appendMethodItem(steps, '핵심 산식', method.formulaLabel);
     appendMethodItem(steps, '관찰 구간', method.lookback);
     appendMethodItem(steps, '최근 구간 제외', method.skip);
-    appendMethodItem(steps, '현재 실행 Top-N', formatInteger(state.v4Payload?.config?.top_n));
-    appendMethodItem(steps, '현재 실행 비중 정책', canonicalPolicyLabel(state.v4Payload || {}, state.v4Payload?.selectedWeightingPolicy));
+    appendMethodItem(steps, '현재 실행 Top-N', formatInteger(state.payload?.config?.top_n));
+    appendMethodItem(steps, '고정 비중 방법', fixedPolicyLabel(state.payload || {}, state.payload?.weightingPolicy));
     appendMethodItem(steps, '성과 계산', 'Python 백테스트 원자료 · 현재 실행의 리밸런싱과 거래비용 적용');
   }
   setText(
     '#selected-factor-method-note',
-    `${method.caveat} 비교 팩터 변경은 공식 선택 결과를 바꾸지 않습니다. 공식 결과를 바꾸려면 위 Python 분석 조건을 제출하세요.`,
+    `${method.caveat} 선택 팩터는 화면 비교 대상을 바꾸며, 입력 조건 제출은 Python 전체 분석과 최고 팩터를 다시 계산합니다.`,
   );
 }
 
-function renderPeriodRankingTable() {
-  const run = currentRun();
-  const date = selectedDate();
-  const windowKey = selectedWindow();
-  const factor = selectedFactor();
-  let rows = rawPeriodRows(run, date, windowKey);
-  const selectedRow = rows.find((row) => row.factor === factor);
-  rows = rows.slice(0, 40);
-  if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
-  const tbody = document.querySelector('#period-ranking-table tbody');
-  tbody.replaceChildren();
-  rows.forEach((row) => {
-    const tr = document.createElement('tr');
-    appendCell(tr, `${row.window_label || windowKey} · Python`);
-    appendCell(tr, row.factor, { strong: row.factor === factor });
-    appendCell(tr, formatPercent(row.period_return), { className: classForNumber(row.period_return) });
-    appendCell(tr, row.rank);
-    tbody.appendChild(tr);
-  });
-  if (!rows.length) {
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 4;
-    td.textContent = '선택한 기준일과 기간에 팩터 랭킹 자료가 없습니다.';
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-  }
-}
 
-const V4_EXPLORATION_PERIODS = [
+const EXPLORATION_PERIODS = [
   { key: '1M', label: '최근 1개월', trading_days: 21 },
   { key: '3M', label: '최근 3개월', trading_days: 63 },
   { key: '6M', label: '최근 6개월', trading_days: 126 },
   { key: '1Y', label: '최근 1년', trading_days: 252 },
 ];
 
-const V4_BENCHMARK_LABELS = {
+const BENCHMARK_LABELS = {
   SPY: 'SPY · S&P 500 ETF',
   '^IXIC': '나스닥 종합지수',
   QQQ: 'QQQ · 나스닥 100 ETF',
 };
 
-function v4CurveValue(curve, index) {
+function curveValue(curve, index) {
   const value = Number(curve?.[index]);
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function v4CurveReturn(curve, endIndex, tradingDays) {
+function curveReturn(curve, endIndex, tradingDays) {
   const startIndex = endIndex - tradingDays;
   if (startIndex < 0) return null;
-  const start = v4CurveValue(curve, startIndex);
-  const end = v4CurveValue(curve, endIndex);
+  const start = curveValue(curve, startIndex);
+  const end = curveValue(curve, endIndex);
   return start && end ? end / start - 1 : null;
 }
 
-function v4DrawdownSeries(curve) {
+function drawdownSeries(curve) {
   let peak = null;
   return (curve || []).map((raw) => {
     const value = Number(raw);
@@ -6186,7 +4785,7 @@ function v4DrawdownSeries(curve) {
   });
 }
 
-function v4BenchmarkCurves(payload) {
+function pythonBenchmarkCurves(payload) {
   const performance = payload.performance || {};
   const curves = performance.benchmarkCurves && typeof performance.benchmarkCurves === 'object'
     ? { ...performance.benchmarkCurves }
@@ -6208,26 +4807,26 @@ function v4BenchmarkCurves(payload) {
     .map((symbol) => ({ symbol, curve: curves[symbol] }));
 }
 
-function v4BacktestSeries(factor, curve, dates) {
+function pythonBacktestSeries(factor, curve, dates) {
   return {
     factor,
     dates: [...dates],
     equity: [...curve],
-    drawdown: v4DrawdownSeries(curve),
+    drawdown: drawdownSeries(curve),
   };
 }
 
-function v4ExplorationPeriodData(payload, factors, dates) {
+function explorationPeriodData(payload, factors, dates) {
   const curves = payload.performance?.factorCurves || {};
   const startIndex = Math.max(0, dates.length - 90);
   const factorPeriodMatrix = [];
   const factorLeaders = [];
   for (let endIndex = startIndex; endIndex < dates.length; endIndex += 1) {
-    V4_EXPLORATION_PERIODS.forEach((period) => {
+    EXPLORATION_PERIODS.forEach((period) => {
       const ranked = factors
         .map((factor) => ({
           factor,
-          period_return: v4CurveReturn(curves[factor], endIndex, period.trading_days),
+          period_return: curveReturn(curves[factor], endIndex, period.trading_days),
         }))
         .filter((row) => Number.isFinite(row.period_return))
         .sort((left, right) => right.period_return - left.period_return || left.factor.localeCompare(right.factor));
@@ -6252,7 +4851,7 @@ function v4ExplorationPeriodData(payload, factors, dates) {
   return { factorPeriodMatrix, factorLeaders };
 }
 
-function v4CategorySummary(definitions) {
+function categorySummaryView(definitions) {
   const counts = new Map();
   definitions.forEach((definition) => {
     const category = definition.category || 'unknown';
@@ -6270,7 +4869,7 @@ function v4CategorySummary(definitions) {
     .sort((left, right) => right.factor_count - left.factor_count || left.category.localeCompare(right.category));
 }
 
-function v4FactorDiagnostics(payload) {
+function factorDiagnosticsView(payload) {
   const diagnostics = payload.factorDiagnostics || {};
   const scope = diagnostics.scope || {};
   const rankIc = diagnostics.rankIc || {};
@@ -6346,7 +4945,7 @@ function v4FactorDiagnostics(payload) {
   };
 }
 
-function v4PriceSourceCounts(payload) {
+function priceSourceCounts(payload) {
   return (payload.priceSources || []).reduce((counts, row) => {
     const source = row.price_source || 'unknown';
     counts[source] = (counts[source] || 0) + 1;
@@ -6354,22 +4953,22 @@ function v4PriceSourceCounts(payload) {
   }, {});
 }
 
-function v4SourceHealth(payload) {
+function sourceHealthView(payload) {
   return (payload.sourceHealth || []).map((row) => ({
     ...row,
     row_count: row.records ?? row.returned_price_symbols ?? row.requested_price_symbols ?? null,
   }));
 }
 
-function v4SelectionEligibility(payload, factors) {
-  const selectedPolicy = payload.selectedWeightingPolicy;
-  const selectedPolicyRows = (payload.factorPolicyRanking || []).filter((row) => (
+function factorSelectionEligibility(payload, factors) {
+  const selectedPolicy = payload.weightingPolicy;
+  const selectedPolicyRows = (payload.factorRanking || []).filter((row) => (
     (row.policy_id || row.weightingPolicyId) === selectedPolicy
   ));
   const byFactor = new Map(selectedPolicyRows.map((row) => [row.factor, row]));
   const eligible = factors.filter((factor) => byFactor.get(factor)?.selection_eligible === true);
   if (eligible.length) return { eligible, byFactor };
-  const canonical = factors.includes(payload.selectedFactor) ? [payload.selectedFactor] : [];
+  const canonical = factors.includes(payload.bestFactor) ? [payload.bestFactor] : [];
   return { eligible: canonical.length ? canonical : [...factors], byFactor };
 }
 
@@ -6496,7 +5095,7 @@ async function resolveLocalApiResult(submission, token, options = {}) {
   throw new Error('다른 결과 로드가 시작되어 로컬 API 표시를 취소했습니다.');
 }
 
-async function loadV4FactorHoldingHistorySidecar(
+async function loadFactorHoldingHistorySidecar(
   payload,
   fetchImpl = globalThis.fetch,
   baseUrl = null,
@@ -6539,7 +5138,7 @@ async function loadV4FactorHoldingHistorySidecar(
     data?.contract !== manifest.contract
     || data?.contractVersion !== manifest.contractVersion
     || data?.resultKey !== payload.resultKey
-    || data?.selectedWeightingPolicy !== payload.selectedWeightingPolicy
+    || data?.weightingPolicy !== payload.weightingPolicy
   ) {
     throw new Error('팩터별 실제 보유 이력 sidecar provenance가 현재 결과와 다릅니다.');
   }
@@ -6548,7 +5147,7 @@ async function loadV4FactorHoldingHistorySidecar(
 
 async function attachFactorHoldingHistorySidecar(payload, options = {}) {
   try {
-    payload.__factorHoldingHistorySidecarData = await loadV4FactorHoldingHistorySidecar(
+    payload.__factorHoldingHistorySidecarData = await loadFactorHoldingHistorySidecar(
       payload,
       options.fetchImpl || globalThis.fetch,
       options.pageUrl || null,
@@ -6580,7 +5179,7 @@ async function loadStaticEntryData(entry, options = {}) {
   return { payload, summary, selected, detailUrl, summaryUrl };
 }
 
-function v4FactorHoldingHistory(payload, factor) {
+function factorHoldingHistoryView(payload, factor) {
   const sidecar = payload.__factorHoldingHistorySidecarData
     || payload.factorHoldingHistorySidecar?.data;
   const factorHistory = sidecar?.factors?.[factor];
@@ -6589,7 +5188,7 @@ function v4FactorHoldingHistory(payload, factor) {
   if (
     !factorHistory
     || factorHistory.factor !== factor
-    || factorHistory.weightingPolicyId !== payload.selectedWeightingPolicy
+    || factorHistory.weightingPolicyId !== payload.weightingPolicy
     || factorHistory.resultKey !== payload.resultKey
     || !Array.isArray(factorHistory.sessions)
     || factorHistory.sessions.length !== dates.length
@@ -6647,15 +5246,15 @@ function v4FactorHoldingHistory(payload, factor) {
   };
 }
 
-function v4HoldingHistory(payload, asOf) {
-  const history = payload.selectedBacktestHoldingHistory;
+function bestFactorHoldingHistoryView(payload, asOf) {
+  const history = payload.bestFactorBacktestHoldingHistory;
   const historyObject = history && !Array.isArray(history) ? history : {};
   let sessions = Array.isArray(history)
     ? history
     : (Array.isArray(historyObject.sessions) ? historyObject.sessions : []);
   let sourceKind = 'selected_backtest_holding_history';
-  let factor = historyObject.factor || payload.selectedFactor;
-  let policy = historyObject.weightingPolicyId || payload.selectedWeightingPolicy;
+  let factor = historyObject.factor || payload.bestFactor;
+  let policy = historyObject.weightingPolicyId || payload.weightingPolicy;
   let weightTiming = historyObject.weightTiming || 'last_complete_close_after_execution_processing';
 
   if (!sessions.length) {
@@ -6741,7 +5340,7 @@ function v4HoldingHistory(payload, asOf) {
   };
 }
 
-function v4CurrentResearchTargetFromPortfolio(portfolio, factor, asOf, selectedPolicy) {
+function portfolioViewFromPython(portfolio, factor, asOf, selectedPolicy) {
   const target = portfolio || {};
   return {
     factor,
@@ -6764,106 +5363,55 @@ function v4CurrentResearchTargetFromPortfolio(portfolio, factor, asOf, selectedP
   };
 }
 
-function v4CurrentResearchTarget(payload, asOf) {
-  return v4CurrentResearchTargetFromPortfolio(
-    payload.currentResearchTarget,
-    payload.selectedFactor,
+function bestFactorPortfolioView(payload, asOf) {
+  return portfolioViewFromPython(
+    payload.bestFactorPortfolio,
+    payload.bestFactor,
     asOf,
-    payload.selectedWeightingPolicy,
+    payload.weightingPolicy,
   );
 }
 
-function adaptSchemaV4Payload(payload) {
+function adaptSchemaV5Payload(payload) {
   const performance = payload.performance || {};
   const dates = Array.isArray(performance.dates) ? performance.dates : [];
-  const commonEvaluationPeriod = v4CommonEvaluationPeriod(payload);
+  const commonEvaluationPeriod = commonEvaluationPeriodFromPayload(payload);
   const definitions = Array.isArray(payload.factorDefinitions) ? payload.factorDefinitions : [];
   const definitionByFactor = new Map(definitions.map((definition) => [definition.factor, definition]));
   const factorCurves = performance.factorCurves || {};
   const factors = Object.keys(factorCurves)
     .filter((factor) => Array.isArray(factorCurves[factor]) && factorCurves[factor].length === dates.length)
     .sort();
-  const { eligible: rankedFactors, byFactor: selectionEligibilityByFactor } = v4SelectionEligibility(payload, factors);
-  const { factorPeriodMatrix, factorLeaders } = v4ExplorationPeriodData(payload, rankedFactors, dates);
+  const { byFactor: selectionEligibilityByFactor } = factorSelectionEligibility(payload, factors);
   const asOf = payload.data?.asOf || dates.at(-1) || '-';
-  const target = payload.currentResearchTarget || {};
-  const holdingHistory = v4HoldingHistory(payload, asOf);
+  const target = payload.bestFactorPortfolio || {};
+  const holdingHistory = bestFactorHoldingHistoryView(payload, asOf);
   const factorHoldingHistories = {};
   factors.forEach((factor) => {
-    const history = v4FactorHoldingHistory(payload, factor);
+    const history = factorHoldingHistoryView(payload, factor);
     if (history) factorHoldingHistories[factor] = history;
   });
-  factorHoldingHistories[payload.selectedFactor] = holdingHistory;
+  factorHoldingHistories[payload.bestFactor] = holdingHistory;
   const portfolios = payload.factorPortfolios || {};
-  const factorCurrentResearchTargets = Object.fromEntries(factors.map((factor) => [
+  const factorPortfolioViews = Object.fromEntries(factors.map((factor) => [
     factor,
-    v4CurrentResearchTargetFromPortfolio(
+    portfolioViewFromPython(
       portfolios[factor],
       factor,
       asOf,
-      payload.selectedWeightingPolicy,
+      payload.weightingPolicy,
     ),
   ]));
-  const currentResearchTarget = factorCurrentResearchTargets[payload.selectedFactor]
-    || v4CurrentResearchTarget(payload, asOf);
-  const factorScoreSnapshots = [];
-  const factorWeightSnapshots = [];
+  const bestFactorPortfolio = factorPortfolioViews[payload.bestFactor]
+    || bestFactorPortfolioView(payload, asOf);
   const holdings = holdingHistory.rows;
-  const availableDatesByFactor = {};
 
-  factors.forEach((factor) => {
-    const portfolio = portfolios[factor];
-    const weights = Array.isArray(portfolio?.weights) ? portfolio.weights : [];
-    availableDatesByFactor[factor] = factorHoldingHistories[factor]?.sessions
-      ?.map((session) => session.date)
-      .filter(Boolean) || [asOf];
-    if (!weights.length) return;
-    factorScoreSnapshots.push({
-      date: asOf,
-      score_date: portfolio.signalDate || asOf,
-      factor,
-      score_scope: 'schema_v4_current_python_portfolio_top_constituents',
-      eligibility_filter_applied: true,
-      snapshot_complete: false,
-      stored_row_count: weights.length,
-      raw_available_count: weights.length,
-      upstream_final_eligible_count: portfolio.eligibleSecurityCount,
-      rows: weights.map((row) => ({ symbol: row.symbol, score: row.factorScore })),
-    });
-    V4_EXPLORATION_PERIODS.forEach((period) => {
-      const rows = weights.map((row) => ({
-        symbol: row.symbol,
-        weight: row.weight,
-        default_weight: row.weight,
-        score: row.factorScore,
-        rank: row.rank,
-        date: asOf,
-        weight_date: asOf,
-        score_date: portfolio.signalDate || asOf,
-        factor,
-        window: period.key,
-        window_label: period.label,
-        weight_source: `Python ${portfolio.weightingPolicyId || payload.selectedWeightingPolicy}`,
-      }));
-      factorWeightSnapshots.push({
-        date: asOf,
-        weight_date: asOf,
-        score_date: portfolio.signalDate || asOf,
-        factor,
-        window: period.key,
-        window_label: period.label,
-        weight_source: `Python ${portfolio.weightingPolicyId || payload.selectedWeightingPolicy}`,
-        rows,
-      });
-    });
-  });
-
-  const benchmarkSeries = v4BenchmarkCurves(payload).map(({ symbol, curve }) => ({
+  const benchmarkSeries = pythonBenchmarkCurves(payload).map(({ symbol, curve }) => ({
     symbol,
-    label_ko: V4_BENCHMARK_LABELS[symbol] || symbol,
+    label_ko: BENCHMARK_LABELS[symbol] || symbol,
     dates: [...dates],
     equity: [...curve],
-    drawdown: v4DrawdownSeries(curve),
+    drawdown: drawdownSeries(curve),
   }));
   const legacyBenchmark = benchmarkSeries.find((series) => series.symbol === '^IXIC')
     || benchmarkSeries.find((series) => series.symbol === 'SPY')
@@ -6871,20 +5419,20 @@ function adaptSchemaV4Payload(payload) {
     || null;
   const latestWeights = Array.isArray(target.weights) ? target.weights : [];
   const investedWeight = latestWeights.reduce((sum, row) => sum + (Number(row.weight) || 0), 0);
-  const selectedDefinition = definitionByFactor.get(payload.selectedFactor) || {};
+  const selectedDefinition = definitionByFactor.get(payload.bestFactor) || {};
   const qualityRows = Array.isArray(payload.quality) ? payload.quality : [];
   const candidateQualityRows = qualityRows.filter((row) => row?.role === 'candidate');
   const freshCandidateRows = candidateQualityRows.filter((row) => String(row?.last_date || '') === String(asOf));
   const freshPriceRatio = candidateQualityRows.length
     ? freshCandidateRows.length / candidateQualityRows.length
     : null;
-  const selectedPolicy = payload.weightingPolicyRegistry?.policies?.[payload.selectedWeightingPolicy] || {};
+  const selectedPolicy = payload.weightingMethodology?.policy || {};
   const summary = {
     run_timestamp_utc: payload.generatedAtUtc,
     data_as_of: asOf,
     provider: payload.data?.provider || payload.data?.sourceLabel,
-    selected_factor: payload.selectedFactor,
-    selected_reason: payload.selectedReason,
+    selected_factor: payload.bestFactor,
+    selected_reason: payload.bestFactorReason,
     recommendation_status: 'current_live_with_limitations_research_only',
     recommendation_output_label: 'Research signals (not tradable)',
     fresh_live_data_available: payload.data?.mode === 'live_market',
@@ -6898,7 +5446,7 @@ function adaptSchemaV4Payload(payload) {
     chart_benchmark_symbol: payload.data?.chartBenchmark || payload.config?.chart_benchmark || '^IXIC',
     chart_benchmark_price_available: benchmarkSeries.some((series) => series.symbol === '^IXIC'),
     universe_profile: payload.config?.universe_profile || 'large_liquid',
-    factor_selection_mode: 'joint_factor_policy_absolute_guardrails',
+    factor_selection_mode: 'fixed_policy_factor_selection',
     candidate_universe_size: payload.data?.requestedCandidateCount,
     eligible_price_universe_size: payload.data?.analyzedSecurityCount,
     liquidity_eligible_universe_size: payload.data?.latestEligibleSecurityCount,
@@ -6914,32 +5462,21 @@ function adaptSchemaV4Payload(payload) {
     fail_closed_reasons: ['research_only', 'not_investment_recommendation'],
     same_run_factor_selection_blocked_for_tradable: true,
     same_sample_selection_blocked_for_tradable: true,
-    recommendation_weighting_method: payload.selectedWeightingPolicy,
+    recommendation_weighting_method: payload.weightingPolicy,
     recommendation_weight_sum: investedWeight,
     recommendation_cash_weight: Number(target.cashWeight) || 0,
-    validation_selected_factor: payload.selectedFactor,
-    selected_factor_selection_source: 'python_joint_factor_policy_grid',
-    selected_policy_label: selectedPolicy.label || payload.selectedWeightingPolicy,
+    validation_selected_factor: payload.bestFactor,
+    selected_factor_selection_source: 'python_fixed_policy_factor_ranking',
+    selected_policy_label: selectedPolicy.label || payload.weightingPolicy,
   };
 
-  const priceCounts = v4PriceSourceCounts(payload);
-  const latestOutputRows = latestWeights.map((row, index) => ({
-    rank: row.rank || index + 1,
-    symbol: row.symbol,
-    score: row.factorScore,
-    weight: row.weight,
-    pre_cap_weight: row.preCapWeight ?? row.weight,
-    weighting_method: payload.selectedWeightingPolicy,
-    signal_date: target.signalDate || asOf,
-    selected_factor: payload.selectedFactor,
-  }));
-
+  const priceCounts = priceSourceCounts(payload);
   const run = {
-    schema_version: 4,
+    schema_version: 5,
     generated_at_utc: payload.generatedAtUtc,
-    source_json: 'schema-v4 canonical result adapted for the 2026-07-10 interface',
+    source_json: 'schema-v5 input-driven Python result',
     summary,
-    periods: V4_EXPLORATION_PERIODS,
+    periods: EXPLORATION_PERIODS,
     factor_options: factors.map((factor) => {
       const definition = definitionByFactor.get(factor) || {};
       return {
@@ -6953,30 +5490,22 @@ function adaptSchemaV4Payload(payload) {
         selection_status: selectionEligibilityByFactor.get(factor)?.selection_status || 'diagnostic_only',
       };
     }),
-    factor_period_matrix: factorPeriodMatrix,
-    factor_period_rankings: [],
-    factor_leaders: factorLeaders,
-    factor_backtest_series: factors.map((factor) => v4BacktestSeries(factor, factorCurves[factor], dates)),
+    factor_backtest_series: factors.map((factor) => pythonBacktestSeries(factor, factorCurves[factor], dates)),
     benchmark_backtest_series: legacyBenchmark,
     comparison_benchmark_series: benchmarkSeries,
     common_evaluation_period: commonEvaluationPeriod,
-    factor_score_snapshots: factorScoreSnapshots,
-    factor_weight_snapshots: factorWeightSnapshots,
     holdings,
     backtest_holding_history: holdingHistory,
     backtest_holding_sessions: holdingHistory.sessions,
     factor_holding_histories: factorHoldingHistories,
-    current_research_target: currentResearchTarget,
-    factor_current_research_targets: factorCurrentResearchTargets,
-    latest_output_rows: latestOutputRows,
-    scenario_available_dates: [asOf],
-    scenario_available_dates_by_factor: availableDatesByFactor,
+    best_factor_portfolio: bestFactorPortfolio,
+    factor_portfolios: factorPortfolioViews,
     history_payload_type: 'full',
     history_compaction_note_ko: null,
     tradability_gate: [
       { key: 'actual_market', passed: payload.data?.mode === 'live_market', label_ko: '실제 시장 데이터', description_ko: '합성 데이터가 아닌 제공자 조정가격을 사용합니다.' },
       { key: 'broad_universe', passed: Number(payload.data?.analyzedSecurityCount) >= 2700, label_ko: '2,700개 이상 전체 후보 분석', description_ko: `${formatInteger(payload.data?.analyzedSecurityCount)}개 종목을 분석했습니다.` },
-      { key: 'canonical_target', passed: target.status === 'available', label_ko: 'Python 현재 연구 목표', description_ko: `${payload.selectedFactor} × ${payload.selectedWeightingPolicy}` },
+      { key: 'best_factor_portfolio', passed: target.status === 'available', label_ko: '동일 입력 최고 팩터 포트폴리오', description_ko: `${payload.bestFactor} · 고정 비중 방법` },
       { key: 'research_only', passed: false, label_ko: '매매 권고 게이트', description_ko: '동일 표본 설명 연구이며 실제 주문·투자 권고가 아닙니다.' },
     ],
     data_quality_summary: {
@@ -6996,7 +5525,7 @@ function adaptSchemaV4Payload(payload) {
       price_quality_rows: candidateQualityRows.length,
       data_as_of: asOf,
       provider: payload.data?.provider || payload.data?.sourceLabel,
-      source_health: v4SourceHealth(payload),
+      source_health: sourceHealthView(payload),
       price_source_counts: priceCounts,
       data_quality_status_counts: {
         pass: candidateQualityRows.filter((row) => row.eligible_latest === true).length,
@@ -7017,10 +5546,10 @@ function adaptSchemaV4Payload(payload) {
       capacity_status_note: '미평가 · 공개 payload에는 주문 규모·시장 충격·참여율을 반영한 체결 용량 모델이 없습니다.',
     },
     factor_diagnostics: payload.factorDiagnostics
-      ? v4FactorDiagnostics(payload)
+      ? factorDiagnosticsView(payload)
       : {
-        scope_note_ko: `독립 팩터 ${formatInteger(payload.meta?.independentFactorCount)}개와 호환 alias ${formatInteger(payload.meta?.aliasFactorCount)}개를 네 가지 비중 정책에서 비교합니다. 이 이전 결과에는 Forward Rank-IC와 중복도 계약이 없어 값을 만들거나 추정하지 않습니다.`,
-        category_summary: v4CategorySummary(definitions),
+        scope_note_ko: `독립 팩터 ${formatInteger(payload.meta?.independentFactorCount)}개와 호환 alias ${formatInteger(payload.meta?.aliasFactorCount)}개를 하나의 고정 비중 방법에서 비교합니다. Forward Rank-IC와 중복도 값이 없으면 추정하지 않습니다.`,
+        category_summary: categorySummaryView(definitions),
         rank_ic_rows: [],
         rank_ic_top: [],
         redundancy_rows: [],
@@ -7028,8 +5557,8 @@ function adaptSchemaV4Payload(payload) {
         redundancy_pairs: [],
       },
     notes_ko: [
-      `선택 조합: ${payload.selectedFactor} × ${payload.selectedWeightingPolicy}`,
-      `공동 선택 점수는 Python에서 계산되며 브라우저 기간 비교와 별개입니다.`,
+      `동일 입력 최고 팩터: ${payload.bestFactor}`,
+      '팩터 선택 점수와 두 포트폴리오는 Python에서 계산됩니다.',
       selectedDefinition.description || '',
     ].filter(Boolean),
   };
@@ -7052,21 +5581,24 @@ const CANONICAL_COMPONENTS = [
   ['stability_score', '안정성', 'component-stability'],
 ];
 
-function canonicalPolicyLabel(payload, policyId) {
-  return payload.weightingPolicyRegistry?.policies?.[policyId]?.label || policyId || '-';
+function fixedPolicyLabel(payload, policyId) {
+  if (payload.weightingMethodology?.policyId === policyId) {
+    return payload.weightingMethodology?.policy?.label || policyId || '-';
+  }
+  return policyId || '-';
 }
 
-function canonicalPolicyClass(policyId) {
+function fixedPolicyClass(policyId) {
   return CHART_PALETTE_CLASS_MAP.policies[policyId]
     || `policy-${String(policyId || 'unavailable').replaceAll('_', '-')}`;
 }
 
-function canonicalSelectionStatusClass(status) {
+function factorSelectionStatusClass(status) {
   return CHART_PALETTE_CLASS_MAP.statuses[status]
     || CHART_PALETTE_CLASS_MAP.statuses.default;
 }
 
-function canonicalSelectionStatusLabel(status) {
+function factorSelectionStatusLabel(status) {
   const labels = {
     eligible: '선정 적격',
     data_excluded: '데이터 조건 미충족',
@@ -7075,7 +5607,7 @@ function canonicalSelectionStatusLabel(status) {
   return labels[status] || '상태 미확인';
 }
 
-function canonicalExclusionReasonLabel(code) {
+function factorExclusionReasonLabel(code) {
   const labels = {
     terminal_nav_unavailable: '최종 NAV 평가 불가(선정 제외·진단용)',
     duplicate_alias: '독립 팩터와 중복된 호환 alias(선정 제외·진단용)',
@@ -7088,20 +5620,20 @@ function canonicalExclusionReasonLabel(code) {
   return labels[code] || '기타 데이터·가드레일 조건 미충족(선정 제외·진단용)';
 }
 
-function canonicalRankingStatusText(row) {
+function factorRankingStatusText(row) {
   if (row?.selected === true) return '선택';
-  const status = canonicalSelectionStatusLabel(row?.selection_status);
+  const status = factorSelectionStatusLabel(row?.selection_status);
   const reasonCodes = Array.isArray(row?.exclusion_reason_codes)
     ? [...new Set(row.exclusion_reason_codes.filter(Boolean))]
     : [];
-  const reasons = reasonCodes.map(canonicalExclusionReasonLabel);
+  const reasons = reasonCodes.map(factorExclusionReasonLabel);
   if (reasons.length) return `${status} · ${reasons.join(' · ')}`;
   if (row?.comparison_status === 'available') return status;
   if (row?.selection_status) return status;
   return '상태 미확인';
 }
 
-function canonicalRiskQualityText(row) {
+function factorRiskQualityText(row) {
   const daily = formatInteger(row?.daily_risk_observations);
   const total = formatInteger(row?.observations);
   const gaps = formatInteger(row?.quote_gap_observations);
@@ -7112,7 +5644,7 @@ function canonicalRiskQualityText(row) {
   return `불완전 · 일간 위험 ${daily}/${total} · quote gap ${gaps} · 평가 ${coverage} · MDD는 관측 종가 기준 하한`;
 }
 
-function canonicalScoreMethodDescription(payload) {
+function factorScoreMethodDescription(payload) {
   const lower = Number(payload?.config?.score_winsor_lower);
   const upper = Number(payload?.config?.score_winsor_upper);
   const periods = Number(payload?.config?.stability_periods);
@@ -7122,56 +5654,52 @@ function canonicalScoreMethodDescription(payload) {
   return `성과 구성요소는 실제 실행 설정 ${lowerLabel}~${upperLabel} 백분위에서 윈저화한 뒤 횡단면 percentile 점수로 변환하며, 안정성은 평가창을 ${periodLabel} 하위기간으로 나눈 CAGR 분산을 사용합니다.`;
 }
 
-function canonicalGridAccounting(payload) {
-  const accounting = payload?.gridAccounting || {};
+function factorGridAccounting(payload) {
+  const accounting = payload?.factorAccounting || {};
   const independentFactorCount = Number(accounting.independentFactorCount) || 0;
-  const policyCount = Number(accounting.policyCount) || 0;
-  const expectedIndependentPairCount = Number(accounting.expectedIndependentPairCount)
-    || independentFactorCount * policyCount;
-  const evaluatedIndependentPairCount = Number(accounting.evaluatedIndependentPairCount)
-    || expectedIndependentPairCount;
-  const availableIndependentPairCount = Number(accounting.availableIndependentPairCount) || 0;
-  const excludedIndependentPairCount = Number(accounting.excludedIndependentPairCount) || 0;
+  const expectedIndependentFactorCount = Number(accounting.expectedIndependentFactorCount)
+    || independentFactorCount;
+  const evaluatedIndependentFactorCount = Number(accounting.evaluatedIndependentFactorCount)
+    || expectedIndependentFactorCount;
+  const availableIndependentFactorCount = Number(accounting.availableIndependentFactorCount) || 0;
+  const excludedIndependentFactorCount = Number(accounting.excludedIndependentFactorCount) || 0;
   const commonComparableFactorCount = Number(accounting.commonComparableFactorCount) || 0;
   const diagnosticAliasFactorCount = Number(accounting.diagnosticAliasFactorCount) || 0;
-  const diagnosticAliasPairCount = Number(accounting.diagnosticAliasPairCount) || 0;
-  const missingIndependentPairCount = Number(accounting.missingIndependentPairCount) || 0;
-  const totalOutputRowCount = Array.isArray(payload?.factorPolicyRanking)
-    ? payload.factorPolicyRanking.length
-    : evaluatedIndependentPairCount + diagnosticAliasPairCount;
+  const missingIndependentFactorCount = Number(accounting.missingIndependentFactorCount) || 0;
+  const totalOutputRowCount = Array.isArray(payload?.factorRanking)
+    ? payload.factorRanking.length
+    : evaluatedIndependentFactorCount + diagnosticAliasFactorCount;
   return {
     independentFactorCount,
-    policyCount,
-    expectedIndependentPairCount,
-    evaluatedIndependentPairCount,
-    availableIndependentPairCount,
-    excludedIndependentPairCount,
+    expectedIndependentFactorCount,
+    evaluatedIndependentFactorCount,
+    availableIndependentFactorCount,
+    excludedIndependentFactorCount,
     commonComparableFactorCount,
     diagnosticAliasFactorCount,
-    diagnosticAliasPairCount,
-    missingIndependentPairCount,
+    missingIndependentFactorCount,
     totalOutputRowCount,
   };
 }
 
-function canonicalSelectedRow(payload) {
-  return (payload.factorPolicyRanking || []).find((row) => row.selected === true)
-    || (payload.factorPolicyRanking || []).find((row) => (
-      row.factor === payload.selectedFactor && row.policy_id === payload.selectedWeightingPolicy
+function bestFactorRow(payload) {
+  return (payload.factorRanking || []).find((row) => row.selected === true)
+    || (payload.factorRanking || []).find((row) => (
+      row.factor === payload.bestFactor && row.policy_id === payload.weightingPolicy
     ))
     || null;
 }
 
-function appendCanonicalBar(target, options) {
+function appendFactorRankingBar(target, options) {
   const row = document.createElement(options.interactive ? 'button' : 'div');
-  row.className = `canonical-bar-row ${options.className || ''} ${options.selected ? 'is-selected' : ''}`.trim();
+  row.className = `factor-ranking-bar-row ${options.className || ''} ${options.selected ? 'is-selected' : ''}`.trim();
   if (options.interactive) {
     row.type = 'button';
     row.setAttribute('aria-pressed', String(Boolean(options.selected)));
     row.addEventListener('click', options.onClick);
   }
   const label = document.createElement('span');
-  label.className = 'canonical-bar-label';
+  label.className = 'factor-ranking-bar-label';
   label.textContent = options.label;
   if (options.detail) {
     const detail = document.createElement('small');
@@ -7190,7 +5718,7 @@ function appendCanonicalBar(target, options) {
   target.appendChild(row);
 }
 
-function canonicalSelectFactor(factor) {
+function selectFactorFromRanking(factor) {
   const selector = document.querySelector('#factor-select');
   if (!selector || !Array.from(selector.options).some((option) => option.value === factor)) return;
   const preferredDate = selectedDate();
@@ -7201,29 +5729,13 @@ function canonicalSelectFactor(factor) {
   document.querySelector('#visual-dashboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-function populateCanonicalPolicyFilter(payload) {
-  const selector = document.querySelector('#joint-policy-filter');
-  if (!selector) return;
-  const previous = selector.value || 'all';
-  selector.replaceChildren();
-  const all = document.createElement('option');
-  all.value = 'all';
-  all.textContent = '전체 정책';
-  selector.appendChild(all);
-  Object.keys(payload.weightingPolicyRegistry?.policies || {}).forEach((policyId) => {
-    const option = document.createElement('option');
-    option.value = policyId;
-    option.textContent = canonicalPolicyLabel(payload, policyId);
-    selector.appendChild(option);
-  });
-  selector.value = Array.from(selector.options).some((option) => option.value === previous) ? previous : 'all';
+function populateFixedPolicyView(payload) {
+  return payload;
 }
 
-function canonicalFilteredRanking(payload) {
-  const policy = document.querySelector('#joint-policy-filter')?.value || 'all';
+function filteredFactorRanking(payload) {
   const search = String(document.querySelector('#joint-factor-search')?.value || '').trim().toLowerCase();
-  return (payload.factorPolicyRanking || [])
-    .filter((row) => policy === 'all' || row.policy_id === policy)
+  return (payload.factorRanking || [])
     .filter((row) => !search || `${row.factor} ${row.category || ''}`.toLowerCase().includes(search))
     .sort((left, right) => (
       Number(left.rank ?? Number.MAX_SAFE_INTEGER) - Number(right.rank ?? Number.MAX_SAFE_INTEGER)
@@ -7233,37 +5745,37 @@ function canonicalFilteredRanking(payload) {
     ));
 }
 
-function renderCanonicalRanking(payload) {
-  const rows = canonicalFilteredRanking(payload);
-  const accounting = canonicalGridAccounting(payload);
+function renderFactorRanking(payload) {
+  const rows = filteredFactorRanking(payload);
+  const accounting = factorGridAccounting(payload);
   const chart = document.querySelector('#joint-ranking-chart');
   const tbody = document.querySelector('#joint-ranking-table tbody');
   chart.replaceChildren();
   tbody.replaceChildren();
   setText(
     '#joint-ranking-scope',
-    `전체 출력 ${formatInteger(accounting.totalOutputRowCount)}행 · 독립 ${formatInteger(accounting.expectedIndependentPairCount)}쌍 + 호환 alias ${formatInteger(accounting.diagnosticAliasPairCount)}쌍`,
+    `전체 ${formatInteger(accounting.totalOutputRowCount)}개 팩터 · 독립 ${formatInteger(accounting.expectedIndependentFactorCount)}개 + 호환 alias ${formatInteger(accounting.diagnosticAliasFactorCount)}개`,
   );
   setText(
     '#joint-ranking-title',
-    `독립 ${formatInteger(accounting.expectedIndependentPairCount)}쌍 중 비교 가능 ${formatInteger(accounting.availableIndependentPairCount)}쌍 랭킹 · 제외 ${formatInteger(accounting.excludedIndependentPairCount)}쌍 진단`,
+    `동일 입력의 팩터 랭킹 · 비교 가능 ${formatInteger(accounting.availableIndependentFactorCount)}개 · 제외 ${formatInteger(accounting.excludedIndependentFactorCount)}개`,
   );
   setText(
     '#joint-ranking-scope-note',
-    `공통 조건으로 완전 비교 가능한 독립 팩터는 ${formatInteger(accounting.commonComparableFactorCount)}/${formatInteger(accounting.independentFactorCount)}개이며 네 정책의 ${formatInteger(accounting.availableIndependentPairCount)}쌍만 상대 순위를 가집니다. 나머지 독립 ${formatInteger(accounting.excludedIndependentPairCount)}쌍은 선정 제외 진단이고, 호환 alias ${formatInteger(accounting.diagnosticAliasPairCount)}쌍은 독립 비교 집계와 분리됩니다. 따라서 전체 ${formatInteger(accounting.totalOutputRowCount)}행이 모두 완전 비교 가능한 단일 순위라는 뜻이 아닙니다.`,
+    `팩터 점수는 현재 Python 입력과 하나의 고정 비중 방법을 사용합니다. 공통 표본에서 비교 가능한 독립 팩터 ${formatInteger(accounting.commonComparableFactorCount)}/${formatInteger(accounting.independentFactorCount)}개만 최고 팩터 후보가 되며, 제외 팩터와 호환 alias는 진단용입니다.`,
   );
   const chartRows = rows.filter((row) => finite(row.selection_score)).slice(0, 12);
   const maxScore = Math.max(...chartRows.map((row) => Number(row.selection_score) || 0), 1);
   chartRows.forEach((row) => {
-    appendCanonicalBar(chart, {
+    appendFactorRankingBar(chart, {
       label: row.factor,
-      detail: `${canonicalPolicyLabel(payload, row.policy_id)} · ${canonicalRankingStatusText(row)} · 동일 표본 상대 합성 점수`,
+      detail: `${factorRankingStatusText(row)} · 동일 표본 상대 합성 점수`,
       width: Number(row.selection_score) / maxScore * 100,
       valueLabel: `${formatNumber(row.selection_score)} / 100`,
-      className: `${canonicalPolicyClass(row.policy_id)} ${canonicalSelectionStatusClass(row.selection_status)}`,
+      className: factorSelectionStatusClass(row.selection_status),
       selected: row.selected === true,
       interactive: true,
-      onClick: () => canonicalSelectFactor(row.factor),
+      onClick: () => selectFactorFromRanking(row.factor),
     });
   });
   rows.forEach((row) => {
@@ -7272,7 +5784,6 @@ function renderCanonicalRanking(payload) {
     appendCell(tr, row.rank ?? '-');
     appendCell(tr, row.factor, { strong: row.selected === true });
     appendCell(tr, humanFactorCategory(row.category));
-    appendCell(tr, canonicalPolicyLabel(payload, row.policy_id));
     appendCell(
       tr,
       finite(row.selection_score) ? `${formatNumber(row.selection_score)} / 100` : '-',
@@ -7281,31 +5792,31 @@ function renderCanonicalRanking(payload) {
     appendCell(tr, formatPercent(row.cagr), { className: classForNumber(row.cagr) });
     appendCell(tr, formatNumber(row.sharpe), { className: classForNumber(row.sharpe) });
     appendCell(tr, formatPercent(row.max_drawdown), { className: Number(row.max_drawdown) < 0 ? 'negative' : 'neutral' });
-    appendCell(tr, canonicalRiskQualityText(row), { className: row.risk_metrics_exact === true ? 'neutral' : 'negative' });
-    appendCell(tr, canonicalRankingStatusText(row));
+    appendCell(tr, factorRiskQualityText(row), { className: row.risk_metrics_exact === true ? 'neutral' : 'negative' });
+    appendCell(tr, factorRankingStatusText(row));
     tbody.appendChild(tr);
   });
   if (!rows.length) {
-    appendEmpty('#joint-ranking-chart', '필터 조건에 맞는 팩터×정책 조합이 없습니다.');
+    appendEmpty('#joint-ranking-chart', '검색 조건에 맞는 팩터가 없습니다.');
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 10;
-    td.textContent = '필터 조건에 맞는 조합이 없습니다.';
+    td.colSpan = 9;
+    td.textContent = '검색 조건에 맞는 팩터가 없습니다.';
     tr.appendChild(td);
     tbody.appendChild(tr);
   }
   setText(
     '#joint-ranking-meta',
-    `독립 ${formatInteger(accounting.expectedIndependentPairCount)}쌍: 비교 가능 ${formatInteger(accounting.availableIndependentPairCount)} · 제외 ${formatInteger(accounting.excludedIndependentPairCount)} · 공통 비교 팩터 ${formatInteger(accounting.commonComparableFactorCount)}개 · alias ${formatInteger(accounting.diagnosticAliasPairCount)}쌍 · 현재 표시 ${formatInteger(rows.length)} · 막대 ${formatInteger(chartRows.length)}`,
+    `독립 팩터 ${formatInteger(accounting.expectedIndependentFactorCount)}개: 비교 가능 ${formatInteger(accounting.availableIndependentFactorCount)} · 제외 ${formatInteger(accounting.excludedIndependentFactorCount)} · alias ${formatInteger(accounting.diagnosticAliasFactorCount)} · 현재 표시 ${formatInteger(rows.length)}`,
   );
 }
 
-function renderCanonicalComponents(payload, selected) {
-  const target = document.querySelector('#canonical-component-chart');
+function renderFactorScoreComponents(payload, selected) {
+  const target = document.querySelector('#factor-component-chart');
   target.replaceChildren();
   CANONICAL_COMPONENTS.forEach(([key, label, className]) => {
     const value = Number(selected?.[key]);
-    appendCanonicalBar(target, {
+    appendFactorRankingBar(target, {
       label,
       detail: `가중치 ${formatPercent(selected?.[key.replace('_score', '_weight')])}`,
       width: Number.isFinite(value) ? value : 0,
@@ -7314,31 +5825,29 @@ function renderCanonicalComponents(payload, selected) {
     });
   });
   setText(
-    '#canonical-selection-reason',
-    `${payload.selectedReason || '선택 근거 미표기'} · ${canonicalScoreMethodDescription(payload)} 동일 표본 상대 합성 점수는 비교 가능한 조합 내부의 percentile 기반 ${formatNumber(selected?.selection_score)} / 100이며 절대 신뢰도나 미래 성공 확률이 아닙니다. 브라우저 기간 비교와 달리 Python 팩터×정책 grid의 절대 가드레일 통과 조합만 선정 대상으로 합니다. 이미 보유 중 발생한 극단 움직임은 발생 이후 전략 수익률에 인과적으로 반영하지만, 종료일 보유 종목을 가격 평가하지 못해 최종 NAV가 없는 조합은 수익률 크기와 무관하게 선정에서 제외하고 진단용으로만 남깁니다.`,
+    '#factor-selection-reason',
+    `${factorScoreMethodDescription(payload)} 현재 입력에서 가드레일을 통과한 팩터 중 상대 합성 점수가 가장 높은 ${payload.bestFactor || '-'}가 Python 최고 팩터입니다. 점수 ${formatNumber(selected?.selection_score)} / 100은 같은 실행 안의 상대값이며 미래 성공 확률이 아닙니다.`,
   );
 }
 
-function renderCanonicalPolicies(payload) {
-  const target = document.querySelector('#canonical-policy-cards');
+function renderFixedAllocationMethod(payload) {
+  const target = document.querySelector('#allocation-method-card');
   target.replaceChildren();
-  const diagnostics = new Map((payload.policyDiagnostics || []).map((row) => [row.policy_id, row]));
-  Object.entries(payload.weightingPolicyRegistry?.policies || {}).forEach(([policyId, policy]) => {
-    const row = diagnostics.get(policyId) || {};
-    const item = document.createElement('div');
-    item.className = `mini-item ${policyId === payload.selectedWeightingPolicy ? 'is-selected' : ''}`;
-    const title = document.createElement('strong');
-    title.textContent = `${policy.label || policyId}${policyId === payload.selectedWeightingPolicy ? ' · 선택' : ''}`;
-    const detail = document.createElement('small');
-    detail.textContent = `${policy.description || ''} · CAGR 중앙값 ${formatPercent(row.cagr)} · Sharpe 중앙값 ${formatNumber(row.sharpe)} · 회전율 ${formatNumber(row.annualized_turnover)}`;
-    item.append(title, detail);
-    target.appendChild(item);
-  });
-  setText('#canonical-policy-meta', `${formatInteger(Object.keys(payload.weightingPolicyRegistry?.policies || {}).length)}개 정책 · ${payload.weightingPolicyRegistry?.registryVersion || '-'}`);
+  const policy = payload.weightingMethodology?.policy || {};
+  const parameters = payload.allocationMethod?.parameters || {};
+  const item = document.createElement('div');
+  item.className = 'mini-item is-selected';
+  const title = document.createElement('strong');
+  title.textContent = policy.label || payload.weightingPolicy || '-';
+  const detail = document.createElement('small');
+  detail.textContent = `팩터 ${formatPercent(parameters.factorScoreWeight)} + 거래대금 ${formatPercent(parameters.liquidityWeight)} + PIT 시가총액 ${formatPercent(parameters.marketCapWeight)} · 종목당 상한 ${formatPercent(parameters.maxWeight)}`;
+  item.append(title, detail);
+  target.appendChild(item);
+  setText('#allocation-method-meta', `고정 방법 · v${policy.version || '-'}`);
 }
 
-function renderCanonicalGuardrails(payload, selected) {
-  const target = document.querySelector('#canonical-guardrail-list');
+function renderFactorGuardrails(payload, selected) {
+  const target = document.querySelector('#factor-guardrail-list');
   target.replaceChildren();
   const statusFields = Object.entries(selected || {})
     .filter(([key, value]) => key.startsWith('guardrail_') && typeof value === 'boolean')
@@ -7353,13 +5862,13 @@ function renderCanonicalGuardrails(payload, selected) {
     item.append(title, detail);
     target.appendChild(item);
   });
-  if (!statusFields.length) appendEmpty('#canonical-guardrail-list', '가드레일 세부 상태가 없습니다.');
-  const profile = payload.selectionDecision?.guardrailProfile;
-  setText('#canonical-guardrail-meta', `${profile?.id || payload.selectionMethod?.guardrailVersion || '-'} · ${formatInteger(profile?.rules?.length || 0)}개 규칙`);
+  if (!statusFields.length) appendEmpty('#factor-guardrail-list', '가드레일 세부 상태가 없습니다.');
+  const profile = payload.factorSelectionDecision?.guardrailProfile;
+  setText('#factor-guardrail-meta', `${profile?.id || payload.selectionMethod?.guardrailVersion || '-'} · ${formatInteger(profile?.rules?.length || 0)}개 규칙`);
 }
 
-function renderCanonicalDataContract(payload) {
-  const target = document.querySelector('#canonical-data-contract');
+function renderAnalysisDataContract(payload) {
+  const target = document.querySelector('#analysis-data-contract');
   target.replaceChildren();
   const pairs = [
     ['요청 후보', formatInteger(payload.data?.requestedCandidateCount)],
@@ -7372,11 +5881,11 @@ function renderCanonicalDataContract(payload) {
     ['연구 상태', payload.researchScope?.evidenceStatus || '-'],
   ];
   pairs.forEach(([label, value]) => appendDefinition(target, label, value));
-  setText('#canonical-result-key', payload.resultKey || '-');
-  document.querySelector('#canonical-result-key').title = payload.resultKey || '-';
+  setText('#analysis-result-key', payload.resultKey || '-');
+  document.querySelector('#analysis-result-key').title = payload.resultKey || '-';
 }
 
-function canonicalRequestedThroughText(payload) {
+function requestedThroughText(payload) {
   const data = payload?.data || {};
   const asOf = typeof data.asOf === 'string' && data.asOf ? data.asOf : null;
   const requestedThrough = typeof data.requestedThrough === 'string' && data.requestedThrough
@@ -7401,7 +5910,7 @@ function canonicalRequestedThroughText(payload) {
   return `${source} · 요청 종료(requestedThrough) ${requestedThrough} / 실제 최신 완료 거래일(asOf) ${asOf} · ${reason}`;
 }
 
-function canonicalCountDefinitions(payload) {
+function analysisCountDefinitions(payload) {
   const data = payload?.data || {};
   const pieces = [];
   if (integer(data.requestedCandidateCount)) {
@@ -7419,7 +5928,7 @@ function canonicalCountDefinitions(payload) {
   return pieces.length ? pieces.join(' · ') : '유니버스 카운트 정의를 확인할 수 없습니다.';
 }
 
-function canonicalUniverseScopeEvidence(payload) {
+function universeScopeEvidence(payload) {
   const rows = Array.isArray(payload?.sourceHealth) ? payload.sourceHealth : [];
   const evidence = rows.find((row) => (
     isRecord(row)
@@ -7466,42 +5975,37 @@ function canonicalUniverseScopeEvidence(payload) {
   };
 }
 
-function renderCanonicalResearch() {
-  const payload = state.v4Payload;
+function renderFactorAnalysis() {
+  const payload = state.payload;
   if (!payload) return;
-  const target = payload.currentResearchTarget || {};
-  const selected = canonicalSelectedRow(payload);
+  const target = payload.bestFactorPortfolio || {};
+  const selected = bestFactorRow(payload);
   const invested = (target.weights || []).reduce((sum, row) => sum + (Number(row.weight) || 0), 0);
-  setText('#canonical-asof', payload.data?.asOf || '-');
-  setText('#canonical-source', canonicalRequestedThroughText(payload));
-  setText('#canonical-analyzed', `${formatInteger(payload.data?.analyzedSecurityCount)}개`);
-  setText('#canonical-funnel', canonicalCountDefinitions(payload));
-  setText('#canonical-factor', payload.selectedFactor || '-');
-  setText('#canonical-factor-score', `동일 표본 상대 합성 점수 ${formatNumber(selected?.selection_score)} / 100 · 절대 신뢰도 아님`);
-  setText('#canonical-policy', canonicalPolicyLabel(payload, payload.selectedWeightingPolicy));
-  setText('#canonical-policy-version', `${payload.selectedWeightingPolicy || '-'} · v${payload.weightingPolicyRegistry?.policies?.[payload.selectedWeightingPolicy]?.version || '-'}`);
-  setText('#canonical-invested', formatPercent(invested));
-  setText('#canonical-cash', `현금 ${formatPercent(target.cashWeight)} · ${formatInteger(target.selectedSecurityCount)}개 종목`);
-  const universeScope = canonicalUniverseScopeEvidence(payload);
-  setText('#canonical-universe-scope', universeScope.scope);
-  setText('#canonical-universe-evidence', universeScope.evidence);
-  renderCanonicalRanking(payload);
-  renderCanonicalComponents(payload, selected);
-  renderCanonicalPolicies(payload);
-  renderCanonicalGuardrails(payload, selected);
-  renderCanonicalDataContract(payload);
+  setText('#analysis-asof', payload.data?.asOf || '-');
+  setText('#analysis-source', requestedThroughText(payload));
+  setText('#analysis-analyzed', `${formatInteger(payload.data?.analyzedSecurityCount)}개`);
+  setText('#analysis-funnel', analysisCountDefinitions(payload));
+  setText('#analysis-factor', payload.bestFactor || '-');
+  setText('#analysis-factor-score', `동일 표본 상대 합성 점수 ${formatNumber(selected?.selection_score)} / 100 · 절대 신뢰도 아님`);
+  setText('#analysis-policy', fixedPolicyLabel(payload, payload.weightingPolicy));
+  setText('#analysis-policy-version', `${payload.weightingPolicy || '-'} · v${payload.weightingMethodology?.policy?.version || '-'}`);
+  setText('#analysis-invested', formatPercent(invested));
+  setText('#analysis-cash', `현금 ${formatPercent(target.cashWeight)} · ${formatInteger(target.selectedSecurityCount)}개 종목`);
+  const universeScope = universeScopeEvidence(payload);
+  setText('#analysis-universe-scope', universeScope.scope);
+  setText('#analysis-universe-evidence', universeScope.evidence);
+  renderFactorRanking(payload);
+  renderFactorScoreComponents(payload, selected);
+  renderFixedAllocationMethod(payload);
+  renderFactorGuardrails(payload, selected);
+  renderAnalysisDataContract(payload);
 }
 
-function bindCanonicalControls() {
-  const policy = document.querySelector('#joint-policy-filter');
+function bindFactorAnalysisControls() {
   const search = document.querySelector('#joint-factor-search');
-  if (policy && policy.dataset.bound !== 'true') {
-    policy.dataset.bound = 'true';
-    policy.addEventListener('change', () => renderCanonicalRanking(state.v4Payload));
-  }
   if (search && search.dataset.bound !== 'true') {
     search.dataset.bound = 'true';
-    search.addEventListener('input', () => renderCanonicalRanking(state.v4Payload));
+    search.addEventListener('input', () => renderFactorRanking(state.payload));
   }
 }
 
@@ -7512,14 +6016,10 @@ function renderAll() {
   renderSelectedFactorMethod();
   renderFactorReturnChart();
   renderBacktestChart();
-  renderWindowComparisonChart();
-  renderLeaderTrendChart();
   renderWeightChart();
-  renderFactorTable();
   renderHoldingsTable();
   renderDailyWeightsAnalysis();
-  renderPeriodRankingTable();
-  renderCanonicalResearch();
+  renderFactorAnalysis();
 }
 
 function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
@@ -7562,7 +6062,7 @@ function populateResultOptions(manifest) {
   select.disabled = manifest.entries.length <= 1;
 }
 
-function fillCanonicalForm(entry, normalizedInputs = entry.normalizedInputs, researchInputs = null) {
+function fillResearchForm(entry, normalizedInputs = entry.normalizedInputs, researchInputs = null) {
   INPUT_FIELDS.forEach((field) => {
     const element = document.querySelector(`#${field.id}`);
     if (element && Object.prototype.hasOwnProperty.call(normalizedInputs, field.key)) {
@@ -7578,7 +6078,7 @@ function fillCanonicalForm(entry, normalizedInputs = entry.normalizedInputs, res
   }
 }
 
-function readCanonicalFormRequest() {
+function readResearchFormRequest() {
   const selectedResultKey = document.querySelector('#run-select')?.value;
   const baseEntry = entryByResultKey(state.manifest, selectedResultKey)
     || state.baseEntry
@@ -7587,7 +6087,7 @@ function readCanonicalFormRequest() {
   const requestedInputs = cloneJson(baseEntry.normalizedInputs);
   INPUT_FIELDS.forEach((field) => {
     const element = document.querySelector(`#${field.id}`);
-    requireCondition(element, `canonical 입력 control이 없습니다: ${field.id}`);
+    requireCondition(element, `Python 분석 입력 control이 없습니다: ${field.id}`);
     requestedInputs[field.key] = parseInputValue(field, element.value);
   });
   const evaluationYears = Number(document.querySelector('#input-evaluation-years')?.value);
@@ -7650,13 +6150,13 @@ function showUnavailable(message, requestedInputs = null, baseEntry = null) {
   state.loadToken += 1;
   document.body.classList.add('result-unavailable');
   state.data = null;
-  state.v4Payload = null;
+  state.payload = null;
   state.summary = null;
   state.entry = null;
   state.baseEntry = baseEntry || state.baseEntry;
   setResultSource(null);
   setInputStatus(message, 'error');
-  if (baseEntry && requestedInputs) fillCanonicalForm(baseEntry, requestedInputs);
+  if (baseEntry && requestedInputs) fillResearchForm(baseEntry, requestedInputs);
   const statusCard = document.querySelector('#run-status');
   if (statusCard) {
     statusCard.replaceChildren();
@@ -7682,7 +6182,7 @@ function installValidatedPayload({
   summary = null,
   source,
 }) {
-  const adapted = adaptSchemaV4Payload(payload);
+  const adapted = adaptSchemaV5Payload(payload);
   requireCondition(
     adapted?.schema_version === 1 && Array.isArray(adapted.runs) && adapted.runs.length === 1,
     '지원하지 않는 대시보드 adapter 결과입니다.',
@@ -7690,16 +6190,16 @@ function installValidatedPayload({
   state.entry = entry;
   state.baseEntry = baseEntry;
   state.summary = summary;
-  state.v4Payload = payload;
+  state.payload = payload;
   state.data = adapted;
   state.activeRunIndex = Number.isInteger(adapted.latest_run_index)
     ? adapted.latest_run_index
     : 0;
   state.hasUserSelectedFactor = false;
   fillControls();
-  populateCanonicalPolicyFilter(payload);
-  bindCanonicalControls();
-  fillCanonicalForm(baseEntry, entry.normalizedInputs, payload.researchInputs);
+  populateFixedPolicyView(payload);
+  bindFactorAnalysisControls();
+  fillResearchForm(baseEntry, entry.normalizedInputs, payload.researchInputs);
   setResultSource(source, entry.resultKey);
   renderAll();
   showResult();
@@ -7724,7 +6224,7 @@ async function loadEntry(entry, options = {}) {
       updateLocation(options.historyMode, entry.resultKey, entry.normalizedInputs);
     }
     const sidecarNote = loaded.payload.__factorHoldingHistorySidecarError
-      ? ` · 팩터별 보유 이력은 검증 실패로 canonical 선택 팩터만 표시: ${loaded.payload.__factorHoldingHistorySidecarError}`
+      ? ` · 팩터별 보유 이력 검증 실패로 최고 팩터 이력만 표시: ${loaded.payload.__factorHoldingHistorySidecarError}`
       : '';
     setInputStatus(
       `정확히 일치하는 검증된 정적 preset을 열었습니다: ${entry.resultKey.slice(0, 12)}…${sidecarNote}`,
@@ -7749,7 +6249,7 @@ async function loadLocalApiResult(requestedInputs, baseEntry, options = {}) {
   }
   showLoading('로컬 Python API에서 실제시장 2,700개 이상 전체 grid를 계산하는 중입니다...');
   setInputStatus(
-    `로컬 API(${LOCAL_API_BASE_URL})에 canonical ResearchInputs를 제출하는 중입니다.`,
+    `로컬 API(${LOCAL_API_BASE_URL})에 현재 ResearchInputs를 제출하는 중입니다.`,
     'pending',
   );
   try {
@@ -7807,7 +6307,7 @@ function bindBrowserContractControls() {
       return;
     }
     state.hasUserSelectedFactor = false;
-    fillCanonicalForm(entry);
+    fillResearchForm(entry);
     loadEntry(entry, { historyMode: 'push' });
   });
   document.querySelector('#input-evaluation-years').addEventListener('change', (event) => {
@@ -7832,7 +6332,7 @@ function bindBrowserContractControls() {
   researchForm.addEventListener('submit', (event) => {
     event.preventDefault();
     try {
-      const request = readCanonicalFormRequest();
+      const request = readResearchFormRequest();
       if (request.entry) {
         loadEntry(request.entry, { historyMode: 'push' });
         return;
@@ -7851,7 +6351,7 @@ function bindBrowserContractControls() {
   document.querySelector('#reset-default-inputs').addEventListener('click', () => {
     const entry = entryByResultKey(state.manifest, state.manifest.defaultResultKey);
     requireCondition(entry, 'manifest 기본 entry가 없습니다.');
-    fillCanonicalForm(entry);
+    fillResearchForm(entry);
     loadEntry(entry, { historyMode: 'push' });
   });
   window.addEventListener('popstate', () => loadFromLocation());
@@ -7865,14 +6365,14 @@ function bindDashboardControls() {
     syncFactorDependentControls(currentRun(), selectedFactor(), selectedDate());
     renderWithBusy('선택 팩터를 반영하는 중입니다...');
   });
-  ['#date-select', '#window-select'].forEach((selector) => {
-    document.querySelector(selector).addEventListener('input', () => {
+  ['#date-select'].forEach((selector) => {
+    document.querySelector(selector)?.addEventListener('input', () => {
       syncDefaultFactorToCurrentBasis();
-      renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
+      renderWithBusy('선택한 성과 탐색 기간을 반영하는 중입니다...');
     });
-    document.querySelector(selector).addEventListener('change', () => {
+    document.querySelector(selector)?.addEventListener('change', () => {
       syncDefaultFactorToCurrentBasis();
-      renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
+      renderWithBusy('선택한 성과 탐색 기간을 반영하는 중입니다...');
     });
   });
 }
@@ -7933,14 +6433,8 @@ if (typeof globalThis !== 'undefined') {
     researchInputsFromNormalizedInputs,
     localApiRequestFromStaticState,
     validateTargetAllocation,
-    validateFactorPortfolios,
-    validateFactorDiagnostics,
-    validatePerformance,
-    validateBacktestHeldPortfolio,
-    validateSelectedBacktestHoldingHistory,
     validateFactorHoldingHistorySidecarManifest,
     validateFactorHoldingHistorySidecarData,
-    validateGridAccounting,
     validateResult,
     sha256Hex,
     validateIdentityDigest,
@@ -7952,10 +6446,10 @@ if (typeof globalThis !== 'undefined') {
     resultSourceLabel,
     portfolioHoldingsFromPayload,
     rowReasonCodes,
-    adaptSchemaV4Payload,
-    v4BenchmarkCurves,
-    v4CurveReturn,
-    v4CommonEvaluationPeriod,
+    adaptSchemaV5Payload,
+    pythonBenchmarkCurves,
+    curveReturn,
+    commonEvaluationPeriodFromPayload,
     periodFactorStatsIncludingDiagnostic,
     seriesPointsThroughDate,
     commonEvaluationSeriesPoints,
@@ -7965,39 +6459,39 @@ if (typeof globalThis !== 'undefined') {
     pythonPerformanceMetric,
     renderPythonPerformanceMetricsTable,
     renderBacktestComparisonSummary,
-    v4SelectionEligibility,
-    v4HoldingHistory,
-    v4FactorHoldingHistory,
-    loadV4FactorHoldingHistorySidecar,
+    factorSelectionEligibility,
+    bestFactorHoldingHistoryView,
+    factorHoldingHistoryView,
+    loadFactorHoldingHistorySidecar,
     selectedDailyWeightRows,
     dailyWeightSymbols,
     renderDailyWeightsTable,
-    v4CurrentResearchTargetFromPortfolio,
-    v4FactorDiagnostics,
+    portfolioViewFromPython,
+    factorDiagnosticsView,
     appendFactorHoldingHistoryLoadStatus,
     factorOptionLabel,
     defaultFactorForRun,
     factorComparisonBarClass,
     benchmarkPaletteClass,
-    canonicalPolicyClass,
-    canonicalSelectionStatusClass,
-    canonicalSelectionStatusLabel,
-    canonicalExclusionReasonLabel,
-    canonicalRankingStatusText,
-    canonicalRiskQualityText,
-    canonicalScoreMethodDescription,
-    canonicalGridAccounting,
+    fixedPolicyClass,
+    factorSelectionStatusClass,
+    factorSelectionStatusLabel,
+    factorExclusionReasonLabel,
+    factorRankingStatusText,
+    factorRiskQualityText,
+    factorScoreMethodDescription,
+    factorGridAccounting,
     appendBarRow,
-    appendCanonicalBar,
+    appendFactorRankingBar,
     formatSourceHealth,
     storedScenarioRowLimit,
     syncFactorDependentControls,
-    canonicalRequestedThroughText,
-    canonicalCountDefinitions,
-    canonicalUniverseScopeEvidence,
+    requestedThroughText,
+    analysisCountDefinitions,
+    universeScopeEvidence,
     CHART_PALETTE_CLASS_MAP,
-    V4_EXPLORATION_PERIODS,
-    V4_BENCHMARK_LABELS,
+    EXPLORATION_PERIODS,
+    BENCHMARK_LABELS,
   };
 }
 

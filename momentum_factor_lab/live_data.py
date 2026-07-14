@@ -43,6 +43,7 @@ class MarketData:
     raw_prices: pd.DataFrame = field(default_factory=pd.DataFrame)
     raw_closes: pd.DataFrame = field(default_factory=pd.DataFrame)
     raw_volumes: pd.DataFrame = field(default_factory=pd.DataFrame)
+    stock_splits: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
@@ -184,7 +185,7 @@ DATA_QUALITY_COLUMNS = [
 
 YFINANCE_DOWNLOAD_TIMEOUT_SECONDS = 15
 YAHOO_CHART_TIMEOUT_SECONDS = 20
-PRICE_CACHE_VERSION = 3
+PRICE_CACHE_VERSION = 4
 
 
 def _exclusion_status(reason: object) -> str:
@@ -464,9 +465,9 @@ def build_data_quality_frame(
 def _extract_yfinance(
     download: pd.DataFrame,
     symbols: Iterable[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if download.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     symbols = list(symbols)
     if isinstance(download.columns, pd.MultiIndex):
         lvl0 = set(map(str, download.columns.get_level_values(0)))
@@ -477,10 +478,16 @@ def _extract_yfinance(
             volumes = (
                 download["Volume"].copy() if "Volume" in lvl0 else pd.DataFrame(index=prices.index)
             )
+            stock_splits = (
+                download["Stock Splits"].copy()
+                if "Stock Splits" in lvl0
+                else pd.DataFrame(index=prices.index)
+            )
         else:
             price_cols = {}
             raw_close_cols = {}
             volume_cols = {}
+            split_cols = {}
             for symbol in symbols:
                 if symbol in download.columns.get_level_values(0):
                     sub = download[symbol]
@@ -492,21 +499,41 @@ def _extract_yfinance(
                         raw_close_cols[symbol] = sub["Close"]
                     if "Volume" in sub:
                         volume_cols[symbol] = sub["Volume"]
+                    if "Stock Splits" in sub:
+                        split_cols[symbol] = sub["Stock Splits"]
             prices = pd.DataFrame(price_cols)
             raw_closes = pd.DataFrame(raw_close_cols)
             volumes = pd.DataFrame(volume_cols)
+            stock_splits = pd.DataFrame(split_cols)
     else:
-        prices = pd.DataFrame({symbols[0]: download.get("Adj Close", download.get("Close"))})
-        raw_closes = pd.DataFrame({symbols[0]: download.get("Close", download.get("Adj Close"))})
-        volumes = pd.DataFrame({symbols[0]: download.get("Volume")})
+        adjusted = download.get("Adj Close", download.get("Close"))
+        raw_close = download.get("Close", download.get("Adj Close"))
+        volume = download.get("Volume")
+        split = download.get("Stock Splits")
+        prices = pd.DataFrame({symbols[0]: adjusted}, index=download.index)
+        raw_closes = pd.DataFrame({symbols[0]: raw_close}, index=download.index)
+        volumes = pd.DataFrame(
+            {
+                symbols[0]: (
+                    volume if volume is not None else pd.Series(np.nan, index=download.index)
+                )
+            },
+            index=download.index,
+        )
+        stock_splits = pd.DataFrame(
+            {symbols[0]: (split if split is not None else pd.Series(0.0, index=download.index))},
+            index=download.index,
+        )
     prices.index = pd.to_datetime(prices.index).tz_localize(None)
     raw_closes.index = pd.to_datetime(raw_closes.index).tz_localize(None)
     volumes.index = pd.to_datetime(volumes.index).tz_localize(None)
+    stock_splits.index = pd.to_datetime(stock_splits.index).tz_localize(None)
     prices = prices.dropna(axis=1, how="all")
     return (
         prices,
         raw_closes.reindex(index=prices.index, columns=prices.columns),
         volumes.reindex(index=prices.index, columns=prices.columns),
+        stock_splits.reindex(index=prices.index, columns=prices.columns).fillna(0.0),
     )
 
 
@@ -542,6 +569,7 @@ def _price_cache_component_paths(metadata_path: Path) -> dict[str, Path]:
         "prices": metadata_path.with_suffix(".prices.csv"),
         "raw_closes": metadata_path.with_suffix(".raw_closes.csv"),
         "volumes": metadata_path.with_suffix(".volumes.csv"),
+        "stock_splits": metadata_path.with_suffix(".stock_splits.csv"),
     }
 
 
@@ -602,7 +630,7 @@ def _read_price_cache(
     config: RunConfig,
     provider: str,
     symbols: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
     paths = _price_cache_component_paths(metadata_path)
     if not all(path.exists() for path in paths.values()):
         return None
@@ -619,7 +647,7 @@ def _read_price_cache(
         if not isinstance(components, dict):
             return None
         encoded_components: dict[str, bytes] = {}
-        for name in ("prices", "raw_closes", "volumes"):
+        for name in ("prices", "raw_closes", "volumes", "stock_splits"):
             reference = components.get(name)
             if not isinstance(reference, dict):
                 return None
@@ -647,6 +675,11 @@ def _read_price_cache(
             index_col=0,
             parse_dates=True,
         )
+        stock_splits = pd.read_csv(
+            StringIO(encoded_components["stock_splits"].decode("utf-8")),
+            index_col=0,
+            parse_dates=True,
+        )
         returned_symbols = metadata.get("returnedSymbols")
         if not isinstance(returned_symbols, list) or not all(
             isinstance(symbol, str) for symbol in returned_symbols
@@ -656,6 +689,10 @@ def _read_price_cache(
             return None
         raw_closes = raw_closes.reindex(index=prices.index, columns=returned_symbols)
         volumes = volumes.reindex(index=prices.index, columns=returned_symbols)
+        stock_splits = stock_splits.reindex(
+            index=prices.index,
+            columns=returned_symbols,
+        ).fillna(0.0)
         if metadata.get("observedAsOf") != _observed_as_of(prices):
             return None
     except Exception:
@@ -668,7 +705,7 @@ def _read_price_cache(
         )
     except OSError:
         pass
-    return prices, raw_closes, volumes
+    return prices, raw_closes, volumes, stock_splits
 
 
 def _write_price_cache(
@@ -676,6 +713,7 @@ def _write_price_cache(
     prices: pd.DataFrame,
     raw_closes: pd.DataFrame,
     volumes: pd.DataFrame,
+    stock_splits: pd.DataFrame,
     *,
     provider: str,
     symbols: list[str],
@@ -692,10 +730,15 @@ def _write_price_cache(
         index=normalized_prices.index,
         columns=returned_symbols,
     )
+    normalized_stock_splits = stock_splits.reindex(
+        index=normalized_prices.index,
+        columns=returned_symbols,
+    ).fillna(0.0)
     encoded_components = {
         "prices": normalized_prices.to_csv().encode("utf-8"),
         "raw_closes": normalized_raw_closes.to_csv().encode("utf-8"),
         "volumes": normalized_volumes.to_csv().encode("utf-8"),
+        "stock_splits": normalized_stock_splits.to_csv().encode("utf-8"),
     }
     timestamp = datetime.now(UTC).isoformat()
     metadata = {
@@ -782,7 +825,7 @@ def _finance_datareader_cache_path(config: RunConfig, symbol: str) -> Path:
 def _download_yfinance_chunk(
     symbols: list[str],
     config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
     cache_path = _price_cache_path(config, "yfinance", symbols)
     cached = _read_price_cache(
         cache_path,
@@ -791,11 +834,12 @@ def _download_yfinance_chunk(
         symbols=symbols,
     )
     if cached is not None:
-        prices, raw_closes, volumes = cached
+        prices, raw_closes, volumes, stock_splits = cached
         return (
             prices,
             raw_closes,
             volumes,
+            stock_splits,
             {
                 "status": "cache_hit",
                 "retries": 0,
@@ -818,14 +862,16 @@ def _download_yfinance_chunk(
                 group_by="column",
                 progress=False,
                 threads=False,
+                actions=True,
                 timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
             )
-            prices, raw_closes, volumes = _extract_yfinance(raw, symbols)
+            prices, raw_closes, volumes, stock_splits = _extract_yfinance(raw, symbols)
             _write_price_cache(
                 cache_path,
                 prices,
                 raw_closes,
                 volumes,
+                stock_splits,
                 provider="yfinance",
                 symbols=symbols,
             )
@@ -833,6 +879,7 @@ def _download_yfinance_chunk(
                 prices,
                 raw_closes,
                 volumes,
+                stock_splits,
                 {
                     "status": "fetched",
                     "retries": attempt,
@@ -849,6 +896,7 @@ def _download_yfinance_chunk(
         pd.DataFrame(),
         pd.DataFrame(),
         pd.DataFrame(),
+        pd.DataFrame(),
         {
             "status": "failed",
             "retries": config.retry_count,
@@ -862,16 +910,18 @@ def _download_yfinance_chunk(
 def _download_yfinance(
     symbols: list[str],
     config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     price_frames: list[pd.DataFrame] = []
     raw_close_frames: list[pd.DataFrame] = []
     volume_frames: list[pd.DataFrame] = []
+    split_frames: list[pd.DataFrame] = []
     rows: list[dict[str, object]] = []
     for chunk in _chunks(symbols, config.price_chunk_size):
-        prices, raw_closes, volumes, status = _download_yfinance_chunk(chunk, config)
+        prices, raw_closes, volumes, stock_splits, status = _download_yfinance_chunk(chunk, config)
         price_frames.append(prices)
         raw_close_frames.append(raw_closes)
         volume_frames.append(volumes)
+        split_frames.append(stock_splits)
         returned = [symbol for symbol in chunk if symbol in prices.columns]
         missing = [symbol for symbol in chunk if symbol not in prices.columns]
         rows.append(
@@ -908,6 +958,9 @@ def _download_yfinance(
     volumes = (
         pd.concat(volume_frames, axis=1) if volume_frames else pd.DataFrame(index=prices.index)
     )
+    stock_splits = (
+        pd.concat(split_frames, axis=1) if split_frames else pd.DataFrame(index=prices.index)
+    )
     prices = prices.loc[:, ~prices.columns.duplicated()].sort_index()
     raw_closes = raw_closes.loc[:, ~raw_closes.columns.duplicated()].reindex(
         index=prices.index,
@@ -916,7 +969,15 @@ def _download_yfinance(
     volumes = volumes.loc[:, ~volumes.columns.duplicated()].reindex(
         index=prices.index, columns=prices.columns
     )
-    return prices, raw_closes, volumes, pd.DataFrame(rows)
+    stock_splits = (
+        stock_splits.loc[:, ~stock_splits.columns.duplicated()]
+        .reindex(
+            index=prices.index,
+            columns=prices.columns,
+        )
+        .fillna(0.0)
+    )
+    return prices, raw_closes, volumes, stock_splits, pd.DataFrame(rows)
 
 
 def _unix_seconds_for_date(value: str, *, add_days: int = 0) -> int:
@@ -1791,6 +1852,7 @@ def download_live_data(config: RunConfig) -> MarketData:
     prices = pd.DataFrame()
     raw_closes = pd.DataFrame()
     volumes = pd.DataFrame()
+    stock_splits = pd.DataFrame()
     yf_sources = pd.DataFrame()
     try:
         import yfinance  # noqa: F401  # type: ignore
@@ -1812,7 +1874,10 @@ def download_live_data(config: RunConfig) -> MarketData:
         )
     else:
         try:
-            prices, raw_closes, volumes, yf_sources = _download_yfinance(symbols, config)
+            prices, raw_closes, volumes, stock_splits, yf_sources = _download_yfinance(
+                symbols,
+                config,
+            )
         except Exception as exc:  # pragma: no cover - network dependent
             yf_sources = _source_frame(
                 [
@@ -2054,6 +2119,10 @@ def download_live_data(config: RunConfig) -> MarketData:
         raw_prices=downloaded_prices,
         raw_closes=downloaded_raw_closes,
         raw_volumes=downloaded_volumes,
+        stock_splits=stock_splits.reindex(
+            index=downloaded_prices.index,
+            columns=downloaded_prices.columns,
+        ).fillna(0.0),
     )
 
 

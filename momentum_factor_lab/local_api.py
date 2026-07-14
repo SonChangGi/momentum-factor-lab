@@ -183,6 +183,8 @@ def _validate_base_config(config: RunConfig) -> None:
         raise LocalAPIConfigurationError("local API requires the actual live-market data mode")
     if config.volumes_path is not None:
         raise LocalAPIConfigurationError("local API cannot use local volume files")
+    if config.market_caps_path is not None:
+        raise LocalAPIConfigurationError("local API cannot use local market-cap files")
     if config.max_price_symbols is not None:
         raise LocalAPIConfigurationError("local API cannot cap the requested price universe")
     if len(set(config.universe)) < MIN_FULL_UNIVERSE_SECURITY_COUNT:
@@ -278,6 +280,10 @@ def _validate_market(market: MarketData) -> None:
         "comparisonPrices": _canonical_matrix_sha256(
             market.comparison_prices.reindex(index=market.prices.index)
         ),
+        "marketCaps": _canonical_matrix_sha256(
+            market.market_caps.reindex(index=market.prices.index, columns=market.prices.columns)
+        ),
+        "marketCapSources": canonical_records_sha256(market.market_cap_sources),
     }
     if observed_hashes != hashes:
         raise LocalAPIRequestError(
@@ -372,11 +378,11 @@ def _validate_result_payload(
     if not isinstance(payload, dict):
         raise LocalAPIRequestError(500, "result_contract_mismatch", "result must be an object")
     result_key = str(identity["resultKey"])
-    if payload.get("schemaVersion") != 4:
+    if payload.get("schemaVersion") != 5:
         raise LocalAPIRequestError(
             500,
             "result_contract_mismatch",
-            "local API result must use schemaVersion 4",
+            "local API result must use schemaVersion 5",
         )
     if payload.get("resultIdentity") != identity or payload.get("resultKey") != result_key:
         raise LocalAPIRequestError(

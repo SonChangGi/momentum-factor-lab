@@ -18,7 +18,8 @@ from .advanced_factors import advanced_factor_definitions_frame, compute_advance
 from .backtest import BacktestResult, run_factor_backtest
 from .config import (
     ABSOLUTE_GUARDRAIL_VERSION,
-    JOINT_SELECTION_VERSION,
+    FACTOR_SELECTION_VERSION,
+    FIXED_WEIGHTING_POLICY,
     POLICY_REGISTRY,
     POLICY_REGISTRY_VERSION,
     RunConfig,
@@ -43,11 +44,11 @@ from .research_inputs import ResearchInputs
 
 
 RESEARCH_LIMITATIONS = (
-    "동일한 후행 평가기간에서 여러 팩터와 정책을 비교한 설명적 순위이므로 선택 편향이 있습니다.",
+    "동일한 후행 평가기간에서 여러 팩터를 비교한 설명적 순위이므로 선택 편향이 있습니다.",
     "현재 상장 종목 중심 입력은 역사적 구성종목·상장폐지·ticker reuse를 완전히 복원하지 못합니다.",
     "중간 quote gap은 종목별 sleeve NAV를 유지하지만 그 날짜의 일별 위험 수익률을 추정하지 않습니다.",
-    "PIT 시가총액 패널이 없어 규모 팩터는 사용하지 않으며 네 번째 정책은 후행 유동성만 사용합니다.",
-    "현재 연구 target은 마지막 입력일 신호로 만든 다음 세션 종가용 목표이며 이미 체결된 보유가 아닙니다.",
+    "시가총액은 실제 SEC 제출일 이후에만 사용하며 공시가 없는 종목은 추정값으로 채우지 않습니다.",
+    "표시 포트폴리오는 마지막 입력일 신호로 만든 다음 세션 종가용 연구 비중이며 이미 체결된 보유가 아닙니다.",
 )
 
 PERFORMANCE_CONTRACT_VERSION = "python-period-performance-v1"
@@ -74,7 +75,7 @@ SELECTED_HOLDING_HISTORY_CONTRACT_VERSION = 1
 SELECTED_HOLDING_HISTORY_SESSION_COUNT = 21
 SELECTED_HOLDING_HISTORY_WEIGHT_TIMING = "last_complete_close_after_execution_processing"
 FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT = "momentum-factor-holding-history-sidecar"
-FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION = 1
+FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION = 2
 FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY = "factor-holding-history"
 MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES = 5_000_000
 FACTOR_DIAGNOSTICS_CONTRACT_VERSION = 1
@@ -94,13 +95,14 @@ CANONICAL_ALIAS_FACTOR_COUNT = 3
 _DATA_SHORTAGE_POLICY_REASONS = frozenset(
     {
         "no_complete_signal_inputs",
-        "no_finite_trailing_volatility",
         "no_finite_trailing_dollar_volume",
+        "no_point_in_time_market_cap",
+        "no_complete_fixed_policy_inputs",
         "top_n_boundary_tie_has_no_finite_liquidity_tie_break",
     }
 )
 
-JOINT_TIE_BREAK_POLICY = (
+FACTOR_SELECTION_TIE_BREAK_POLICY = (
     "selection_score_desc",
     "base_composite_score_desc",
     "max_abs_leave_one_security_cagr_delta_asc",
@@ -235,26 +237,15 @@ def _names_by_symbol(market_data: MarketData) -> pd.Series:
     return names["name"].astype(str)
 
 
-def _policy_context(
-    prices: pd.DataFrame,
+def _liquidity_context(
     dollar_volumes: pd.DataFrame,
     config: RunConfig,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    exact_daily_returns = prices.divide(prices.shift(1)) - 1.0
-    exact_daily_returns = exact_daily_returns.where(prices.notna() & prices.shift(1).notna())
-    volatility = exact_daily_returns.rolling(
-        config.volatility_lookback_days,
-        min_periods=config.min_volatility_observations,
-    ).std(ddof=1) * np.sqrt(252.0)
-    liquidity = (
-        dollar_volumes.reindex(index=prices.index, columns=prices.columns)
-        .rolling(
-            config.liquidity_lookback_days,
-            min_periods=config.min_liquidity_observations,
-        )
-        .mean()
-    )
-    return volatility, liquidity
+) -> pd.DataFrame:
+    liquidity = dollar_volumes.rolling(
+        config.liquidity_lookback_days,
+        min_periods=config.min_liquidity_observations,
+    ).mean()
+    return liquidity
 
 
 def _recompute_selected_factor_panel(
@@ -557,7 +548,7 @@ def _policy_grid_reasons(
     evaluation_index: pd.DatetimeIndex,
     expected_factors: Collection[str],
 ) -> dict[str, dict[str, object] | None]:
-    """Require identical successful rebalance dates across all four policies."""
+    """Verify the complete fixed-policy factor execution grid."""
 
     factors = {str(factor) for factor in expected_factors}
     missing_pairs = sorted(
@@ -824,7 +815,7 @@ def _absolute_guardrail_profile(config: RunConfig) -> dict[str, Any]:
     }
 
 
-def _apply_joint_guardrails(
+def _apply_factor_guardrails(
     scored: pd.DataFrame,
     config: RunConfig,
 ) -> tuple[pd.DataFrame, str, str, str, dict[str, Any]]:
@@ -988,7 +979,7 @@ def _apply_joint_guardrails(
             ["factor", "policy_id", "guardrail_breaches"],
         ].to_dict(orient="records")
         raise ValueError(
-            "no factor-policy pair passes the absolute selection guardrails: "
+            "no factor passes the absolute selection guardrails under the fixed policy: "
             + json.dumps(detail, ensure_ascii=False)
         )
     sort_columns = [
@@ -1038,27 +1029,30 @@ def _apply_joint_guardrails(
     selected_row = result.loc[result["selected"]].iloc[0]
     selected_factor = str(selected_row["factor"])
     selected_policy = str(selected_row["policy_id"])
+    if selected_policy != FIXED_WEIGHTING_POLICY:
+        raise ValueError("factor selection attempted to optimize a non-fixed weighting policy")
     reason = (
-        f"Selected the joint factor-policy pair {selected_factor}@{selected_policy} with "
+        f"Selected factor {selected_factor} under the fixed {selected_policy} methodology with "
         f"selection score {float(selected_row['selection_score']):.4f} from every metric-complete "
-        f"independent pair under {ABSOLUTE_GUARDRAIL_VERSION}. Net Sharpe="
+        f"independent factor under {ABSOLUTE_GUARDRAIL_VERSION}. Net Sharpe="
         f"{float(selected_row['sharpe']):.4f}, MDD={float(selected_row['max_drawdown']):.4f}, "
         f"annualized cost drag={float(selected_row['annualized_cost_drag']):.4f}, maximum "
         f"exact one-session security contribution="
         f"{float(selected_row['max_abs_security_day_contribution']):.4f}."
     )
     decision = {
-        "method": "joint_factor_policy",
-        "version": JOINT_SELECTION_VERSION,
+        "method": "fixed_policy_factor_selection",
+        "version": FACTOR_SELECTION_VERSION,
         "dynamicSelection": True,
-        "selectedFactor": selected_factor,
-        "selectedPolicyId": selected_policy,
-        "selectedPolicyVersion": POLICY_REGISTRY[selected_policy]["version"],
-        "selectedBaseCompositeScore": float(selected_row["base_composite_score"]),
-        "selectedExtremeEventPenaltyPoints": float(selected_row["extreme_event_penalty_points"]),
-        "selectedSelectionScore": float(selected_row["selection_score"]),
+        "weightingPolicyOptimized": False,
+        "bestFactor": selected_factor,
+        "weightingPolicy": selected_policy,
+        "weightingPolicyVersion": POLICY_REGISTRY[selected_policy]["version"],
+        "bestBaseCompositeScore": float(selected_row["base_composite_score"]),
+        "bestExtremeEventPenaltyPoints": float(selected_row["extreme_event_penalty_points"]),
+        "bestSelectionScore": float(selected_row["selection_score"]),
         "guardrailProfile": _absolute_guardrail_profile(config),
-        "tieBreakPolicy": list(JOINT_TIE_BREAK_POLICY),
+        "tieBreakPolicy": list(FACTOR_SELECTION_TIE_BREAK_POLICY),
         "reason": reason,
     }
     return result, selected_factor, selected_policy, reason, decision
@@ -1140,19 +1134,20 @@ def _grid_accounting(
     if available_count + excluded_count != expected_count:
         raise ValueError("available plus excluded factor-policy rows must equal expected rows")
     return {
-        "version": 1,
+        "version": 2,
         "independentFactorCount": len(independent),
-        "policyCount": len(WEIGHTING_POLICIES),
-        "expectedIndependentPairCount": expected_count,
-        "evaluatedIndependentPairCount": len(independent_rows),
-        "availableIndependentPairCount": available_count,
-        "excludedIndependentPairCount": excluded_count,
-        "missingIndependentPairCount": 0,
+        "expectedIndependentFactorCount": expected_count,
+        "evaluatedIndependentFactorCount": len(independent_rows),
+        "availableIndependentFactorCount": available_count,
+        "excludedIndependentFactorCount": excluded_count,
+        "missingIndependentFactorCount": 0,
         "diagnosticAliasFactorCount": alias_factor_count,
-        "diagnosticAliasPairCount": alias_pair_count,
         "commonComparableFactorCount": common_count,
         "exclusionReasonCounts": dict(sorted(reason_counts.items())),
-        "invariant": "availableIndependentPairCount + excludedIndependentPairCount = expectedIndependentPairCount",
+        "invariant": (
+            "availableIndependentFactorCount + excludedIndependentFactorCount "
+            "= expectedIndependentFactorCount"
+        ),
     }
 
 
@@ -1245,8 +1240,8 @@ def _latest_portfolios(
     market: MarketData,
     config: RunConfig,
     policy_id: str,
-    trailing_volatility: pd.DataFrame,
     trailing_liquidity: pd.DataFrame,
+    trailing_market_cap: pd.DataFrame,
 ) -> dict[str, ModelPortfolio]:
     analysis_columns = [column for column in market.prices.columns if column != market.benchmark]
     names = _names_by_symbol(market)
@@ -1259,8 +1254,8 @@ def _latest_portfolios(
             market.eligibility_mask.loc[market.as_of].reindex(analysis_columns),
             config,
             policy_id=policy_id,
-            trailing_volatility=trailing_volatility.loc[market.as_of].reindex(analysis_columns),
             trailing_dollar_volume=trailing_liquidity.loc[market.as_of].reindex(analysis_columns),
+            trailing_market_cap=trailing_market_cap.loc[market.as_of].reindex(analysis_columns),
             names=names,
         )
         for factor, scores in factor_scores.items()
@@ -1585,7 +1580,14 @@ def run_analysis(
     prices = _analysis_prices(market)
     eligibility = market.eligibility_mask.reindex(columns=prices.columns).fillna(False)
     dollar_volumes = market.dollar_volumes.reindex(index=prices.index, columns=prices.columns)
-    volatility, liquidity = _policy_context(prices, dollar_volumes, config)
+    liquidity = _liquidity_context(dollar_volumes, config)
+    market_caps = market.market_caps.reindex(index=prices.index, columns=prices.columns)
+    latest_market_cap_coverage = float(market_caps.loc[market.as_of].notna().mean())
+    if latest_market_cap_coverage < config.market_cap_min_universe_coverage:
+        raise ValueError(
+            "point-in-time market-cap coverage is insufficient for the fixed methodology: "
+            f"{latest_market_cap_coverage:.2%}"
+        )
     definitions = _canonical_factor_definitions()
     independent_definitions = definitions.loc[
         definitions["compatibility_alias_of"].isna()
@@ -1638,8 +1640,8 @@ def run_analysis(
                 panel,
                 config,
                 eligibility_mask=eligibility,
-                trailing_volatility=volatility,
                 trailing_dollar_volume=liquidity,
+                trailing_market_cap=market_caps,
                 retain_weight_history=False,
             )
 
@@ -1686,8 +1688,8 @@ def run_analysis(
             market,
             config,
             policy,
-            volatility,
             liquidity,
+            market_caps,
         )
         for policy in WEIGHTING_POLICIES
     }
@@ -1705,19 +1707,19 @@ def run_analysis(
                 factor_input_issues=advanced_input_issues,
             )
         )
-    joint_raw = pd.concat(raw_by_policy, ignore_index=True, sort=False)
-    joint_scored = _with_exclusion_accounting(
-        _score_factor_metrics(joint_raw, config),
+    factor_metrics = pd.concat(raw_by_policy, ignore_index=True, sort=False)
+    factor_scored = _with_exclusion_accounting(
+        _score_factor_metrics(factor_metrics, config),
         config,
     )
     (
-        joint_ranking,
+        factor_ranking,
         selected_factor,
         selected_policy,
         selected_reason,
-        joint_decision,
-    ) = _apply_joint_guardrails(
-        joint_scored,
+        factor_decision,
+    ) = _apply_factor_guardrails(
+        factor_scored,
         config,
     )
     names = _names_by_symbol(market)
@@ -1732,8 +1734,8 @@ def run_analysis(
             panel,
             config,
             eligibility_mask=eligibility,
-            trailing_volatility=volatility,
             trailing_dollar_volume=liquidity,
+            trailing_market_cap=market_caps,
             retain_weight_history=True,
             weight_history_tail_sessions=SELECTED_HOLDING_HISTORY_SESSION_COUNT,
         )
@@ -1753,33 +1755,31 @@ def run_analysis(
         retain_selected_policy_history(factor, panel)
     if set(factor_holding_histories) != expected_factor_names:
         raise ValueError("implementation_error_factor_holding_history_execution_set")
-    grid_accounting = _grid_accounting(joint_ranking, definitions)
-    joint_decision = {
-        **joint_decision,
+    grid_accounting = _grid_accounting(factor_ranking, definitions)
+    factor_decision = {
+        **factor_decision,
         "evaluationStart": evaluation_index.min().date().isoformat(),
         "evaluationEnd": evaluation_index.max().date().isoformat(),
         "evaluationWindowDays": len(evaluation_index),
         "minimumObservations": config.min_evaluation_observations,
         "minimumValuationCoverage": config.min_valuation_coverage,
         "minimumDailyRiskObservations": config.min_daily_risk_observations,
-        "selectionEligiblePairCount": int(joint_ranking["selection_eligible"].sum()),
-        "gridAccounting": grid_accounting,
+        "selectionEligibleFactorCount": int(factor_ranking["selection_eligible"].sum()),
+        "factorAccounting": grid_accounting,
     }
     policy_comparison = _policy_diagnostics(
-        joint_ranking,
+        factor_ranking,
         definitions,
         selected_factor,
         selected_policy,
     )
     policy_decision = {
-        "diagnosticOnly": True,
-        "selectedByPolicyAggregate": False,
+        "fixed": True,
+        "optimized": False,
+        "policyId": FIXED_WEIGHTING_POLICY,
         "policyCount": len(WEIGHTING_POLICIES),
         "commonComparableFactorCount": grid_accounting["commonComparableFactorCount"],
-        "note": (
-            "Policy medians are descriptive diagnostics only; the winner is selected directly "
-            "from the complete independent factor-policy grid."
-        ),
+        "note": "Every factor is evaluated under the same fixed allocation methodology.",
     }
     portfolios = portfolios_by_policy[selected_policy]
     selected_portfolio = portfolios[selected_factor]
@@ -1791,15 +1791,15 @@ def run_analysis(
         market_data=market,
         factor_scores=latest_scores,
         backtests=all_backtests[selected_policy],
-        policy_factor_metrics=joint_ranking,
+        policy_factor_metrics=factor_ranking,
         policy_comparison=policy_comparison,
         selected_policy=selected_policy,
         selected_policy_reason=selected_reason,
         policy_selection_decision=policy_decision,
-        factor_ranking=joint_ranking,
+        factor_ranking=factor_ranking,
         selected_factor=selected_factor,
         selected_reason=selected_reason,
-        factor_selection_decision=joint_decision,
+        factor_selection_decision=factor_decision,
         model_portfolio=selected_portfolio,
         factor_portfolios=portfolios,
         factor_definitions=definitions,
@@ -1844,8 +1844,10 @@ def _normalized_curve(series: pd.Series, dates: pd.DatetimeIndex) -> list[float 
     valid = aligned.dropna()
     if valid.empty:
         return [None] * len(dates)
-    prior = numeric.loc[numeric.index < dates[0]].dropna() if len(dates) else numeric.iloc[0:0]
-    base = float(prior.iloc[-1] if not prior.empty else valid.iloc[0])
+    # ``dates`` includes the session immediately before the evaluation-return
+    # window. Keeping that explicit 1.0 boundary makes the first evaluation
+    # return visible and prevents a browser from silently rebasing it away.
+    base = float(valid.iloc[0])
     if not np.isfinite(base) or base == 0.0:
         return [None] * len(dates)
     return [float(value / base) if pd.notna(value) else None for value in aligned]
@@ -2091,13 +2093,12 @@ def _public_config(config: RunConfig) -> dict[str, Any]:
         "score_winsor_lower": config.score_winsor_lower,
         "score_winsor_upper": config.score_winsor_upper,
         "weighting_policies": list(config.weighting_policies),
-        "volatility_lookback_days": config.volatility_lookback_days,
-        "min_volatility_observations": config.min_volatility_observations,
-        "volatility_floor": config.volatility_floor,
-        "volatility_cap": config.volatility_cap,
-        "score_liquidity_score_weight": config.score_liquidity_score_weight,
-        "score_liquidity_liquidity_weight": config.score_liquidity_liquidity_weight,
-        "score_liquidity_rank_floor": config.score_liquidity_rank_floor,
+        "allocation_score_weight": config.allocation_score_weight,
+        "allocation_liquidity_weight": config.allocation_liquidity_weight,
+        "allocation_market_cap_weight": config.allocation_market_cap_weight,
+        "allocation_rank_floor": config.allocation_rank_floor,
+        "market_cap_max_age_days": config.market_cap_max_age_days,
+        "market_cap_min_universe_coverage": config.market_cap_min_universe_coverage,
         "selection_min_sharpe": config.selection_min_sharpe,
         "selection_max_drawdown": config.selection_max_drawdown,
         "selection_max_annualized_cost_drag": config.selection_max_annualized_cost_drag,
@@ -2119,7 +2120,7 @@ def _public_config(config: RunConfig) -> dict[str, Any]:
         "universe_profile": config.universe_profile,
         "candidate_universe_size": len(config.universe),
         "policy_registry_version": POLICY_REGISTRY_VERSION,
-        "joint_selection_version": JOINT_SELECTION_VERSION,
+        "factor_selection_version": FACTOR_SELECTION_VERSION,
         "absolute_guardrail_version": ABSOLUTE_GUARDRAIL_VERSION,
     }
 
@@ -2325,7 +2326,7 @@ def _factor_holding_history_sidecar_data(result: AnalysisResult) -> dict[str, An
         "contract": FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT,
         "contractVersion": FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION,
         "resultKey": result.result_identity["resultKey"],
-        "selectedWeightingPolicy": result.selected_policy,
+        "weightingPolicy": result.selected_policy,
         "weightTiming": SELECTED_HOLDING_HISTORY_WEIGHT_TIMING,
         "startDate": dates[0],
         "endDate": dates[-1],
@@ -2359,7 +2360,7 @@ def _factor_holding_history_sidecar_manifest(result: AnalysisResult) -> dict[str
         "sha256": hashlib.sha256(encoded).hexdigest(),
         "bytes": len(encoded),
         "resultKey": result_key,
-        "selectedWeightingPolicy": result.selected_policy,
+        "weightingPolicy": result.selected_policy,
         "weightTiming": SELECTED_HOLDING_HISTORY_WEIGHT_TIMING,
         "startDate": sidecar["startDate"],
         "endDate": sidecar["endDate"],
@@ -2424,7 +2425,7 @@ def _current_transition_payload(result: AnalysisResult) -> dict[str, Any]:
 def result_payload(result: AnalysisResult) -> dict[str, Any]:
     market = result.market_data
     config = result.config
-    curve_dates = pd.DatetimeIndex(market.prices.index[-config.evaluation_window_days :])
+    curve_dates = pd.DatetimeIndex(market.prices.index[-(config.evaluation_window_days + 1) :])
     definitions = result.factor_definitions.copy()
     for column in ("limitations", "references"):
         definitions[column] = definitions.get(column, pd.Series(dtype=object)).map(
@@ -2461,26 +2462,27 @@ def result_payload(result: AnalysisResult) -> dict[str, Any]:
     )
     selected_backtest = result.backtests[result.selected_factor]
     payload = {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "resultKey": result.result_identity["resultKey"],
         "resultIdentity": result.result_identity,
         "generatedAtUtc": result.generated_at_utc.isoformat(),
-        "selectedFactor": result.selected_factor,
-        "selectedWeightingPolicy": result.selected_policy,
-        "selectedReason": result.selected_reason,
-        "selectionDecision": result.factor_selection_decision,
-        "gridAccounting": result.grid_accounting,
-        "factorPolicyRanking": result.factor_ranking.to_dict(orient="records"),
-        "policyDiagnostics": result.policy_comparison.to_dict(orient="records"),
-        "weightingPolicyRegistry": {
+        "bestFactor": result.selected_factor,
+        "weightingPolicy": result.selected_policy,
+        "bestFactorReason": result.selected_reason,
+        "factorSelectionDecision": result.factor_selection_decision,
+        "factorAccounting": result.grid_accounting,
+        "factorRanking": result.factor_ranking.to_dict(orient="records"),
+        "weightingMethodology": {
             "registryVersion": POLICY_REGISTRY_VERSION,
-            "policies": POLICY_REGISTRY,
+            "policyId": result.selected_policy,
+            "policy": POLICY_REGISTRY[result.selected_policy],
+            "optimized": False,
         },
         "contributionDiagnostics": selected_backtest.contribution_diagnostics.to_dict(),
-        "portfolioPolicy": {
-            "selectedPolicyId": result.selected_policy,
+        "allocationMethod": {
+            "policyId": result.selected_policy,
             "version": POLICY_REGISTRY[result.selected_policy]["version"],
-            "selectedReason": result.selected_policy_reason,
+            "fixed": True,
             "historyCurrentParity": {
                 "targetWeightKernel": True,
                 "capAndCashContract": True,
@@ -2490,16 +2492,17 @@ def result_payload(result: AnalysisResult) -> dict[str, Any]:
                 "currentTransitionBasis": "latest_observed_close_indicative",
                 "actualNextCloseTransitionKnown": False,
             },
-            "policyAggregateDiagnostics": result.policy_selection_decision,
             "parameters": {
                 "topN": config.top_n,
                 "maxWeight": config.max_weight,
                 "rebalanceFrequency": config.rebalance_frequency,
                 "transactionCostBps": config.transaction_cost_bps,
                 "slippageBps": config.slippage_bps,
-                "volatilityLookbackDays": config.volatility_lookback_days,
-                "volatilityFloor": config.volatility_floor,
-                "volatilityCap": config.volatility_cap,
+                "factorScoreWeight": config.allocation_score_weight,
+                "liquidityWeight": config.allocation_liquidity_weight,
+                "marketCapWeight": config.allocation_market_cap_weight,
+                "rankFloor": config.allocation_rank_floor,
+                "marketCapMaximumAgeDays": config.market_cap_max_age_days,
             },
         },
         "researchScope": {
@@ -2565,10 +2568,18 @@ def result_payload(result: AnalysisResult) -> dict[str, Any]:
             "comparisonPricesSha256": market.input_sha256.get("comparisonPrices"),
             "liquidityFilterApplied": config.min_avg_dollar_volume > 0.0,
             "notes": market.notes,
+            "pointInTimeMarketCapAvailable": not market.market_caps.empty,
+            "latestMarketCapSecurityCount": int(
+                market.market_caps.loc[market.as_of]
+                .drop(labels=[market.benchmark], errors="ignore")
+                .notna()
+                .sum()
+            ),
+            "marketCapSourcesSha256": market.input_sha256.get("marketCapSources"),
         },
         "selectionMethod": {
-            "name": "joint_factor_policy_absolute_guardrails",
-            "version": JOINT_SELECTION_VERSION,
+            "name": "fixed_policy_factor_selection_absolute_guardrails",
+            "version": FACTOR_SELECTION_VERSION,
             "guardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
             "evaluationWindowDays": config.evaluation_window_days,
             "minimumObservations": config.min_evaluation_observations,
@@ -2579,15 +2590,15 @@ def result_payload(result: AnalysisResult) -> dict[str, Any]:
             "signalTiming": "close_t",
             "executionTiming": "next_session_close",
             "returnExposureStarts": "following_close_to_close_session",
-            "tieBreakPolicy": list(JOINT_TIE_BREAK_POLICY),
-            "policyAggregatesAreDiagnosticOnly": True,
-            "equalWeightIsPeerCandidate": True,
+            "tieBreakPolicy": list(FACTOR_SELECTION_TIE_BREAK_POLICY),
+            "weightingPolicyOptimized": False,
+            "fixedWeightingPolicy": FIXED_WEIGHTING_POLICY,
         },
-        "currentResearchTarget": result.model_portfolio.to_dict(),
+        "bestFactorPortfolio": result.model_portfolio.to_dict(),
         "backtestHeldPortfolio": _held_portfolio_payload(result),
-        "selectedBacktestHoldingHistory": _selected_backtest_holding_history_payload(result),
+        "bestFactorBacktestHoldingHistory": _selected_backtest_holding_history_payload(result),
         "factorHoldingHistorySidecar": _factor_holding_history_sidecar_manifest(result),
-        "currentTransition": _current_transition_payload(result),
+        "bestFactorTransition": _current_transition_payload(result),
         "factorPortfolios": {
             factor: portfolio.to_dict() for factor, portfolio in result.factor_portfolios.items()
         },
@@ -2614,17 +2625,18 @@ def result_payload(result: AnalysisResult) -> dict[str, Any]:
         "meta": {
             "factorCount": len(result.factor_scores),
             "independentFactorCount": result.grid_accounting["independentFactorCount"],
-            "availableIndependentPairCount": result.grid_accounting[
-                "availableIndependentPairCount"
+            "availableIndependentFactorCount": result.grid_accounting[
+                "availableIndependentFactorCount"
             ],
-            "excludedIndependentPairCount": result.grid_accounting["excludedIndependentPairCount"],
+            "excludedIndependentFactorCount": result.grid_accounting[
+                "excludedIndependentFactorCount"
+            ],
             "aliasFactorCount": result.grid_accounting["diagnosticAliasFactorCount"],
             "portfolioCount": len(result.factor_portfolios),
-            "policyCount": len(result.policy_comparison),
-            "policyFactorRunCount": len(result.factor_ranking),
+            "factorRunCount": len(result.factor_ranking),
             "runtimeSeconds": result.runtime_seconds,
             "maxRssBytes": result.max_rss_bytes,
-            "purpose": "actual_market_momentum_factor_and_weighting_policy_comparison",
+            "purpose": "input_driven_momentum_factor_comparison_with_fixed_weighting",
             "factorDefinitionSha256": factor_definition_sha256(),
             "policyDefinitionSha256": policy_definition_sha256(),
             "selectionSpecSha256": selection_spec_sha256(config),
@@ -2652,6 +2664,6 @@ def write_result_json(result: AnalysisResult) -> Path:
 
 def load_result_payload(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schemaVersion") != 4:
-        raise ValueError("dashboard input must use schemaVersion 4")
+    if payload.get("schemaVersion") != 5:
+        raise ValueError("dashboard input must use schemaVersion 5")
     return payload

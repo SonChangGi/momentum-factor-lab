@@ -704,6 +704,7 @@ def test_live_download_preserves_yfinance_yahoo_chart_stooq_finance_datareader_o
             prices,
             prices.copy(),
             volumes,
+            pd.DataFrame(0.0, index=dates, columns=prices.columns),
             pd.DataFrame(
                 [
                     {
@@ -859,13 +860,15 @@ def test_yfinance_chunk_uses_csv_json_price_cache_without_network(tmp_path):
         cached_prices,
         cached_prices,
         cached_volumes,
+        pd.DataFrame(0.0, index=dates, columns=cached_prices.columns),
         provider="yfinance",
         symbols=symbols,
     )
-    prices, raw_closes, volumes, status = _download_yfinance_chunk(symbols, config)
+    prices, raw_closes, volumes, stock_splits, status = _download_yfinance_chunk(symbols, config)
     pd.testing.assert_frame_equal(prices, cached_prices, check_freq=False)
     pd.testing.assert_frame_equal(raw_closes, cached_prices, check_freq=False)
     pd.testing.assert_frame_equal(volumes, cached_volumes, check_freq=False)
+    assert stock_splits.eq(0.0).all().all()
     assert status["status"] == "cache_hit"
     assert status["cache_path"] == str(cache_path)
     assert status["cache_format"] == "csv+json"
@@ -894,19 +897,20 @@ def test_yfinance_cache_v3_records_hashes_timestamps_asof_and_symbols(tmp_path):
         prices,
         prices,
         volumes,
+        pd.DataFrame(0.0, index=dates, columns=prices.columns),
         provider="yfinance",
         symbols=symbols,
     )
     paths = _price_cache_component_paths(metadata_path)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
-    assert metadata["version"] == PRICE_CACHE_VERSION == 3
+    assert metadata["version"] == PRICE_CACHE_VERSION == 4
     assert metadata["provider"] == "yfinance"
     assert metadata["symbols"] == metadata["returnedSymbols"] == symbols
     assert metadata["observedAsOf"] == dates[-1].date().isoformat()
     assert datetime.fromisoformat(metadata["createdAtUtc"]).tzinfo is not None
     assert datetime.fromisoformat(metadata["checkedAtUtc"]).tzinfo is not None
-    for name in ("prices", "raw_closes", "volumes"):
+    for name in ("prices", "raw_closes", "volumes", "stock_splits"):
         encoded = paths[name].read_bytes()
         reference = metadata["components"][name]
         assert reference["file"] == paths[name].name
@@ -949,6 +953,7 @@ def test_yfinance_cache_same_asof_content_mutation_changes_component_identity(tm
         first,
         first,
         volumes,
+        pd.DataFrame(0.0, index=dates, columns=first.columns),
         provider="yfinance",
         symbols=symbols,
     )
@@ -958,6 +963,7 @@ def test_yfinance_cache_same_asof_content_mutation_changes_component_identity(tm
         revised,
         revised,
         volumes,
+        pd.DataFrame(0.0, index=dates, columns=revised.columns),
         provider="yfinance",
         symbols=symbols,
     )
@@ -995,6 +1001,7 @@ def test_yfinance_component_tampering_bypasses_cache_and_refetches(monkeypatch, 
         cached_prices,
         cached_prices,
         cached_volumes,
+        pd.DataFrame(0.0, index=dates, columns=cached_prices.columns),
         provider="yfinance",
         symbols=symbols,
     )
@@ -1019,7 +1026,7 @@ def test_yfinance_component_tampering_bypasses_cache_and_refetches(monkeypatch, 
     )
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda **_: fresh_raw))
 
-    prices, _, _, status = _download_yfinance_chunk(symbols, config)
+    prices, _, _, _, status = _download_yfinance_chunk(symbols, config)
 
     assert status["status"] == "fetched"
     assert prices["AAA"].tolist() == [10.0, 11.0, 12.0]
@@ -1055,6 +1062,7 @@ def test_yfinance_refresh_flag_and_ttl_bypass_cache(monkeypatch, tmp_path, refre
         old,
         old,
         volumes,
+        pd.DataFrame(0.0, index=dates, columns=old.columns),
         provider="yfinance",
         symbols=symbols,
     )
@@ -1074,7 +1082,7 @@ def test_yfinance_refresh_flag_and_ttl_bypass_cache(monkeypatch, tmp_path, refre
 
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
 
-    prices, _, _, status = _download_yfinance_chunk(symbols, config)
+    prices, _, _, _, status = _download_yfinance_chunk(symbols, config)
 
     assert len(calls) == 1
     assert status["status"] == "fetched"
@@ -1151,12 +1159,13 @@ def test_yfinance_chunk_does_not_use_pickle_cache(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda **kwargs: raw))
 
     config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
-    prices, raw_closes, volumes, status = _download_yfinance_chunk(["AAA"], config)
+    prices, raw_closes, volumes, stock_splits, status = _download_yfinance_chunk(["AAA"], config)
 
     assert status["status"] == "fetched"
     assert list(prices.columns) == ["AAA"]
     assert list(raw_closes.columns) == ["AAA"]
     assert list(volumes.columns) == ["AAA"]
+    assert list(stock_splits.columns) == ["AAA"]
     assert not list(tmp_path.rglob("*.pkl"))
     assert not str(status.get("cache_path", "")).endswith(".pkl")
     source = inspect.getsource(data)
@@ -1195,7 +1204,9 @@ def test_yfinance_chunk_passes_inclusive_config_end_date(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
 
     config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date="2024-01-10")
-    prices, raw_closes, volumes, status = _download_yfinance_chunk(["AAA", "BBB"], config)
+    prices, raw_closes, volumes, stock_splits, status = _download_yfinance_chunk(
+        ["AAA", "BBB"], config
+    )
 
     assert captured["end"] == "2024-01-11"
     assert captured["start"] == "2024-01-01"
@@ -1203,6 +1214,7 @@ def test_yfinance_chunk_passes_inclusive_config_end_date(monkeypatch, tmp_path):
     assert list(prices.columns) == ["AAA", "BBB"]
     assert list(raw_closes.columns) == ["AAA", "BBB"]
     assert list(volumes.columns) == ["AAA", "BBB"]
+    assert list(stock_splits.columns) == ["AAA", "BBB"]
 
 
 def test_yfinance_chunk_leaves_open_ended_download_without_end(monkeypatch, tmp_path):
@@ -1219,7 +1231,7 @@ def test_yfinance_chunk_leaves_open_ended_download_without_end(monkeypatch, tmp_
     monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=fake_download))
 
     config = RunConfig(cache_dir=tmp_path, start_date="2024-01-01", end_date=None)
-    prices, raw_closes, _, status = _download_yfinance_chunk(["AAA"], config)
+    prices, raw_closes, _, _, status = _download_yfinance_chunk(["AAA"], config)
 
     assert captured["end"] is None
     assert status["status"] == "fetched"

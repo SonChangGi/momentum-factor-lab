@@ -24,7 +24,7 @@ def test_stress_recomputation_rejects_a_mutated_nonselected_current_metric(
     stress_module: ModuleType,
 ) -> None:
     payload = result_payload(demo_result)
-    row = next(item for item in payload["factorPolicyRanking"] if not item["selected"])
+    row = next(item for item in payload["factorRanking"] if not item["selected"])
     row["current_target_effective_names"] += 100.0
 
     failures, _, checked = stress_module._recompute_all_current_portfolios(
@@ -32,7 +32,7 @@ def test_stress_recomputation_rejects_a_mutated_nonselected_current_metric(
         payload,
     )
 
-    assert checked == 256
+    assert checked == 64
     assert (
         "recomputed_current:"
         f"{row['policy_id']}:{row['factor']}:"
@@ -45,7 +45,7 @@ def test_stress_payload_contract_rejects_a_same_length_mutated_guardrail_profile
     stress_module: ModuleType,
 ) -> None:
     payload = result_payload(demo_result)
-    payload["selectionDecision"]["guardrailProfile"]["rules"][0]["threshold"] += 1.0
+    payload["factorSelectionDecision"]["guardrailProfile"]["rules"][0]["threshold"] += 1.0
 
     failures = stress_module._validate_payload_contract(
         payload,

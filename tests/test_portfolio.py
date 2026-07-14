@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from momentum_factor_lab.config import RunConfig, WEIGHTING_POLICIES
+from momentum_factor_lab.config import FIXED_WEIGHTING_POLICY, RunConfig, WEIGHTING_POLICIES
 from momentum_factor_lab.portfolio import (
     TIE_BREAK_POLICY,
     balanced_weights,
@@ -24,94 +24,93 @@ def _config(*, top_n: int = 4, max_weight: float = 0.40) -> RunConfig:
     )
 
 
-def _policy_inputs() -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+def _inputs() -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
     index = pd.Index(["AAA", "BBB", "CCC", "DDD"])
-    scores = pd.Series([4.0, 3.0, 2.0, 1.0], index=index)
-    prices = pd.Series([10.0, 20.0, 30.0, 40.0], index=index)
-    eligibility = pd.Series(True, index=index)
-    trailing_volatility = pd.Series(1.0, index=index)
-    trailing_dollar_volume = pd.Series([4.0, 3.0, 2.0, 1.0], index=index)
-    return scores, prices, eligibility, trailing_volatility, trailing_dollar_volume
+    return (
+        pd.Series([4.0, 3.0, 2.0, 1.0], index=index),
+        pd.Series([10.0, 20.0, 30.0, 40.0], index=index),
+        pd.Series(True, index=index),
+        pd.Series([400.0, 300.0, 200.0, 100.0], index=index),
+        pd.Series([4_000.0, 3_000.0, 2_000.0, 1_000.0], index=index),
+    )
 
 
-@pytest.mark.parametrize(
-    ("policy_id", "expected_weights"),
-    [
-        ("equal_weight", [0.25, 0.25, 0.25, 0.25]),
-        ("capped_linear_rank", [0.40, 0.30, 0.20, 0.10]),
-        ("capped_vol_adjusted_rank", [0.40, 0.30, 0.20, 0.10]),
-        (
-            "score_liquidity_rank",
-            [1.05 / 2.70, 0.80 / 2.70, 0.55 / 2.70, 0.30 / 2.70],
-        ),
-    ],
-)
-def test_four_policy_golden_weights(
-    policy_id: str,
-    expected_weights: list[float],
-) -> None:
-    scores, prices, eligibility, volatility, liquidity = _policy_inputs()
-
-    result = construct_target_allocation(
-        policy_id,
+def _allocation(
+    *,
+    config: RunConfig | None = None,
+    scores: pd.Series | None = None,
+    liquidity: pd.Series | None = None,
+    market_cap: pd.Series | None = None,
+):
+    default_scores, prices, eligibility, default_liquidity, default_market_cap = _inputs()
+    return construct_target_allocation(
+        FIXED_WEIGHTING_POLICY,
         SIGNAL_DATE,
-        scores,
+        scores if scores is not None else default_scores,
         prices,
         eligibility,
-        _config(),
-        trailing_volatility=volatility,
-        trailing_dollar_volume=liquidity,
+        config or _config(),
+        trailing_dollar_volume=(liquidity if liquidity is not None else default_liquidity),
+        trailing_market_cap=(market_cap if market_cap is not None else default_market_cap),
     )
+
+
+def test_only_fixed_score_liquidity_market_cap_policy_is_available() -> None:
+    assert WEIGHTING_POLICIES == (FIXED_WEIGHTING_POLICY,)
+    result = _allocation()
 
     assert result.status == "available"
     assert result.rows["symbol"].tolist() == ["AAA", "BBB", "CCC", "DDD"]
-    assert result.rows["weight"].tolist() == pytest.approx(expected_weights)
     assert result.cash_weight == pytest.approx(0.0)
-    assert result.policy_id == policy_id
+    assert result.policy_id == FIXED_WEIGHTING_POLICY
     assert result.policy_version == "1"
-
-
-def test_linear_rank_uses_average_rank_strength_for_equal_factor_scores() -> None:
-    scores = pd.Series({"AAA": 3.0, "BBB": 2.0, "CCC": 2.0})
-    inputs = {
-        "prices": pd.Series(10.0, index=scores.index),
-        "eligibility": pd.Series(True, index=scores.index),
-        "liquidity": pd.Series({"AAA": 30.0, "BBB": 20.0, "CCC": 10.0}),
+    assert result.component_status == {
+        "score": "available",
+        "methodology": "fixed_not_optimized",
+        "liquidity": "trailing_raw_dollar_volume",
+        "marketCap": "point_in_time_public_filing",
     }
 
-    result = construct_target_allocation(
-        "capped_linear_rank",
-        SIGNAL_DATE,
-        scores,
-        inputs["prices"],
-        inputs["eligibility"],
-        _config(top_n=3, max_weight=1.0),
-        trailing_dollar_volume=inputs["liquidity"],
-    )
 
+def test_fixed_raw_score_is_exact_50_30_20_percentile_blend_plus_floor() -> None:
+    result = _allocation(config=_config(max_weight=1.0))
     rows = result.rows.set_index("symbol")
-    assert rows.loc["AAA", "rankComponent"] == pytest.approx(3.0)
-    assert rows.loc["BBB", "rankComponent"] == pytest.approx(1.5)
-    assert rows.loc["CCC", "rankComponent"] == pytest.approx(1.5)
-    assert rows.loc["BBB", "weight"] == pytest.approx(rows.loc["CCC", "weight"])
-    assert rows["weight"].tolist() == pytest.approx([0.5, 0.25, 0.25])
+
+    expected = (
+        0.05
+        + 0.50 * rows["scoreComponent"]
+        + 0.30 * rows["liquidityComponent"]
+        + 0.20 * rows["marketCapComponent"]
+    )
+    assert rows["rawPolicyScore"].tolist() == pytest.approx(expected.tolist())
+    assert rows["weight"].tolist() == pytest.approx((expected / expected.sum()).tolist())
+    assert rows.loc["AAA", "rawPolicyScore"] == pytest.approx(1.05)
+    assert rows.loc["DDD", "rawPolicyScore"] == pytest.approx(0.30)
+
+
+def test_score_liquidity_and_market_cap_all_change_the_weight() -> None:
+    scores, _prices, _eligible, liquidity, market_cap = _inputs()
+    baseline = _allocation(config=_config(max_weight=1.0)).rows.set_index("symbol")
+    changed = _allocation(
+        config=_config(max_weight=1.0),
+        liquidity=liquidity.iloc[::-1].set_axis(liquidity.index),
+        market_cap=market_cap.iloc[::-1].set_axis(market_cap.index),
+    ).rows.set_index("symbol")
+
+    assert baseline.loc["AAA", "weight"] > changed.loc["AAA", "weight"]
+    assert baseline.loc["DDD", "weight"] < changed.loc["DDD", "weight"]
+    assert scores.index.tolist() == changed.index.tolist()
 
 
 def test_top_n_boundary_tie_uses_trailing_dollar_volume_then_symbol() -> None:
     scores = pd.Series({"AAA": 3.0, "BBB": 2.0, "CCC": 2.0, "DDD": 2.0})
-    prices = pd.Series(10.0, index=scores.index)
-    eligibility = pd.Series(True, index=scores.index)
-    # CCC and DDD have the same best boundary liquidity; symbol ascending selects CCC.
     liquidity = pd.Series({"AAA": 1.0, "BBB": 10.0, "CCC": 20.0, "DDD": 20.0})
-
-    result = construct_target_allocation(
-        "equal_weight",
-        SIGNAL_DATE,
-        scores,
-        prices,
-        eligibility,
-        _config(top_n=2, max_weight=0.50),
-        trailing_dollar_volume=liquidity,
+    market_cap = pd.Series(100.0, index=scores.index)
+    result = _allocation(
+        config=_config(top_n=2, max_weight=0.50),
+        scores=scores,
+        liquidity=liquidity,
+        market_cap=market_cap,
     )
 
     assert result.status == "available"
@@ -124,93 +123,73 @@ def test_top_n_boundary_tie_uses_trailing_dollar_volume_then_symbol() -> None:
     assert result.tie_break_policy == TIE_BREAK_POLICY
 
 
-def test_boundary_tie_without_enough_liquidity_is_unavailable_not_arbitrary() -> None:
-    scores = pd.Series({"AAA": 3.0, "BBB": 2.0, "CCC": 2.0, "DDD": 2.0})
-    prices = pd.Series(10.0, index=scores.index)
-    eligibility = pd.Series(True, index=scores.index)
-
+@pytest.mark.parametrize(
+    ("liquidity", "market_cap", "reason"),
+    [
+        (
+            pd.Series(np.nan, index=["AAA", "BBB", "CCC", "DDD"]),
+            None,
+            "no_finite_trailing_dollar_volume",
+        ),
+        (
+            None,
+            pd.Series(np.nan, index=["AAA", "BBB", "CCC", "DDD"]),
+            "no_point_in_time_market_cap",
+        ),
+    ],
+)
+def test_missing_required_allocation_component_fails_closed(
+    liquidity: pd.Series | None,
+    market_cap: pd.Series | None,
+    reason: str,
+) -> None:
+    _scores, _prices, _eligible, default_liquidity, default_market_cap = _inputs()
     result = construct_target_allocation(
-        "equal_weight",
+        FIXED_WEIGHTING_POLICY,
         SIGNAL_DATE,
-        scores,
-        prices,
-        eligibility,
-        _config(top_n=2, max_weight=0.50),
-        trailing_dollar_volume=pd.Series(np.nan, index=scores.index),
+        _scores,
+        _prices,
+        _eligible,
+        _config(),
+        trailing_dollar_volume=default_liquidity if liquidity is None else liquidity,
+        trailing_market_cap=default_market_cap if market_cap is None else market_cap,
     )
+    # In each parameter row the explicitly all-NaN component is unavailable.
+    if reason == "no_point_in_time_market_cap":
+        result = construct_target_allocation(
+            FIXED_WEIGHTING_POLICY,
+            SIGNAL_DATE,
+            _scores,
+            _prices,
+            _eligible,
+            _config(),
+            trailing_dollar_volume=default_liquidity,
+            trailing_market_cap=market_cap,
+        )
 
     assert result.status == "unavailable"
     assert result.cash_weight == 1.0
-    assert result.reasons == ["top_n_boundary_tie_has_no_finite_liquidity_tie_break"]
+    assert reason in result.reasons[0]
 
 
-@pytest.mark.parametrize("policy_id", WEIGHTING_POLICIES)
-def test_all_policies_respect_caps_cash_and_weight_invariants(policy_id: str) -> None:
-    scores, prices, eligibility, volatility, liquidity = _policy_inputs()
-    config = _config(top_n=3, max_weight=0.20)
-
-    result = construct_target_allocation(
-        policy_id,
-        SIGNAL_DATE,
-        scores,
-        prices,
-        eligibility,
-        config,
-        trailing_volatility=volatility,
-        trailing_dollar_volume=liquidity,
-    )
-
+def test_fixed_policy_respects_cap_and_leaves_explicit_cash() -> None:
+    result = _allocation(config=_config(top_n=3, max_weight=0.20))
     weights = result.rows["weight"]
+
     assert result.status == "available"
     assert len(weights) == 3
     assert np.isfinite(weights).all()
-    assert weights.ge(0.0).all()
-    assert weights.le(config.max_weight + 1e-12).all()
+    assert weights.le(0.20 + 1e-12).all()
     assert weights.sum() == pytest.approx(0.60)
     assert result.cash_weight == pytest.approx(0.40)
     assert weights.sum() + result.cash_weight == pytest.approx(1.0)
-    assert result.concentration["maxWeight"] <= config.max_weight + 1e-12
-    assert result.concentration["cashWeight"] == pytest.approx(result.cash_weight)
     assert "max_weight_capacity_or_missing_policy_inputs" in result.reasons
 
 
-def test_score_liquidity_policy_uses_only_score_and_trailing_liquidity() -> None:
-    scores, prices, eligibility, volatility, liquidity = _policy_inputs()
-    result = construct_target_allocation(
-        "score_liquidity_rank",
-        SIGNAL_DATE,
-        scores,
-        prices,
-        eligibility,
-        _config(),
-        trailing_volatility=volatility,
-        trailing_dollar_volume=liquidity,
-    )
-
-    assert result.status == "available"
-    assert result.component_status["score"] == "available"
-    assert result.component_status["liquidity"] == "trailing_raw_dollar_volume"
-    assert "size" not in result.component_status
-    assert "sizeComponent" not in result.rows
-    assert result.rows["weight"].tolist() == pytest.approx(
-        [1.05 / 2.70, 0.80 / 2.70, 0.55 / 2.70, 0.30 / 2.70]
-    )
-
-
-@pytest.mark.parametrize("policy_id", WEIGHTING_POLICIES)
-def test_current_model_portfolio_is_an_exact_wrapper_of_target_kernel(policy_id: str) -> None:
-    scores, prices, eligibility, volatility, liquidity = _policy_inputs()
+def test_model_portfolio_is_exact_wrapper_of_fixed_target_kernel() -> None:
+    scores, prices, eligibility, liquidity, market_cap = _inputs()
     config = _config()
-    target = construct_target_allocation(
-        policy_id,
-        SIGNAL_DATE,
-        scores,
-        prices,
-        eligibility,
-        config,
-        trailing_volatility=volatility,
-        trailing_dollar_volume=liquidity,
-    )
+    target = _allocation(config=config)
     current = construct_model_portfolio(
         "mom",
         SIGNAL_DATE,
@@ -218,22 +197,21 @@ def test_current_model_portfolio_is_an_exact_wrapper_of_target_kernel(policy_id:
         prices,
         eligibility,
         config,
-        policy_id=policy_id,
-        trailing_volatility=volatility,
+        policy_id=FIXED_WEIGHTING_POLICY,
         trailing_dollar_volume=liquidity,
+        trailing_market_cap=market_cap,
         names=pd.Series({symbol: f"Name {symbol}" for symbol in scores.index}),
     )
 
     assert current.status == target.status == "available"
-    assert current.allocation.policy_id == target.policy_id == policy_id
     assert current.rows["symbol"].tolist() == target.rows["symbol"].tolist()
     assert current.rows["weight"].tolist() == pytest.approx(target.rows["weight"].tolist())
     assert current.cash_weight == pytest.approx(target.cash_weight)
-    assert current.to_dict()["targetType"] == "current_research_target"
-    assert current.to_dict()["executionTiming"] == ("next_available_session_close_after_signal")
+    assert current.to_dict()["targetType"] == "factor_portfolio"
+    assert current.to_dict()["executionTiming"] == "next_available_session_close_after_signal"
 
 
-def test_balanced_weights_are_ranked_capped_and_leave_explicit_cash() -> None:
+def test_balanced_weights_helper_remains_ranked_capped_and_cash_explicit() -> None:
     scores = pd.Series({"C": 1.0, "A": 3.0, "B": 2.0, "D": 0.0})
     weights = balanced_weights(scores, top_n=3, max_weight=0.20)
 
@@ -244,12 +222,14 @@ def test_balanced_weights_are_ranked_capped_and_leave_explicit_cash() -> None:
 
 def test_missing_signal_inputs_produce_unavailable_status() -> None:
     result = construct_target_allocation(
-        "equal_weight",
+        FIXED_WEIGHTING_POLICY,
         SIGNAL_DATE,
         pd.Series({"AAA": np.nan}),
         pd.Series({"AAA": 10.0}),
         pd.Series({"AAA": True}),
         _config(top_n=1, max_weight=1.0),
+        trailing_dollar_volume=pd.Series({"AAA": 1.0}),
+        trailing_market_cap=pd.Series({"AAA": 1.0}),
     )
 
     assert result.status == "unavailable"

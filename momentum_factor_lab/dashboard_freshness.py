@@ -81,9 +81,9 @@ def decide_dashboard_freshness(
 
 
 def latest_dashboard_data_as_of(dashboard: dict[str, Any]) -> date | None:
-    """Extract the actual market-data date from schema-v4 or legacy payloads."""
+    """Extract the actual market-data date from schema-v5 or legacy payloads."""
 
-    if dashboard.get("schemaVersion") == 4:
+    if dashboard.get("schemaVersion") == 5:
         data = dashboard.get("data")
         return _parse_date(data.get("asOf")) if isinstance(data, dict) else None
 
@@ -124,9 +124,9 @@ def _latest_dashboard_run(dashboard: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def latest_dashboard_run_kst(dashboard: dict[str, Any]) -> datetime | None:
-    """Extract the generation timestamp from schema-v4 or legacy payloads."""
+    """Extract the generation timestamp from schema-v5 or legacy payloads."""
 
-    if dashboard.get("schemaVersion") == 4:
+    if dashboard.get("schemaVersion") == 5:
         return _parse_timestamp_to_kst(dashboard.get("generatedAtUtc"))
 
     latest = _latest_dashboard_run(dashboard)

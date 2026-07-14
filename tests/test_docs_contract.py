@@ -26,7 +26,7 @@ def _input_differences(left: dict[str, object], right: dict[str, object]) -> set
 def _allocation_signature(
     detail: dict[str, object],
 ) -> tuple[tuple[str, ...], tuple[tuple[str, float], ...]]:
-    weights = detail["currentResearchTarget"]["weights"]
+    weights = detail["bestFactorPortfolio"]["weights"]
     return (
         tuple(row["symbol"] for row in weights),
         tuple((row["symbol"], round(float(row["weight"]), 12)) for row in weights),
@@ -52,8 +52,8 @@ def test_published_actual_grid_regresses_web_input_and_market_asof_outcome_chang
                 web_input_comparisons += 1
                 left_top_n = left_entry["normalizedInputs"]["top_n"]
                 right_top_n = right_entry["normalizedInputs"]["top_n"]
-                left_count = left["currentResearchTarget"]["selectedSecurityCount"]
-                right_count = right["currentResearchTarget"]["selectedSecurityCount"]
+                left_count = left["bestFactorPortfolio"]["selectedSecurityCount"]
+                right_count = right["bestFactorPortfolio"]["selectedSecurityCount"]
                 assert left_count == left_top_n
                 assert right_count == right_top_n
                 assert left_count != right_count
@@ -73,7 +73,7 @@ def test_published_actual_grid_regresses_web_input_and_market_asof_outcome_chang
     assert observed_changes == {"portfolio_size", "holdings", "weights"}
 
 
-def test_readme_declares_the_live_2700_factor_and_policy_contract() -> None:
+def test_readme_declares_the_live_2700_factor_and_fixed_method_contract() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
 
     required = (
@@ -81,17 +81,17 @@ def test_readme_declares_the_live_2700_factor_and_policy_contract() -> None:
         "64개 팩터",
         "61개 독립 팩터",
         "compatibility alias 3개",
-        "equal_weight",
-        "capped_linear_rank",
-        "capped_vol_adjusted_rank",
-        "score_liquidity_rank",
+        "score_liquidity_market_cap_rank",
+        "0.50",
+        "0.30",
+        "0.20",
+        "고정",
         "live_market",
         "local_file",
         "demo",
-        "61 × 4 = 244",
-        "256개 전체 factor-policy 행",
+        "64개 팩터 행",
         "one-way turnover",
-        "schema-v4",
+        "schema-v5",
         "result identity",
         "로컬 api",
     )
@@ -99,7 +99,8 @@ def test_readme_declares_the_live_2700_factor_and_policy_contract() -> None:
         assert text.lower() in readme
     assert "demo는 테스트 전용" in readme
     assert "실제시장 수집 실패를 demo나 기존 정적 결과로 대체하지 않습니다" in readme
-    assert "다음 세션 종가용 연구 목표" in readme
+    assert "bestfactorportfolio" in readme
+    assert "currentresearchtarget" not in readme
 
 
 def test_methodology_matches_the_current_shared_kernel_research_contract() -> None:
@@ -110,16 +111,15 @@ def test_methodology_matches_the_current_shared_kernel_research_contract() -> No
         "64",
         "61",
         "alias",
-        "equal_weight",
-        "capped_linear_rank",
-        "capped_vol_adjusted_rank",
-        "score_liquidity_rank",
-        "244",
-        "factorpolicyranking",
+        "score_liquidity_market_cap_rank",
+        "0.50",
+        "0.30",
+        "0.20",
+        "factorranking",
         "cash",
         "turnover",
-        "schema v4",
-        "currentresearchtarget",
+        "schema v5",
+        "bestfactorportfolio",
         "resultidentity",
         "leave-one",
     )
@@ -139,6 +139,7 @@ def test_methodology_matches_the_current_shared_kernel_research_contract() -> No
     )
     for text in forbidden_legacy_contracts:
         assert text not in methodology
+    assert "이전 `currentresearchtarget`" in methodology
 
 
 def test_factor_catalog_documents_all_64_factors_and_alias_status() -> None:

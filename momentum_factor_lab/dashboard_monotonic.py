@@ -18,8 +18,8 @@ class DashboardSnapshot:
     latest_output_rows: int
     selected_factor_snapshot_rows: int
     primary_entities: int
-    expected_factor_policy_pairs: int
-    evaluated_factor_policy_pairs: int
+    expected_factors: int
+    evaluated_factors: int
 
 
 @dataclass(frozen=True)
@@ -60,11 +60,11 @@ class MonotonicDashboardDecision:
 
 def load_dashboard_snapshot(path: str | Path) -> DashboardSnapshot:
     payload = _load_json(path)
-    if payload.get("schemaVersion") == 4:
+    if payload.get("schemaVersion") == 5:
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         model = (
-            payload.get("currentResearchTarget")
-            if isinstance(payload.get("currentResearchTarget"), dict)
+            payload.get("bestFactorPortfolio")
+            if isinstance(payload.get("bestFactorPortfolio"), dict)
             else {}
         )
         portfolios = (
@@ -72,7 +72,7 @@ def load_dashboard_snapshot(path: str | Path) -> DashboardSnapshot:
             if isinstance(payload.get("factorPortfolios"), dict)
             else {}
         )
-        selected = str(payload.get("selectedFactor") or "")
+        selected = str(payload.get("bestFactor") or "")
         selected_portfolio = (
             portfolios.get(selected) if isinstance(portfolios.get(selected), dict) else {}
         )
@@ -81,7 +81,9 @@ def load_dashboard_snapshot(path: str | Path) -> DashboardSnapshot:
             payload.get("resultIdentity") if isinstance(payload.get("resultIdentity"), dict) else {}
         )
         accounting = (
-            payload.get("gridAccounting") if isinstance(payload.get("gridAccounting"), dict) else {}
+            payload.get("factorAccounting")
+            if isinstance(payload.get("factorAccounting"), dict)
+            else {}
         )
         return DashboardSnapshot(
             path=str(path),
@@ -92,8 +94,8 @@ def load_dashboard_snapshot(path: str | Path) -> DashboardSnapshot:
             latest_output_rows=_count_rows(model.get("weights")),
             selected_factor_snapshot_rows=_count_rows(selected_portfolio.get("weights")),
             primary_entities=int(data.get("analyzedSecurityCount") or 0),
-            expected_factor_policy_pairs=int(accounting.get("expectedIndependentPairCount") or 0),
-            evaluated_factor_policy_pairs=int(accounting.get("evaluatedIndependentPairCount") or 0),
+            expected_factors=int(accounting.get("expectedIndependentFactorCount") or 0),
+            evaluated_factors=int(accounting.get("evaluatedIndependentFactorCount") or 0),
         )
     latest = _latest_run(payload)
     summary = latest.get("summary", {}) if isinstance(latest.get("summary"), dict) else {}
@@ -109,8 +111,8 @@ def load_dashboard_snapshot(path: str | Path) -> DashboardSnapshot:
         latest_output_rows=_count_rows(latest.get("latest_output_rows")),
         selected_factor_snapshot_rows=_selected_factor_snapshot_rows(latest, selected_factor),
         primary_entities=_count_rows(_public_summary(payload).get("primaryEntities")),
-        expected_factor_policy_pairs=0,
-        evaluated_factor_policy_pairs=0,
+        expected_factors=0,
+        evaluated_factors=0,
     )
 
 
@@ -130,14 +132,13 @@ def decide_monotonic_dashboard(
             reason="candidate dashboard is missing result identity while remote baseline has one",
         )
     if (
-        candidate.expected_factor_policy_pairs < 1
-        or candidate.evaluated_factor_policy_pairs != candidate.expected_factor_policy_pairs
+        candidate.expected_factors < 1 or candidate.evaluated_factors != candidate.expected_factors
     ) and candidate.result_key:
         return MonotonicDashboardDecision(
             passed=False,
             baseline=baseline,
             candidate=candidate,
-            reason="candidate factor-policy grid accounting is incomplete",
+            reason="candidate factor accounting is incomplete",
         )
     if baseline.data_as_of and candidate.data_as_of and candidate.data_as_of < baseline.data_as_of:
         return MonotonicDashboardDecision(

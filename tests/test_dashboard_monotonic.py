@@ -45,7 +45,7 @@ def _write_dashboard(path: Path, *, data_as_of: str, run_timestamp: str) -> Path
     return path
 
 
-def _write_dashboard_v4(
+def _write_dashboard_v5(
     path: Path,
     *,
     data_as_of: str,
@@ -59,7 +59,7 @@ def _write_dashboard_v4(
     path.write_text(
         json.dumps(
             {
-                "schemaVersion": 4,
+                "schemaVersion": 5,
                 "resultKey": "a" * 64,
                 "resultIdentity": {
                     "identityVersion": "momentum-result-identity-v1",
@@ -67,16 +67,16 @@ def _write_dashboard_v4(
                     "keyParts": {},
                 },
                 "generatedAtUtc": run_timestamp,
-                "selectedFactor": "mom_12m",
+                "bestFactor": "mom_12m",
                 "data": {
                     "asOf": data_as_of,
                     "analyzedSecurityCount": analyzed_count,
                 },
-                "currentResearchTarget": {"weights": weights},
+                "bestFactorPortfolio": {"weights": weights},
                 "factorPortfolios": {"mom_12m": {"weights": weights}},
-                "gridAccounting": {
-                    "expectedIndependentPairCount": 244,
-                    "evaluatedIndependentPairCount": 244,
+                "factorAccounting": {
+                    "expectedIndependentFactorCount": 61,
+                    "evaluatedIndependentFactorCount": 61,
                 },
             }
         ),
@@ -85,10 +85,10 @@ def _write_dashboard_v4(
     return path
 
 
-def test_schema_v4_snapshot_uses_current_target_identity_and_counts(tmp_path: Path) -> None:
+def test_schema_v5_snapshot_uses_best_factor_identity_and_counts(tmp_path: Path) -> None:
     snapshot = load_dashboard_snapshot(
-        _write_dashboard_v4(
-            tmp_path / "v3.json",
+        _write_dashboard_v5(
+            tmp_path / "v5.json",
             data_as_of="2026-07-10",
             run_timestamp="2026-07-11T01:00:00Z",
         )
@@ -101,20 +101,21 @@ def test_schema_v4_snapshot_uses_current_target_identity_and_counts(tmp_path: Pa
     assert snapshot.selected_factor_snapshot_rows == 20
     assert snapshot.primary_entities == 2_857
     assert snapshot.result_key == "a" * 64
-    assert snapshot.evaluated_factor_policy_pairs == 244
+    assert snapshot.expected_factors == 61
+    assert snapshot.evaluated_factors == 61
 
 
-def test_schema_v4_monotonic_guard_rejects_collapsed_holdings(tmp_path: Path) -> None:
+def test_schema_v5_monotonic_guard_rejects_collapsed_holdings(tmp_path: Path) -> None:
     baseline = load_dashboard_snapshot(
-        _write_dashboard_v4(
-            tmp_path / "baseline-v4.json",
+        _write_dashboard_v5(
+            tmp_path / "baseline-v5.json",
             data_as_of="2026-07-10",
             run_timestamp="2026-07-11T01:00:00Z",
         )
     )
     candidate = load_dashboard_snapshot(
-        _write_dashboard_v4(
-            tmp_path / "candidate-v4.json",
+        _write_dashboard_v5(
+            tmp_path / "candidate-v5.json",
             data_as_of="2026-07-10",
             run_timestamp="2026-07-11T02:00:00Z",
             holding_count=5,

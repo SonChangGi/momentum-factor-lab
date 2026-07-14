@@ -81,6 +81,7 @@ def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
     expected = {
         "--live",
         "--prices",
+        "--market-caps",
         "--demo",
         "--chart-benchmark",
         "--additional-comparison-benchmarks",
@@ -91,11 +92,6 @@ def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
         "--max-extreme-daily-return",
         "--min-valuation-coverage",
         "--min-daily-risk-observations",
-        "--volatility-lookback-days",
-        "--min-volatility-observations",
-        "--score-liquidity-score-weight",
-        "--score-liquidity-liquidity-weight",
-        "--score-liquidity-rank-floor",
         "--selection-min-sharpe",
         "--selection-max-drawdown",
         "--selection-max-annualized-cost-drag",
@@ -138,6 +134,9 @@ def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
         "--score-size-market-cap-weight",
         "--score-size-liquidity-weight",
         "--score-size-rank-floor",
+        "--score-liquidity-score-weight",
+        "--score-liquidity-liquidity-weight",
+        "--score-liquidity-rank-floor",
         "--policy-sharpe-tolerance",
         "--policy-mdd-tolerance",
         "--policy-max-cost-drag",
@@ -185,16 +184,6 @@ def test_cli_values_map_to_run_config_without_hidden_overrides() -> None:
             "0.95",
             "--min-daily-risk-observations",
             "400",
-            "--volatility-lookback-days",
-            "84",
-            "--min-volatility-observations",
-            "63",
-            "--score-liquidity-score-weight",
-            "0.70",
-            "--score-liquidity-liquidity-weight",
-            "0.30",
-            "--score-liquidity-rank-floor",
-            "0.07",
             "--selection-min-sharpe",
             "0.10",
             "--selection-max-drawdown",
@@ -245,11 +234,10 @@ def test_cli_values_map_to_run_config_without_hidden_overrides() -> None:
     assert config.stale_after_days == 3
     assert config.min_valuation_coverage == pytest.approx(0.95)
     assert config.min_daily_risk_observations == 400
-    assert config.volatility_lookback_days == 84
-    assert config.min_volatility_observations == 63
-    assert config.score_liquidity_score_weight == pytest.approx(0.70)
-    assert config.score_liquidity_liquidity_weight == pytest.approx(0.30)
-    assert config.score_liquidity_rank_floor == pytest.approx(0.07)
+    assert config.allocation_score_weight == pytest.approx(0.50)
+    assert config.allocation_liquidity_weight == pytest.approx(0.30)
+    assert config.allocation_market_cap_weight == pytest.approx(0.20)
+    assert config.allocation_rank_floor == pytest.approx(0.05)
     assert config.selection_min_sharpe == pytest.approx(0.10)
     assert config.selection_max_drawdown == pytest.approx(0.45)
     assert config.selection_max_annualized_cost_drag == pytest.approx(0.008)
@@ -279,8 +267,8 @@ def test_compact_summary_exposes_selection_funnel_performance_and_allocation(
     payload = result_payload(demo_result)
     paths = {"result": "result.json", "index": "docs/index.html"}
     summary = _compact_summary(payload, paths)
-    selected = payload["selectedFactor"]
-    row = next(item for item in payload["factorPolicyRanking"] if item["selected"])
+    selected = payload["bestFactor"]
+    row = next(item for item in payload["factorRanking"] if item["selected"])
 
     assert summary["asOf"] == payload["data"]["asOf"]
     assert summary["provider"] == payload["data"]["provider"]
@@ -293,15 +281,14 @@ def test_compact_summary_exposes_selection_funnel_performance_and_allocation(
     assert summary["eligibleSecurityCount"] == payload["data"]["latestEligibleSecurityCount"]
     assert summary["factorCount"] == payload["meta"]["factorCount"]
     assert summary["independentFactorCount"] == payload["meta"]["independentFactorCount"]
-    assert summary["selectedFactor"] == selected
-    assert summary["selectedFactorReason"] == payload["selectedReason"]
-    assert summary["selectedWeightingPolicy"] == payload["selectedWeightingPolicy"]
-    assert summary["selectedWeightingPolicyReason"] == payload["selectedReason"]
+    assert summary["bestFactor"] == selected
+    assert summary["bestFactorReason"] == payload["bestFactorReason"]
+    assert summary["weightingPolicy"] == payload["weightingPolicy"]
     assert summary["performance"]["compositeScore"] == row["composite_score"]
     assert summary["performance"]["valuationCoverageRatio"] == row["valuation_coverage_ratio"]
-    assert summary["currentAllocation"]["weights"] == payload["currentResearchTarget"]["weights"]
+    assert summary["currentAllocation"]["weights"] == payload["bestFactorPortfolio"]["weights"]
     assert (
-        summary["currentAllocation"]["cashWeight"] == payload["currentResearchTarget"]["cashWeight"]
+        summary["currentAllocation"]["cashWeight"] == payload["bestFactorPortfolio"]["cashWeight"]
     )
     assert summary["runtimeSeconds"] == payload["meta"]["runtimeSeconds"]
     assert summary["maxRssBytes"] == payload["meta"]["maxRssBytes"]

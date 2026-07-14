@@ -78,11 +78,22 @@ def _market(
     volumes = candidate * 1_000.0
     dollar_volumes = candidate * 100_000.0
     raw_closes = prices.copy()
+    market_caps = prices.mul(100_000_000.0)
     universe = pd.DataFrame({"symbol": requested_symbols, "name": requested_symbols})
     price_sources = pd.DataFrame(
         {"symbol": symbols, "price_source": ["fixture-live-provider"] * len(symbols)}
     )
     data_sources = pd.DataFrame([{"source": "fixture-live-provider", "status": "ok"}])
+    market_cap_sources = pd.DataFrame(
+        {
+            "symbol": symbols,
+            "mapping": ["fixture"] * len(symbols),
+            "taxonomy": ["fixture"] * len(symbols),
+            "tag": ["sharesOutstanding"] * len(symbols),
+            "valueKind": ["shares"] * len(symbols),
+            "latestMarketCapAvailable": [True] * len(symbols),
+        }
+    )
     return MarketData(
         prices=prices,
         volumes=volumes,
@@ -111,6 +122,8 @@ def _market(
             "priceSources": canonical_records_sha256(price_sources),
             "dataSources": canonical_records_sha256(data_sources),
             "comparisonPrices": _canonical_matrix_sha256(comparison_prices),
+            "marketCaps": _canonical_matrix_sha256(market_caps),
+            "marketCapSources": canonical_records_sha256(market_cap_sources),
         },
         benchmark="SPY",
         requested_through="2026-07-10",
@@ -120,6 +133,8 @@ def _market(
         price_sources=price_sources,
         data_sources=data_sources,
         comparison_prices=comparison_prices,
+        market_caps=market_caps,
+        market_cap_sources=market_cap_sources,
     )
 
 
@@ -136,7 +151,7 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
 
     as_of = market.as_of.date().isoformat()
     analyzed_symbols = list(market.candidate_symbols)
-    latest_eligible = int(payload["currentResearchTarget"]["eligibleSecurityCount"])
+    latest_eligible = int(payload["bestFactorPortfolio"]["eligibleSecurityCount"])
     data = payload["data"]
     data.update(
         {
@@ -156,6 +171,8 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
             "analyzedSecurityCount": len(analyzed_symbols),
             "analyzedSymbols": analyzed_symbols,
             "latestEligibleSecurityCount": latest_eligible,
+            "latestMarketCapSecurityCount": len(analyzed_symbols),
+            "latestMarketCapCoverageRatio": 1.0,
             "rawCloseProxySymbolCount": market.raw_close_proxy_symbol_count,
             "rawCloseAvailable": not market.raw_closes.empty,
             "benchmark": market.benchmark,
@@ -190,11 +207,11 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
     payload["priceSources"] = market.price_sources.to_dict(orient="records")
     payload["sourceHealth"] = market.data_sources.to_dict(orient="records")
     payload["researchScope"]["evidenceStatus"] = "same_sample_descriptive_actual_market"
-    payload["currentResearchTarget"]["asOf"] = as_of
-    payload["currentResearchTarget"]["signalDate"] = as_of
+    payload["bestFactorPortfolio"]["asOf"] = as_of
+    payload["bestFactorPortfolio"]["signalDate"] = as_of
     payload["backtestHeldPortfolio"]["asOf"] = as_of
-    payload["currentTransition"]["asOf"] = as_of
-    payload["currentTransition"]["targetSignalDate"] = as_of
+    payload["bestFactorTransition"]["asOf"] = as_of
+    payload["bestFactorTransition"]["targetSignalDate"] = as_of
     factor_diagnostics = payload["factorDiagnostics"]
     rank_ic = factor_diagnostics["rankIc"]
     rank_ic["signalDates"][-1] = as_of
@@ -205,7 +222,7 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
         portfolio["signalDate"] = as_of
     performance = payload["performance"]
     performance["dates"][-1] = as_of
-    holding_history = payload["selectedBacktestHoldingHistory"]
+    holding_history = payload["bestFactorBacktestHoldingHistory"]
     canonical_history_dates = performance["dates"][-holding_history["sessionCount"] :]
     for session, session_date in zip(
         holding_history["sessions"],
@@ -230,7 +247,7 @@ def _payload(config: RunConfig, market: MarketData) -> dict[str, Any]:
     performance["benchmarkCurve"] = performance["benchmarkCurves"][market.benchmark]
     for period in performance["periods"]:
         period["endDate"] = as_of
-    payload["selectionDecision"]["evaluationEnd"] = as_of
+    payload["factorSelectionDecision"]["evaluationEnd"] = as_of
     payload["contributionDiagnostics"]["evaluationEnd"] = as_of
     for field in (
         "factorDefinitionSha256",
@@ -306,23 +323,23 @@ PayloadMutation = Callable[[dict[str, Any]], None]
 
 
 def _omit_factor_policy_ranking(payload: dict[str, Any]) -> None:
-    payload.pop("factorPolicyRanking")
+    payload.pop("factorRanking")
 
 
 def _omit_selection_decision(payload: dict[str, Any]) -> None:
-    payload.pop("selectionDecision")
+    payload.pop("factorSelectionDecision")
 
 
 def _omit_current_research_target(payload: dict[str, Any]) -> None:
-    payload.pop("currentResearchTarget")
+    payload.pop("bestFactorPortfolio")
 
 
 def _mutate_guardrail_profile(payload: dict[str, Any]) -> None:
-    payload["selectionDecision"]["guardrailProfile"]["rules"][0]["threshold"] += 0.01
+    payload["factorSelectionDecision"]["guardrailProfile"]["rules"][0]["threshold"] += 0.01
 
 
 def _selected_row(payload: dict[str, Any]) -> dict[str, Any]:
-    return next(row for row in payload["factorPolicyRanking"] if row["selected"] is True)
+    return next(row for row in payload["factorRanking"] if row["selected"] is True)
 
 
 def _fail_selected_historical_concentration(payload: dict[str, Any]) -> None:
@@ -593,19 +610,21 @@ def test_cache_miss_is_202_then_get_returns_canonical_result_and_next_post_is_20
     assert "result" not in submitted.body
     assert status.status_code == 200
     assert status.body["status"] == "complete"
-    assert status.body["result"]["schemaVersion"] == 4
+    assert status.body["result"]["schemaVersion"] == 5
     assert status.body["result"]["resultKey"] == result_key
     assert status.body["result"]["resultIdentity"]["resultKey"] == result_key
-    assert len(status.body["result"]["factorPolicyRanking"]) == 256
-    grid = status.body["result"]["gridAccounting"]
-    assert grid["independentFactorCount"] == 61
-    assert grid["policyCount"] == 4
-    assert grid["expectedIndependentPairCount"] == 244
-    assert grid["evaluatedIndependentPairCount"] == 244
-    assert grid["availableIndependentPairCount"] + grid["excludedIndependentPairCount"] == 244
-    assert grid["missingIndependentPairCount"] == 0
-    assert grid["diagnosticAliasPairCount"] == 12
-    guardrail_rules = status.body["result"]["selectionDecision"]["guardrailProfile"]["rules"]
+    assert len(status.body["result"]["factorRanking"]) == 64
+    accounting = status.body["result"]["factorAccounting"]
+    assert accounting["independentFactorCount"] == 61
+    assert accounting["expectedIndependentFactorCount"] == 61
+    assert accounting["evaluatedIndependentFactorCount"] == 61
+    assert (
+        accounting["availableIndependentFactorCount"] + accounting["excludedIndependentFactorCount"]
+        == 61
+    )
+    assert accounting["missingIndependentFactorCount"] == 0
+    assert accounting["diagnosticAliasFactorCount"] == 3
+    guardrail_rules = status.body["result"]["factorSelectionDecision"]["guardrailProfile"]["rules"]
     assert len(guardrail_rules) == 12
     assert {
         "min_target_effective_names",
@@ -628,13 +647,42 @@ def test_cache_miss_is_202_then_get_returns_canonical_result_and_next_post_is_20
             "guardrail_current_target_weight",
         )
     )
-    history = status.body["result"]["selectedBacktestHoldingHistory"]
+    history = status.body["result"]["bestFactorBacktestHoldingHistory"]
     assert [session["date"] for session in history["sessions"]] == status.body["result"][
         "performance"
     ]["dates"][-history["sessionCount"] :]
     assert cached.status_code == 200
     assert cached.body == status.body["result"]
     assert len(calls) == 1
+
+
+def test_distinct_complete_inputs_run_python_with_distinct_configs_and_results(
+    tmp_path: Path,
+) -> None:
+    api, calls = _api(tmp_path)
+    first_inputs = ResearchInputs()
+    second_inputs = ResearchInputs(min_price=7.5)
+
+    first_submission = _post(api, first_inputs)
+    second_submission = _post(api, second_inputs)
+    first = api.dispatch("GET", first_submission.body["statusUrl"])
+    second = api.dispatch("GET", second_submission.body["statusUrl"])
+
+    assert first_submission.status_code == second_submission.status_code == 202
+    assert first.body["status"] == second.body["status"] == "complete"
+    assert first_submission.body["resultKey"] != second_submission.body["resultKey"]
+    assert [call[0].min_price for call in calls] == [5.0, 7.5]
+    assert all(call[1] is calls[0][1] for call in calls)
+    for response, submitted_inputs in (
+        (first, first_inputs),
+        (second, second_inputs),
+    ):
+        result = response.body["result"]
+        assert result["schemaVersion"] == 5
+        assert result["researchInputs"] == submitted_inputs.to_dict()
+        assert len(result["factorRanking"]) == 64
+        assert len(result["factorPortfolios"]) == 64
+        assert result["bestFactorPortfolio"] == result["factorPortfolios"][result["bestFactor"]]
 
 
 def test_queued_running_and_complete_states_need_no_background_thread(tmp_path: Path) -> None:
@@ -815,7 +863,7 @@ def test_post_rejects_incomplete_actual_market_hash_contract(tmp_path: Path) -> 
 
 def test_cached_identity_mismatch_fails_closed_instead_of_serving_result(tmp_path: Path) -> None:
     wrong = {
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "resultKey": "f" * 64,
         "resultIdentity": {
             "identityVersion": "momentum-result-identity-v1",

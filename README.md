@@ -1,6 +1,6 @@
 # Momentum Factor Lab
 
-미국 개별주 2,700개 이상을 대상으로 모멘텀 팩터와 비중 정책을 같은 조건에서 전수 비교하는 연구 도구입니다. 계산의 canonical source는 Python이며, 정적 웹은 사전 계산된 결과를 선택하고 표시만 합니다.
+미국 개별주 2,700개 이상을 대상으로 64개 모멘텀 팩터를 같은 조건과 같은 고정 비중 방법으로 비교하는 연구 도구입니다. 계산의 canonical source는 Python이며, 정적 웹은 사전 계산된 결과를 선택하고 표시합니다. 공개 preset에 없는 입력은 사용자가 실행한 loopback Python API로 같은 엔진을 다시 실행합니다.
 
 이 프로젝트가 내놓는 비중은 마지막 실제 입력일 신호로 만든 **다음 세션 종가용 연구 목표**입니다. 실제 체결 또는 개인화된 투자 권고가 아닙니다.
 
@@ -13,36 +13,32 @@
 - 실제시장 수집 실패를 demo나 기존 정적 결과로 대체하지 않습니다.
 - 200종목 demo는 테스트 전용이며 실제시장 grid에 게시할 수 없습니다.
 - 64개 팩터를 계산하고 compatibility alias 3개를 뺀 61개 독립 팩터를 선택 후보로 사용합니다.
-- 네 정책을 모두 실행해 `61 × 4 = 244`개 독립 팩터–정책 조합을 먼저 만듭니다.
-- 정책을 먼저 고르지 않습니다. 모든 유효 조합을 하나의 모집단에서 한 번만 점수화해 `(factor, policy)` 한 쌍을 직접 선택합니다.
-- `equal_weight`도 다른 정책과 동등한 후보이며 다른 정책의 허용선을 정하지 않습니다.
-- 정책별 중앙값은 선택에 쓰지 않는 진단 자료입니다.
+- 독립 팩터 61개를 하나의 고정 비중 방법으로 각각 한 번만 실행하고, 같은 모집단에서 최고 팩터를 선택합니다.
+- 팩터 선택 단계에서 비중 정책을 최적화하지 않습니다. Top-N·비중 상한·기간·비용·필터·가드레일이 바뀌면 64개 팩터 전체를 Python으로 다시 계산합니다.
 - 신호·체결·수익 시점은 `t 종가 → t+1 종가 체결 → t+1~t+2 첫 시장수익`입니다.
 - 역사 백테스트와 현재 목표는 동일한 target-weight kernel을 사용합니다.
 - 현금을 포함한 one-way turnover와 비용을 동일한 회계식으로 계산합니다.
 - quote gap을 0% 수익으로 채우지 않습니다. 종목별 share sleeve를 유지하고 valuation이 가능한 관측 구간에서만 수익을 확정합니다.
 - 비용, 현금, turnover, quote gap, 데이터 provenance를 결과에 보존합니다.
 
-## 비중 정책
+## 고정 비중 방법
 
-1. `equal_weight`
-   - Top-N 동일가중
+`score_liquidity_market_cap_rank` 하나만 사용합니다.
 
-2. `capped_linear_rank`
-   - 동점 인식 선형 순위 강도
+```text
+raw_i = 0.05
+      + 0.50 × factor_score_percentile_i
+      + 0.30 × trailing_raw_dollar_volume_percentile_i
+      + 0.20 × point_in_time_market_cap_percentile_i
+```
 
-3. `capped_vol_adjusted_rank`
-   - 순위 강도를 신호일까지의 후행 연율 변동성으로 조정
+각 입력은 편입 후보 안에서 동점을 보존하는 percentile rank로 변환합니다. 시가총액은 SEC 공시 제출일을 이용해 신호일 당시 알려질 수 있었던 발행주식수만 사용하고, 이후 split을 주가 기준에 맞게 정규화합니다. 현재 시가총액을 과거에 소급하지 않습니다. 필요한 거래대금 또는 PIT 시가총액이 없거나 커버리지·최대 연령 조건을 통과하지 못하면 해당 포트폴리오는 현금 100%로 실패-폐쇄됩니다.
 
-4. `score_liquidity_rank`
-   - 팩터 점수 percentile 60% + 후행 raw-dollar-volume percentile 40% + floor
-   - 규모 또는 현재 시가총액을 사용하지 않습니다.
+종목당 최대 비중을 적용하고, 상한 때문에 수용하지 못한 예산은 현금으로 남깁니다. Top-N 경계 동점은 신호일까지의 후행 거래대금 내림차순, symbol 오름차순으로 결정합니다.
 
-모든 정책은 종목별 최대 비중을 적용하고, 수용하지 못한 예산은 현금으로 남깁니다. Top-N 경계 동점은 신호일까지의 후행 거래대금 내림차순, symbol 오름차순으로 결정합니다. 필요한 tie-break 입력이 없으면 임의 종목을 고르지 않고 해당 target을 unavailable로 둡니다.
+## 최고 팩터 선택과 절대 가드레일
 
-## 공동 선택과 절대 가드레일
-
-유효한 244개 독립 조합의 net Sortino, Calmar, MDD, CAGR, Sharpe, subperiod stability를 동일 모집단에서 robust percentile로 변환합니다. 다음 정책 중립 절대 기준을 각 조합에 적용합니다.
+고정 방법으로 계산 가능한 독립 팩터들의 net Sortino, Calmar, MDD, CAGR, Sharpe, subperiod stability를 동일 모집단에서 robust percentile로 변환합니다. 다음 절대 기준을 각 팩터에 적용합니다.
 
 - 최소 Sharpe
 - 최대 drawdown magnitude
@@ -104,7 +100,7 @@ uv run python -m momentum_factor_lab.cli run \
 
 절대 선택 가드레일은 `ResearchInputs` v1의 canonical per-request 필드입니다. Python 실행의 `--selection-*` 기본값과 동일하며, 웹/API 요청이 값을 바꾸면 정규화 입력·selection hash·result key가 함께 바뀌고 전체 grid를 새로 계산합니다.
 
-입력이 바뀌면 전체 팩터–정책 grid, 선택 조합, 성과, turnover, 비용, 현재 종목·점수·비중·현금이 Python에서 다시 계산됩니다.
+입력이 바뀌면 전체 팩터 랭킹, 최고 팩터, 각 팩터의 성과와 포트폴리오, turnover, 비용, 종목·점수·비중·현금이 Python에서 다시 계산됩니다. 화면의 ‘사용자 선택 팩터’ 변경은 이미 계산된 같은 실행 안에서 비교 대상을 바꾸며, Python 최고 팩터를 덮어쓰지 않습니다.
 
 ## 정적 Pages와 로컬 API
 
@@ -116,7 +112,7 @@ docs/data/grid/v1/results/<resultKey>.json
 docs/data/grid/v1/summaries/<resultKey>.json
 ```
 
-브라우저는 manifest에서 전체 입력 tuple이 정확히 같은 entry만 정적 결과로 엽니다. 부분 일치나 최근접 preset은 없습니다. 미지원 입력은 기본 `127.0.0.1:8765` loopback Python API에 canonical `ResearchInputs`를 POST하고 완료 상태를 polling한 뒤, actual-market 2,700+·61×4 회계·identity를 다시 검증해 같은 화면에 로컬 API 결과로 구분 표시합니다. API가 실행 중이지 않거나 계약 검증에 실패하면 이전 결과를 숨기고 fail-closed 오류를 표시합니다.
+브라우저는 manifest에서 전체 입력 tuple이 정확히 같은 entry만 정적 결과로 엽니다. 부분 일치나 최근접 preset은 없습니다. 미지원 입력은 기본 `127.0.0.1:8765` loopback Python API에 canonical `ResearchInputs`를 POST하고 완료 상태를 polling한 뒤, actual-market 2,700+·61개 독립 팩터 회계·고정 비중 방법·identity를 다시 검증해 같은 화면에 로컬 API 결과로 구분 표시합니다. API가 실행 중이지 않거나 계약 검증에 실패하면 이전 결과를 숨기고 fail-closed 오류를 표시합니다.
 
 여러 사전 계산 결과를 하나의 bounded grid로 만들 수 있습니다.
 
@@ -153,7 +149,7 @@ API 계약:
 - `POST /api/runs`
 - `GET /api/runs/<resultKey>`
 
-cache hit은 canonical schema-v4 결과를 반환하고, 새 장기 실행은 `202`와 status URL을 반환합니다. API도 실제시장·2,700개 이상만 허용하며 demo/static 결과로 대체하지 않습니다.
+cache hit은 canonical schema-v5 결과를 반환하고, 새 장기 실행은 `202`와 status URL을 반환합니다. API도 실제시장·2,700개 이상만 허용하며 demo/static 결과로 대체하지 않습니다.
 브라우저 Origin은 프로젝트 Pages(`https://sonchanggi.github.io`)와 loopback만 기본
 허용합니다. 다른 검토된 HTTPS origin은 반복 가능한 `--allowed-origin`으로 명시하며,
 그 밖의 Origin은 preflight와 본 요청 모두 시장 로드 전에 403으로 차단됩니다.
@@ -186,22 +182,23 @@ result key가 교체·정리된 뒤에도 같은 rolling preset과 공개 입력
 
 ## 산출물
 
-- `outputs/.../momentum_factor_results_*.json`: canonical schema-v4 결과
+- `outputs/.../momentum_factor_results_*.json`: canonical schema-v5 결과
 - `outputs/.../input/*.csv.gz`: 선택적 실제 입력 패널
 - `outputs/.../input/market_data_manifest.json`: 파일·행렬 SHA-256, 실제 as-of, 후보 수, read contract
 - `docs/data/grid/v1/manifest.json`: 지원 입력과 content-addressed 결과 목록
 - `docs/data/dashboard.json`, `docs/data/summary.json`: default entry의 byte-identical migration alias
 - `docs/index.html`, `docs/assets/*`: 정적 viewer
 
-schema-v4에는 다음이 포함됩니다.
+schema-v5에는 다음이 포함됩니다.
 
 - 요청→제공자 반환→분석→최신 적격 funnel
-- 244개 독립 조합의 완전성 및 정확한 제외 사유 회계
-- alias 12개 진단 행을 포함한 256개 전체 factor-policy 행
-- 공동 component score, 절대 가드레일, penalty, selection score, rank
-- 선택된 팩터·정책과 선택 이유
+- 61개 독립 팩터의 완전성 및 정확한 제외 사유 회계
+- compatibility alias 3개를 포함한 64개 팩터 행
+- 고정 방법의 component score, 절대 가드레일, penalty, selection score, rank
+- `bestFactor`, `factorRanking`: 동일 입력으로 Python이 고른 최고 팩터와 선택 이유
 - 종목별 기여도·집중도·leave-one sensitivity
-- 현재 연구 목표, 마지막 백테스트 보유, 현금, turnover, 비용
+- `bestFactorPortfolio`, `factorPortfolios`: 최고 팩터 및 모든 팩터의 Python 포트폴리오
+- 마지막 백테스트 보유, 현금, turnover, 비용
 - 입력·유니버스·팩터·정책·선택·엔진 identity
 
 ## Demo와 로컬 파일
@@ -222,6 +219,7 @@ uv run python -m momentum_factor_lab.cli run --demo --demo-symbol-count 200
 uv run python -m momentum_factor_lab.cli run \
   --prices adjusted_prices.csv \
   --volumes share_volumes.csv \
+  --market-caps point_in_time_market_caps.csv \
   --volume-basis split_adjusted
 ```
 

@@ -454,8 +454,8 @@ def _target_for_signal(
     eligibility: pd.Series,
     config: RunConfig,
     *,
-    trailing_volatility: pd.Series | None = None,
     trailing_dollar_volume: pd.Series | None = None,
+    trailing_market_cap: pd.Series | None = None,
 ) -> TargetAllocation:
     return construct_target_allocation(
         policy_id,
@@ -464,8 +464,8 @@ def _target_for_signal(
         prices,
         eligibility,
         config,
-        trailing_volatility=trailing_volatility,
         trailing_dollar_volume=trailing_dollar_volume,
+        trailing_market_cap=trailing_market_cap,
     )
 
 
@@ -477,8 +477,8 @@ def run_factor_backtest(
     config: RunConfig,
     *,
     eligibility_mask: pd.DataFrame | None = None,
-    trailing_volatility: pd.DataFrame | None = None,
     trailing_dollar_volume: pd.DataFrame | None = None,
+    trailing_market_cap: pd.DataFrame | None = None,
     retain_weight_history: bool = True,
     weight_history_tail_sessions: int | None = None,
 ) -> BacktestResult:
@@ -530,8 +530,8 @@ def run_factor_backtest(
         else prices.notna()
     )
     for name, panel in (
-        ("trailing_volatility", trailing_volatility),
         ("trailing_dollar_volume", trailing_dollar_volume),
+        ("trailing_market_cap", trailing_market_cap),
     ):
         if panel is not None and not panel.index.equals(prices.index):
             raise ValueError(f"{name} must share the price date index")
@@ -559,13 +559,13 @@ def run_factor_backtest(
             prices.loc[signal_date],
             eligibility.loc[signal_date],
             config,
-            trailing_volatility=(
-                trailing_volatility.loc[signal_date] if trailing_volatility is not None else None
-            ),
             trailing_dollar_volume=(
                 trailing_dollar_volume.loc[signal_date]
                 if trailing_dollar_volume is not None
                 else None
+            ),
+            trailing_market_cap=(
+                trailing_market_cap.loc[signal_date] if trailing_market_cap is not None else None
             ),
         )
         # A formation date without any finite eligible score is not a strategy
