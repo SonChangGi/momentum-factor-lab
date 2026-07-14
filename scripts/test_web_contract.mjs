@@ -123,6 +123,28 @@ const aliasStatusText = api.canonicalRankingStatusText(aliasExcluded);
 assert.match(aliasStatusText, /독립 팩터와 중복된 호환 alias/);
 assert.doesNotMatch(aliasStatusText, /data_excluded|duplicate_alias/);
 
+const partialRiskRow = payload.factorPolicyRanking.find((row) => (
+  row.comparison_status === "available" && row.risk_metrics_exact === false
+));
+assert(partialRiskRow, "actual grid must expose at least one available partial-risk row");
+const partialRiskText = api.canonicalRiskQualityText(partialRiskRow);
+assert.match(partialRiskText, /불완전/);
+assert.match(partialRiskText, /일간 위험/);
+assert.match(partialRiskText, /quote gap/);
+assert.match(partialRiskText, /평가/);
+assert.match(partialRiskText, /MDD는 관측 종가 기준 하한/);
+const exactRiskRow = payload.factorPolicyRanking.find((row) => row.risk_metrics_exact === true);
+assert(exactRiskRow, "actual grid must expose at least one exact-risk row");
+assert.match(api.canonicalRiskQualityText(exactRiskRow), /^exact/);
+
+assert.match(api.canonicalScoreMethodDescription({
+  config: {
+    score_winsor_lower: 0.10,
+    score_winsor_upper: 0.90,
+    stability_periods: 5,
+  },
+}), /10%~90%.*5개 하위기간/);
+
 const benchmarkCurves = payload.performance.benchmarkCurves;
 assert(benchmarkCurves && typeof benchmarkCurves === "object", "Python payload must expose benchmarkCurves");
 assert.deepEqual(

@@ -440,6 +440,39 @@ def test_all_performance_curves_share_the_selected_policy_dates(
     assert all(len(curve) == len(dates) for curve in performance["factorCurves"].values())
 
 
+def test_performance_curve_includes_the_first_evaluation_return(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    performance = payload["performance"]
+    dates = pd.DatetimeIndex(performance["dates"])
+    selected = payload["selectedFactor"]
+    equity = demo_result.backtests[selected].equity
+    first_position = equity.index.get_loc(dates[0])
+    assert first_position > 0
+    base = float(equity.iloc[first_position - 1])
+
+    curve = performance["factorCurves"][selected]
+    assert curve[0] == pytest.approx(float(equity.loc[dates[0]]) / base)
+    assert curve[-1] == pytest.approx(float(equity.loc[dates[-1]]) / base)
+    ranking = next(row for row in payload["factorPolicyRanking"] if row["selected"] is True)
+    implied_total_return = (1.0 + ranking["cagr"]) ** (
+        ranking["calendar_observations"] / 252.0
+    )
+    assert curve[-1] == pytest.approx(implied_total_return)
+
+
+def test_selection_method_copy_uses_the_actual_public_config(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    config = payload["config"]
+
+    assert config["score_winsor_lower"] == pytest.approx(0.05)
+    assert config["score_winsor_upper"] == pytest.approx(0.95)
+    assert config["stability_periods"] == 3
+
+
 def test_python_period_performance_uses_exact_boundaries_and_explicit_comparators(
     demo_result: AnalysisResult,
 ) -> None:

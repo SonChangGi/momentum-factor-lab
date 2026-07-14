@@ -1839,11 +1839,13 @@ def _json_safe(value: Any) -> Any:
 
 
 def _normalized_curve(series: pd.Series, dates: pd.DatetimeIndex) -> list[float | None]:
-    aligned = pd.to_numeric(series.reindex(dates), errors="coerce")
+    numeric = pd.to_numeric(series, errors="coerce")
+    aligned = numeric.reindex(dates)
     valid = aligned.dropna()
     if valid.empty:
         return [None] * len(dates)
-    base = float(valid.iloc[0])
+    prior = numeric.loc[numeric.index < dates[0]].dropna() if len(dates) else numeric.iloc[0:0]
+    base = float(prior.iloc[-1] if not prior.empty else valid.iloc[0])
     if not np.isfinite(base) or base == 0.0:
         return [None] * len(dates)
     return [float(value / base) if pd.notna(value) else None for value in aligned]

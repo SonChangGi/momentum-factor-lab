@@ -393,6 +393,36 @@ def test_composite_percentiles_ignore_ineligible_factor_values() -> None:
 
 
 @pytest.mark.parametrize(
+    ("value", "expected_score"),
+    [(float("inf"), 100.0), (float("-inf"), 0.0)],
+)
+def test_composite_percentiles_score_same_sign_infinity_only_columns(
+    value: float,
+    expected_score: float,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            _score_row("first", sortino=value),
+            _score_row("second", sortino=value),
+        ]
+    )
+
+    result = composite_factor_scorecard(
+        frame,
+        weights={"sortino": 1.0},
+        winsor_lower=0.05,
+        winsor_upper=0.95,
+        min_observations=504,
+        min_valuation_coverage=0.98,
+        min_daily_risk_observations=504,
+    )
+
+    assert result["sortino_score"].tolist() == [expected_score, expected_score]
+    assert result["composite_score"].tolist() == [expected_score, expected_score]
+    assert result["comparison_status"].tolist() == ["available", "available"]
+
+
+@pytest.mark.parametrize(
     ("changes", "expected_status"),
     [
         (

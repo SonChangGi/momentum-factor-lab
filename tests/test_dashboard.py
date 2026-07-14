@@ -788,6 +788,12 @@ def test_dashboard_summary_preserves_identity_and_selected_allocation_exactly(
     assert summary["cashWeight"] == payload["currentResearchTarget"]["cashWeight"]
     assert summary["contributionDiagnostics"] == payload["contributionDiagnostics"]
     assert summary["gridAccounting"] == payload["gridAccounting"]
+    assert {
+        "resultIdentity",
+        "selectedWeightingPolicy",
+        "gridAccounting",
+        "currentResearchTarget",
+    }.issubset(summary)
 
     manifest = payload["factorHoldingHistorySidecar"]
     sidecar_path = Path(paths["factorHoldingHistory"])

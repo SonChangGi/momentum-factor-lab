@@ -7411,6 +7411,27 @@ function canonicalRankingStatusText(row) {
   return '상태 미확인';
 }
 
+function canonicalRiskQualityText(row) {
+  const daily = formatInteger(row?.daily_risk_observations);
+  const total = formatInteger(row?.observations);
+  const gaps = formatInteger(row?.quote_gap_observations);
+  const coverage = formatPercent(row?.valuation_coverage_ratio);
+  if (row?.risk_metrics_exact === true) {
+    return `exact · 일간 위험 ${daily}/${total} · quote gap ${gaps} · 평가 ${coverage}`;
+  }
+  return `불완전 · 일간 위험 ${daily}/${total} · quote gap ${gaps} · 평가 ${coverage} · MDD는 관측 종가 기준 하한`;
+}
+
+function canonicalScoreMethodDescription(payload) {
+  const lower = Number(payload?.config?.score_winsor_lower);
+  const upper = Number(payload?.config?.score_winsor_upper);
+  const periods = Number(payload?.config?.stability_periods);
+  const lowerLabel = Number.isFinite(lower) ? `${formatNumber(lower * 100)}%` : '-';
+  const upperLabel = Number.isFinite(upper) ? `${formatNumber(upper * 100)}%` : '-';
+  const periodLabel = Number.isInteger(periods) && periods > 0 ? `${formatInteger(periods)}개` : '-';
+  return `성과 구성요소는 실제 실행 설정 ${lowerLabel}~${upperLabel} 백분위에서 윈저화한 뒤 횡단면 percentile 점수로 변환하며, 안정성은 평가창을 ${periodLabel} 하위기간으로 나눈 CAGR 분산을 사용합니다.`;
+}
+
 function canonicalGridAccounting(payload) {
   const accounting = payload?.gridAccounting || {};
   const independentFactorCount = Number(accounting.independentFactorCount) || 0;
@@ -7609,6 +7630,7 @@ function renderCanonicalRanking(payload) {
     appendCell(tr, formatPercent(row.cagr), { className: classForNumber(row.cagr) });
     appendCell(tr, formatNumber(row.sharpe), { className: classForNumber(row.sharpe) });
     appendCell(tr, formatPercent(row.max_drawdown), { className: Number(row.max_drawdown) < 0 ? 'negative' : 'neutral' });
+    appendCell(tr, canonicalRiskQualityText(row), { className: row.risk_metrics_exact === true ? 'neutral' : 'negative' });
     appendCell(tr, canonicalRankingStatusText(row));
     tbody.appendChild(tr);
   });
@@ -7616,7 +7638,7 @@ function renderCanonicalRanking(payload) {
     appendEmpty('#joint-ranking-chart', '필터 조건에 맞는 팩터×정책 조합이 없습니다.');
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 9;
+    td.colSpan = 10;
     td.textContent = '필터 조건에 맞는 조합이 없습니다.';
     tr.appendChild(td);
     tbody.appendChild(tr);
@@ -7642,7 +7664,7 @@ function renderCanonicalComponents(payload, selected) {
   });
   setText(
     '#canonical-selection-reason',
-    `${payload.selectedReason || '선택 근거 미표기'} · 동일 표본 상대 합성 점수는 비교 가능한 조합 내부의 percentile 기반 ${formatNumber(selected?.selection_score)} / 100이며 절대 신뢰도나 미래 성공 확률이 아닙니다. 브라우저 기간 비교와 달리 Python 팩터×정책 grid의 절대 가드레일 통과 조합만 선정 대상으로 합니다. 이미 보유 중 발생한 극단 움직임은 발생 이후 전략 수익률에 인과적으로 반영하지만, 종료일 보유 종목을 가격 평가하지 못해 최종 NAV가 없는 조합은 수익률 크기와 무관하게 선정에서 제외하고 진단용으로만 남깁니다.`,
+    `${payload.selectedReason || '선택 근거 미표기'} · ${canonicalScoreMethodDescription(payload)} 동일 표본 상대 합성 점수는 비교 가능한 조합 내부의 percentile 기반 ${formatNumber(selected?.selection_score)} / 100이며 절대 신뢰도나 미래 성공 확률이 아닙니다. 브라우저 기간 비교와 달리 Python 팩터×정책 grid의 절대 가드레일 통과 조합만 선정 대상으로 합니다. 이미 보유 중 발생한 극단 움직임은 발생 이후 전략 수익률에 인과적으로 반영하지만, 종료일 보유 종목을 가격 평가하지 못해 최종 NAV가 없는 조합은 수익률 크기와 무관하게 선정에서 제외하고 진단용으로만 남깁니다.`,
   );
 }
 
@@ -8347,6 +8369,8 @@ if (typeof globalThis !== 'undefined') {
     canonicalSelectionStatusLabel,
     canonicalExclusionReasonLabel,
     canonicalRankingStatusText,
+    canonicalRiskQualityText,
+    canonicalScoreMethodDescription,
     canonicalGridAccounting,
     appendBarRow,
     appendCanonicalBar,

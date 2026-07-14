@@ -530,7 +530,14 @@ def _winsorized_percentile(series: pd.Series, lower: float, upper: float) -> pd.
     values = pd.to_numeric(series, errors="coerce").astype(float)
     finite = values.replace([np.inf, -np.inf], np.nan).dropna()
     if finite.empty:
-        return pd.Series(np.nan, index=series.index, dtype=float)
+        scores = pd.Series(np.nan, index=series.index, dtype=float)
+        positive_infinite = values.eq(np.inf)
+        negative_infinite = values.eq(-np.inf)
+        if positive_infinite.any():
+            scores.loc[positive_infinite] = 100.0
+        if negative_infinite.any():
+            scores.loc[negative_infinite] = 0.0
+        return scores
     low = float(finite.quantile(lower))
     high = float(finite.quantile(upper))
     clipped = values.replace(np.inf, high).replace(-np.inf, low).clip(low, high)
