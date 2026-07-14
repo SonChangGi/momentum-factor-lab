@@ -5,7 +5,7 @@ const html = readFileSync("momentum_factor_lab/web/index.html", "utf8");
 const css = readFileSync("momentum_factor_lab/web/styles.css", "utf8");
 
 assert.match(html, /모멘텀 팩터 데일리 대시보드/);
-assert.match(html, /팩터 점수 50%·거래대금 30%·정보시점 기준 시가총액 20%/);
+assert.match(html, /팩터 점수 70%·후행 거래대금 30%/);
 assert.match(html, /class="core-research-inputs"/);
 assert.match(html, /<details id="advanced-research-inputs"/);
 assert.match(html, /최대 일간 절대 수익률[\s\S]*max="10000"/);
