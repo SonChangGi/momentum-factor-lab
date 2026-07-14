@@ -16,10 +16,7 @@ permissions:
 
 jobs:
   update-dashboard:
-    # SEC currently rejects the shared Ubuntu runner egress even when the
-    # identification header is present. GitHub-hosted macOS uses a distinct
-    # egress pool and keeps this official-data-only build fail-closed.
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Check out repository
@@ -56,30 +53,6 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Verify SEC point-in-time source access
-        if: steps.freshness.outputs.skip != 'true'
-        env:
-          MOMENTUM_FACTOR_LAB_SEC_USER_AGENT: ${{ secrets.MOMENTUM_FACTOR_LAB_SEC_USER_AGENT }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          from urllib.request import Request, urlopen
-
-          url = "https://www.sec.gov/files/company_tickers_exchange.json"
-          user_agent = os.environ.get("MOMENTUM_FACTOR_LAB_SEC_USER_AGENT", "").strip()
-          if not user_agent:
-              raise SystemExit("MOMENTUM_FACTOR_LAB_SEC_USER_AGENT is required")
-          request = Request(url, headers={"User-Agent": user_agent})
-          with urlopen(request, timeout=45) as response:
-              payload = json.load(response)
-          if payload.get("fields") != ["cik", "name", "ticker", "exchange"]:
-              raise SystemExit("SEC company-ticker response contract changed")
-          if not payload.get("data"):
-              raise SystemExit("SEC company-ticker response is empty")
-          print(f"SEC preflight passed with {len(payload['data'])} ticker rows.")
-          PY
-
       - name: Install Momentum Factor Lab with live-data extras
         if: steps.freshness.outputs.skip != 'true'
         run: |
@@ -88,8 +61,6 @@ jobs:
 
       - name: Build daily Korean dashboard
         if: steps.freshness.outputs.skip != 'true'
-        env:
-          MOMENTUM_FACTOR_LAB_SEC_USER_AGENT: ${{ secrets.MOMENTUM_FACTOR_LAB_SEC_USER_AGENT }}
         run: |
           python -m momentum_factor_lab.cli scheduled-dashboard \
             --config .github/momentum-dashboard-config.json \

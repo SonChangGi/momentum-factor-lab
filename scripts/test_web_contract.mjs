@@ -10,7 +10,7 @@ const api = context.__MFL_WEB_TESTS__;
 
 assert(api, "web test API must be exported without a DOM");
 assert.equal(payload.schemaVersion, 5);
-assert.equal(payload.weightingPolicy, "score_liquidity_market_cap_rank");
+assert.equal(payload.weightingPolicy, "score_liquidity_rank");
 assert.equal(payload.weightingMethodology.optimized, false);
 assert.equal(payload.factorRanking.length, 64);
 assert.equal(payload.factorAccounting.expectedIndependentFactorCount, 61);

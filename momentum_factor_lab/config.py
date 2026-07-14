@@ -9,7 +9,7 @@ from typing import Any
 from .universe import DEFAULT_UNIVERSE, is_supported_symbol, normalize_symbol
 
 
-FIXED_WEIGHTING_POLICY = "score_liquidity_market_cap_rank"
+FIXED_WEIGHTING_POLICY = "score_liquidity_rank"
 WEIGHTING_POLICIES = (FIXED_WEIGHTING_POLICY,)
 MAX_TOP_N = 50
 
@@ -17,21 +17,16 @@ POLICY_REGISTRY_VERSION = "weighting-policy-registry-v3"
 POLICY_REGISTRY = {
     FIXED_WEIGHTING_POLICY: {
         "version": "1",
-        "implementationId": "score_liquidity_market_cap_rank_v1",
-        "label": "팩터·유동성·시가총액 고정 혼합",
+        "implementationId": "score_liquidity_rank_v1",
+        "label": "팩터·유동성 고정 혼합",
         "description": (
-            "팩터 점수 50%, 후행 거래대금 30%, 정보시점 기준 시가총액 20%의 "
-            "백분위 순위를 결합하고 종목별 최대 비중을 적용"
+            "팩터 점수 70%와 후행 거래대금 30%의 백분위 순위를 결합하고 종목별 최대 비중을 적용"
         ),
-        "formula": (
-            "floor+0.50*factor_score_pct+0.30*lagged_raw_dollar_volume_pct+"
-            "0.20*point_in_time_market_cap_pct"
-        ),
+        "formula": ("floor+0.70*factor_score_pct+0.30*lagged_raw_dollar_volume_pct"),
         "requiredSignalDateInputs": [
             "factor_score",
             "eligible_adjusted_close",
             "trailing_raw_close_times_raw_volume",
-            "point_in_time_market_cap",
         ],
         "selectionRole": "fixed_methodology_not_optimized",
     },
@@ -104,9 +99,9 @@ class RunConfig:
     score_winsor_upper: float = 0.95
 
     weighting_policies: tuple[str, ...] = WEIGHTING_POLICIES
-    allocation_score_weight: float = 0.50
+    allocation_score_weight: float = 0.70
     allocation_liquidity_weight: float = 0.30
-    allocation_market_cap_weight: float = 0.20
+    allocation_market_cap_weight: float = 0.0
     allocation_rank_floor: float = 0.05
     market_cap_max_age_days: int = 550
     market_cap_min_universe_coverage: float = 0.75
@@ -371,8 +366,8 @@ class RunConfig:
             sum(component_weights), 1.0, abs_tol=1e-12
         ):
             raise ValueError("allocation component weights must be non-negative and sum to 1")
-        if component_weights != (0.50, 0.30, 0.20):
-            raise ValueError("allocation component weights are fixed at 0.50/0.30/0.20")
+        if component_weights != (0.70, 0.30, 0.0):
+            raise ValueError("allocation component weights are fixed at 0.70/0.30/0.00")
         if self.allocation_rank_floor != 0.05:
             raise ValueError("allocation_rank_floor is fixed at 0.05")
         if self.market_cap_max_age_days != 550:

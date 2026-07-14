@@ -111,17 +111,16 @@ def test_dashboard_weight_rows_reconcile_fixed_formula_components(
     portfolio = payload["bestFactorPortfolio"]
     parameters = payload["allocationMethod"]["parameters"]
 
-    assert parameters["factorScoreWeight"] == pytest.approx(0.50)
+    assert parameters["factorScoreWeight"] == pytest.approx(0.70)
     assert parameters["liquidityWeight"] == pytest.approx(0.30)
-    assert parameters["marketCapWeight"] == pytest.approx(0.20)
+    assert parameters["marketCapWeight"] == pytest.approx(0.0)
     assert parameters["rankFloor"] == pytest.approx(0.05)
     assert all(
         row["rawPolicyScore"]
         == pytest.approx(
             parameters["rankFloor"]
-            + 0.50 * row["scoreComponent"]
+            + 0.70 * row["scoreComponent"]
             + 0.30 * row["liquidityComponent"]
-            + 0.20 * row["marketCapComponent"]
         )
         for row in portfolio["weights"]
     )

@@ -154,7 +154,7 @@ const CHART_PALETTE_CLASS_MAP = Object.freeze({
     default: 'benchmark',
   }),
   policies: Object.freeze({
-    score_liquidity_market_cap_rank: 'policy-score-liquidity-market-cap-rank',
+    score_liquidity_rank: 'policy-score-liquidity-rank',
   }),
   statuses: Object.freeze({
     eligible: 'status-eligible',
@@ -1404,15 +1404,7 @@ async function validateResult(entry, payload, summary = null, options = {}) {
   requireCondition(
     sameJson(observedHashFields, [...LIVE_INPUT_HASH_FIELDS].sort())
       && observedHashFields.every((field) => validSha256(data.inputSha256[field])),
-    '실제시장 provenance 입력 해시가 현재 시장가치 계약과 다릅니다.',
-  );
-  requireCondition(
-    data.pointInTimeMarketCapAvailable === true
-      && integer(data.latestMarketCapSecurityCount)
-      && Number(data.latestMarketCapSecurityCount) > 0
-      && Number(data.latestMarketCapSecurityCount) / Number(data.analyzedSecurityCount)
-        >= Number(payload.config.market_cap_min_universe_coverage),
-    'PIT 시가총액 커버리지가 설정 임계값을 충족하지 않습니다.',
+    '실제시장 provenance 입력 해시 계약이 다릅니다.',
   );
   requireCondition(
     isRecord(payload.researchInputs)
@@ -1434,7 +1426,7 @@ async function validateResult(entry, payload, summary = null, options = {}) {
     );
   }
 
-  const policyId = 'score_liquidity_market_cap_rank';
+  const policyId = 'score_liquidity_rank';
   const policy = payload.weightingMethodology;
   const allocation = payload.allocationMethod;
   const config = payload.config;
@@ -1449,22 +1441,22 @@ async function validateResult(entry, payload, summary = null, options = {}) {
       && isRecord(allocation)
       && allocation.policyId === policyId
       && allocation.fixed === true,
-    '비중 방식은 고정 팩터·유동성·PIT 시가총액 방법이어야 합니다.',
+    '비중 방식은 고정 팩터·유동성 방법이어야 합니다.',
   );
   const parameters = allocation.parameters;
   requireCondition(
     isRecord(parameters)
-      && closeNumber(parameters.factorScoreWeight, 0.50)
+      && closeNumber(parameters.factorScoreWeight, 0.70)
       && closeNumber(parameters.liquidityWeight, 0.30)
-      && closeNumber(parameters.marketCapWeight, 0.20)
+      && closeNumber(parameters.marketCapWeight, 0.00)
       && closeNumber(parameters.rankFloor, 0.05)
-      && closeNumber(config.allocation_score_weight, 0.50)
+      && closeNumber(config.allocation_score_weight, 0.70)
       && closeNumber(config.allocation_liquidity_weight, 0.30)
-      && closeNumber(config.allocation_market_cap_weight, 0.20)
+      && closeNumber(config.allocation_market_cap_weight, 0.00)
       && closeNumber(config.allocation_rank_floor, 0.05)
       && parameters.topN === config.top_n
       && closeNumber(parameters.maxWeight, config.max_weight),
-    '고정 비중 방법의 50/30/20 입력 또는 상한이 다릅니다.',
+    '고정 비중 방법의 70/30 입력 또는 상한이 다릅니다.',
   );
 
   const definitions = payload.factorDefinitions;
@@ -1523,19 +1515,18 @@ async function validateResult(entry, payload, summary = null, options = {}) {
     '동일 입력 최고 팩터 포트폴리오가 팩터 결과와 다릅니다.',
   );
   target.weights.forEach((row) => {
-    const components = [row.scoreComponent, row.liquidityComponent, row.marketCapComponent];
+    const components = [row.scoreComponent, row.liquidityComponent];
     requireCondition(
       components.every((value) => finite(value) && Number(value) >= 0 && Number(value) <= 1)
         && finite(row.trailingDollarVolume)
         && Number(row.trailingDollarVolume) > 0
-        && finite(row.trailingMarketCap)
-        && Number(row.trailingMarketCap) > 0,
-      '포트폴리오에 팩터·유동성·시가총액 구성값이 없습니다.',
+        && row.trailingMarketCap === null
+        && closeNumber(row.marketCapComponent, 0.0),
+      '포트폴리오의 팩터·유동성 구성값이 잘못되었습니다.',
     );
     const expectedRaw = 0.05
-      + 0.50 * Number(row.scoreComponent)
-      + 0.30 * Number(row.liquidityComponent)
-      + 0.20 * Number(row.marketCapComponent);
+      + 0.70 * Number(row.scoreComponent)
+      + 0.30 * Number(row.liquidityComponent);
     requireCondition(closeNumber(row.rawPolicyScore, expectedRaw), '고정 비중 raw score가 다릅니다.');
   });
 
@@ -5840,7 +5831,7 @@ function renderFixedAllocationMethod(payload) {
   const title = document.createElement('strong');
   title.textContent = policy.label || payload.weightingPolicy || '-';
   const detail = document.createElement('small');
-  detail.textContent = `팩터 ${formatPercent(parameters.factorScoreWeight)} + 거래대금 ${formatPercent(parameters.liquidityWeight)} + PIT 시가총액 ${formatPercent(parameters.marketCapWeight)} · 종목당 상한 ${formatPercent(parameters.maxWeight)}`;
+  detail.textContent = `팩터 ${formatPercent(parameters.factorScoreWeight)} + 거래대금 ${formatPercent(parameters.liquidityWeight)} · 종목당 상한 ${formatPercent(parameters.maxWeight)}`;
   item.append(title, detail);
   target.appendChild(item);
   setText('#allocation-method-meta', `고정 방법 · v${policy.version || '-'}`);

@@ -55,7 +55,7 @@ def _allocation(
     )
 
 
-def test_only_fixed_score_liquidity_market_cap_policy_is_available() -> None:
+def test_only_fixed_score_liquidity_policy_is_available() -> None:
     assert WEIGHTING_POLICIES == (FIXED_WEIGHTING_POLICY,)
     result = _allocation()
 
@@ -68,27 +68,22 @@ def test_only_fixed_score_liquidity_market_cap_policy_is_available() -> None:
         "score": "available",
         "methodology": "fixed_not_optimized",
         "liquidity": "trailing_raw_dollar_volume",
-        "marketCap": "point_in_time_public_filing",
+        "marketCap": "not_used",
     }
 
 
-def test_fixed_raw_score_is_exact_50_30_20_percentile_blend_plus_floor() -> None:
+def test_fixed_raw_score_is_exact_70_30_percentile_blend_plus_floor() -> None:
     result = _allocation(config=_config(max_weight=1.0))
     rows = result.rows.set_index("symbol")
 
-    expected = (
-        0.05
-        + 0.50 * rows["scoreComponent"]
-        + 0.30 * rows["liquidityComponent"]
-        + 0.20 * rows["marketCapComponent"]
-    )
+    expected = 0.05 + 0.70 * rows["scoreComponent"] + 0.30 * rows["liquidityComponent"]
     assert rows["rawPolicyScore"].tolist() == pytest.approx(expected.tolist())
     assert rows["weight"].tolist() == pytest.approx((expected / expected.sum()).tolist())
     assert rows.loc["AAA", "rawPolicyScore"] == pytest.approx(1.05)
     assert rows.loc["DDD", "rawPolicyScore"] == pytest.approx(0.30)
 
 
-def test_score_liquidity_and_market_cap_all_change_the_weight() -> None:
+def test_score_and_liquidity_change_the_weight_but_market_cap_does_not() -> None:
     scores, _prices, _eligible, liquidity, market_cap = _inputs()
     baseline = _allocation(config=_config(max_weight=1.0)).rows.set_index("symbol")
     changed = _allocation(
@@ -99,6 +94,8 @@ def test_score_liquidity_and_market_cap_all_change_the_weight() -> None:
 
     assert baseline.loc["AAA", "weight"] > changed.loc["AAA", "weight"]
     assert baseline.loc["DDD", "weight"] < changed.loc["DDD", "weight"]
+    assert changed["marketCapComponent"].eq(0.0).all()
+    assert changed["trailingMarketCap"].isna().all()
     assert scores.index.tolist() == changed.index.tolist()
 
 
@@ -123,26 +120,7 @@ def test_top_n_boundary_tie_uses_trailing_dollar_volume_then_symbol() -> None:
     assert result.tie_break_policy == TIE_BREAK_POLICY
 
 
-@pytest.mark.parametrize(
-    ("liquidity", "market_cap", "reason"),
-    [
-        (
-            pd.Series(np.nan, index=["AAA", "BBB", "CCC", "DDD"]),
-            None,
-            "no_finite_trailing_dollar_volume",
-        ),
-        (
-            None,
-            pd.Series(np.nan, index=["AAA", "BBB", "CCC", "DDD"]),
-            "no_point_in_time_market_cap",
-        ),
-    ],
-)
-def test_missing_required_allocation_component_fails_closed(
-    liquidity: pd.Series | None,
-    market_cap: pd.Series | None,
-    reason: str,
-) -> None:
+def test_missing_required_liquidity_component_fails_closed() -> None:
     _scores, _prices, _eligible, default_liquidity, default_market_cap = _inputs()
     result = construct_target_allocation(
         FIXED_WEIGHTING_POLICY,
@@ -151,25 +129,13 @@ def test_missing_required_allocation_component_fails_closed(
         _prices,
         _eligible,
         _config(),
-        trailing_dollar_volume=default_liquidity if liquidity is None else liquidity,
-        trailing_market_cap=default_market_cap if market_cap is None else market_cap,
+        trailing_dollar_volume=pd.Series(np.nan, index=default_liquidity.index),
+        trailing_market_cap=default_market_cap,
     )
-    # In each parameter row the explicitly all-NaN component is unavailable.
-    if reason == "no_point_in_time_market_cap":
-        result = construct_target_allocation(
-            FIXED_WEIGHTING_POLICY,
-            SIGNAL_DATE,
-            _scores,
-            _prices,
-            _eligible,
-            _config(),
-            trailing_dollar_volume=default_liquidity,
-            trailing_market_cap=market_cap,
-        )
 
     assert result.status == "unavailable"
     assert result.cash_weight == 1.0
-    assert reason in result.reasons[0]
+    assert "no_finite_trailing_dollar_volume" in result.reasons[0]
 
 
 def test_fixed_policy_respects_cap_and_leaves_explicit_cash() -> None:

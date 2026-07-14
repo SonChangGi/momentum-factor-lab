@@ -1489,7 +1489,7 @@ button.factor-ranking-bar-row { width: 100%; text-align: left; }
 }
 .factor-ranking-bar-row .bar-fill { background: var(--bar-color, var(--chart-focal)); }
 .factor-ranking-bar-row.is-selected .bar-fill { background: var(--chart-focal-strong); }
-.policy-score-liquidity-market-cap-rank { --bar-color: var(--chart-policy-liquidity); }
+.policy-score-liquidity-rank { --bar-color: var(--chart-policy-liquidity); }
 .factor-ranking-bar-row.status-data-excluded .bar-fill,
 .factor-ranking-bar-row.status-unavailable .bar-fill {
   border: 1px solid var(--chart-neutral);

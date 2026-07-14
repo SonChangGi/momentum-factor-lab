@@ -234,9 +234,9 @@ def test_cli_values_map_to_run_config_without_hidden_overrides() -> None:
     assert config.stale_after_days == 3
     assert config.min_valuation_coverage == pytest.approx(0.95)
     assert config.min_daily_risk_observations == 400
-    assert config.allocation_score_weight == pytest.approx(0.50)
+    assert config.allocation_score_weight == pytest.approx(0.70)
     assert config.allocation_liquidity_weight == pytest.approx(0.30)
-    assert config.allocation_market_cap_weight == pytest.approx(0.20)
+    assert config.allocation_market_cap_weight == pytest.approx(0.0)
     assert config.allocation_rank_floor == pytest.approx(0.05)
     assert config.selection_min_sharpe == pytest.approx(0.10)
     assert config.selection_max_drawdown == pytest.approx(0.45)

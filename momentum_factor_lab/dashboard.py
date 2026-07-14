@@ -1950,7 +1950,7 @@ def _expected_available_component_status(
             "score": "available",
             "methodology": "fixed_not_optimized",
             "liquidity": "trailing_raw_dollar_volume",
-            "marketCap": "point_in_time_public_filing",
+            "marketCap": "not_used",
         }
     else:  # pragma: no cover - canonical registry validation prevents this branch
         raise ValueError(f"unsupported weighting policy: {policy_id}")
@@ -2092,8 +2092,7 @@ def _validate_factor_portfolio(
             or not _finite_number(row.get("rankComponent"))
             or not _finite_number(row.get("trailingDollarVolume"))
             or float(row["trailingDollarVolume"]) <= 0.0
-            or not _finite_number(row.get("trailingMarketCap"))
-            or float(row["trailingMarketCap"]) <= 0.0
+            or row.get("trailingMarketCap") is not None
         ):
             raise ValueError(f"dashboard {label} contains an invalid holding")
         if policy_id == FIXED_WEIGHTING_POLICY:
@@ -2103,11 +2102,9 @@ def _validate_factor_portfolio(
                 or not _finite_number(row.get("liquidityComponent"))
                 or not 0.0 < float(row["liquidityComponent"]) <= 1.0
                 or not _finite_number(row.get("marketCapComponent"))
-                or not 0.0 < float(row["marketCapComponent"]) <= 1.0
+                or not _close(float(row["marketCapComponent"]), 0.0)
             ):
-                raise ValueError(
-                    f"dashboard {label} score/liquidity/market-cap components are invalid"
-                )
+                raise ValueError(f"dashboard {label} score/liquidity components are invalid")
         symbols.append(str(row["symbol"]))
         total += float(row["weight"])
     if len(symbols) != len(set(symbols)):
@@ -2210,27 +2207,19 @@ def _validate_policy_weight_construction(
 
     score_components: list[float] | None = None
     liquidity_components: list[float] | None = None
-    market_cap_components: list[float] | None = None
     if policy_id == FIXED_WEIGHTING_POLICY:
         scoring_values = [max(value, 0.0) for value in factor_scores]
         if not any(value > 0.0 for value in scoring_values):
             scoring_values = factor_scores
         liquidity_values = [row.get("trailingDollarVolume") for row in weights]
-        market_cap_values = [row.get("trailingMarketCap") for row in weights]
         if any(not _finite_number(value) or float(value) <= 0.0 for value in liquidity_values):
             raise ValueError(f"{label} trailing liquidity inputs are invalid")
-        if any(not _finite_number(value) or float(value) <= 0.0 for value in market_cap_values):
-            raise ValueError(f"{label} point-in-time market-cap inputs are invalid")
         score_components = [
             _percentile_rank(scoring_values, position) for position in range(len(weights))
         ]
         liquidity_numbers = [float(value) for value in liquidity_values]
         liquidity_components = [
             _percentile_rank(liquidity_numbers, position) for position in range(len(weights))
-        ]
-        market_cap_numbers = [float(value) for value in market_cap_values]
-        market_cap_components = [
-            _percentile_rank(market_cap_numbers, position) for position in range(len(weights))
         ]
 
     raw_values: list[float] = []
@@ -2239,10 +2228,9 @@ def _validate_policy_weight_construction(
             if (
                 component_status.get("methodology") != "fixed_not_optimized"
                 or component_status.get("liquidity") != "trailing_raw_dollar_volume"
-                or component_status.get("marketCap") != "point_in_time_public_filing"
+                or component_status.get("marketCap") != "not_used"
                 or score_components is None
                 or liquidity_components is None
-                or market_cap_components is None
             ):
                 raise ValueError(f"{label} fixed-method components are inconsistent")
             _require_close(
@@ -2257,14 +2245,13 @@ def _validate_policy_weight_construction(
             )
             _require_close(
                 row.get("marketCapComponent"),
-                market_cap_components[position],
+                0.0,
                 f"{label} market-cap component",
             )
             expected_raw = (
                 float(config["allocation_rank_floor"])
                 + float(config["allocation_score_weight"]) * score_components[position]
                 + float(config["allocation_liquidity_weight"]) * liquidity_components[position]
-                + float(config["allocation_market_cap_weight"]) * market_cap_components[position]
             )
         else:  # pragma: no cover - registry validation prevents this branch
             raise ValueError(f"unsupported weighting policy: {policy_id}")

@@ -19,7 +19,7 @@ def test_default_research_contract_has_one_fixed_policy_and_explicit_scores() ->
     assert config.evaluation_window_days == 756
     assert config.min_valuation_coverage == 0.98
     assert config.min_daily_risk_observations == 504
-    assert config.weighting_policies == WEIGHTING_POLICIES == ("score_liquidity_market_cap_rank",)
+    assert config.weighting_policies == WEIGHTING_POLICIES == ("score_liquidity_rank",)
     assert config.score_weights == {
         "sortino": 0.25,
         "calmar": 0.20,
@@ -29,9 +29,9 @@ def test_default_research_contract_has_one_fixed_policy_and_explicit_scores() ->
         "stability": 0.10,
     }
     assert sum(config.score_weights.values()) == pytest.approx(1.0)
-    assert config.allocation_score_weight == pytest.approx(0.50)
+    assert config.allocation_score_weight == pytest.approx(0.70)
     assert config.allocation_liquidity_weight == pytest.approx(0.30)
-    assert config.allocation_market_cap_weight == pytest.approx(0.20)
+    assert config.allocation_market_cap_weight == pytest.approx(0.0)
     assert config.allocation_rank_floor == pytest.approx(0.05)
     assert config.market_cap_max_age_days == 550
     assert config.market_cap_min_universe_coverage == pytest.approx(0.75)
@@ -56,9 +56,9 @@ def test_default_research_contract_has_one_fixed_policy_and_explicit_scores() ->
     assert serialized["absolute_guardrail_version"] == config.absolute_guardrail_version
     assert serialized["analysis_cache_version"] == config.analysis_cache_version
     assert serialized["comparison_benchmarks"] == ["SPY", "^IXIC", "QQQ"]
-    assert serialized["allocation_score_weight"] == pytest.approx(0.50)
+    assert serialized["allocation_score_weight"] == pytest.approx(0.70)
     assert serialized["allocation_liquidity_weight"] == pytest.approx(0.30)
-    assert serialized["allocation_market_cap_weight"] == pytest.approx(0.20)
+    assert serialized["allocation_market_cap_weight"] == pytest.approx(0.0)
     assert serialized["selection_max_security_absolute_contribution_share"] == pytest.approx(0.35)
     assert "score_size_market_cap_weight" not in serialized
     assert "policy_sharpe_tolerance" not in serialized
@@ -114,7 +114,7 @@ def test_invalid_research_configuration_is_rejected(
             {"weighting_policies": ("equal_weight",)},
             "fixed weighting policy",
         ),
-        ({"allocation_score_weight": 0.70}, "sum to 1"),
+        ({"allocation_score_weight": 0.50}, "sum to 1"),
         (
             {
                 "allocation_score_weight": 1.10,
@@ -123,7 +123,7 @@ def test_invalid_research_configuration_is_rejected(
             "non-negative and sum to 1",
         ),
         ({"allocation_rank_floor": -0.01}, "allocation_rank_floor"),
-        ({"allocation_market_cap_weight": 0.30}, "sum to 1"),
+        ({"allocation_market_cap_weight": 0.20}, "sum to 1"),
         ({"market_cap_max_age_days": 549}, "market_cap_max_age_days"),
         ({"market_cap_min_universe_coverage": 0.0}, "market_cap_min_universe_coverage"),
         ({"selection_min_effective_names": 0.0}, "must be positive"),

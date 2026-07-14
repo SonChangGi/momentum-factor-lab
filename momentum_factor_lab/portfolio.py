@@ -293,26 +293,16 @@ def construct_target_allocation(
         if trailing_dollar_volume is not None
         else pd.Series(np.nan, index=ranked.index, dtype=float)
     )
-    market_cap = (
-        _positive_finite(trailing_market_cap, ranked.index)
-        if trailing_market_cap is not None
-        else pd.Series(np.nan, index=ranked.index, dtype=float)
-    )
-    ranked = ranked.loc[liquidity.notna() & market_cap.notna()]
+    ranked = ranked.loc[liquidity.notna()]
     if ranked.empty:
-        reasons = []
-        if liquidity.dropna().empty:
-            reasons.append("no_finite_trailing_dollar_volume")
-        if market_cap.dropna().empty:
-            reasons.append("no_point_in_time_market_cap")
         return _unavailable(
             policy_id,
             signal_date,
-            "+".join(reasons) or "no_complete_fixed_policy_inputs",
+            "no_finite_trailing_dollar_volume",
             eligible_count=eligible_count,
             component_status={
                 "liquidity": "unavailable" if liquidity.dropna().empty else "partial",
-                "marketCap": "unavailable" if market_cap.dropna().empty else "partial",
+                "marketCap": "not_used",
             },
         )
 
@@ -334,30 +324,27 @@ def construct_target_allocation(
     diagnostics = pd.DataFrame(index=symbols)
     diagnostics["rankComponent"] = rank_strength
     diagnostics["trailingDollarVolume"] = liquidity.reindex(symbols)
-    diagnostics["trailingMarketCap"] = market_cap.reindex(symbols)
+    diagnostics["trailingMarketCap"] = np.nan
     diagnostics["scoreComponent"] = np.nan
     diagnostics["liquidityComponent"] = np.nan
-    diagnostics["marketCapComponent"] = np.nan
+    diagnostics["marketCapComponent"] = 0.0
     score_values = selected.clip(lower=0.0)
     if not bool(score_values.gt(0.0).any()):
         score_values = selected
     score_component = _percentile_component(score_values)
     liquidity_component = _percentile_component(np.log1p(liquidity.reindex(symbols)))
-    market_cap_component = _percentile_component(np.log1p(market_cap.reindex(symbols)))
     raw = (
         config.allocation_rank_floor
         + config.allocation_score_weight * score_component
         + config.allocation_liquidity_weight * liquidity_component
-        + config.allocation_market_cap_weight * market_cap_component
     )
     diagnostics["scoreComponent"] = score_component
     diagnostics["liquidityComponent"] = liquidity_component
-    diagnostics["marketCapComponent"] = market_cap_component
     component_status.update(
         {
             "methodology": "fixed_not_optimized",
             "liquidity": "trailing_raw_dollar_volume",
-            "marketCap": "point_in_time_public_filing",
+            "marketCap": "not_used",
         }
     )
 

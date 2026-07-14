@@ -807,7 +807,6 @@ def _live_inputs(
     int,
 ]:
     from .live_data import download_live_data
-    from .market_cap import load_sec_market_caps
 
     acquired = download_live_data(config)
     if acquired.live_error:
@@ -892,23 +891,31 @@ def _live_inputs(
     raw_close_proxy = raw_closes.isna() & prices.notna()
     effective_raw_closes = raw_closes.combine_first(prices)
     dollar_volumes = effective_raw_closes.mul(volumes)
-    market_cap_result = load_sec_market_caps(
-        dates=pd.DatetimeIndex(prices.index),
-        raw_closes=effective_raw_closes,
-        stock_splits=acquired.stock_splits.reindex(
-            index=prices.index,
-            columns=prices.columns,
-        ).fillna(0.0),
-        universe=analysis_universe,
-        config=config,
-    )
-    market_caps = market_cap_result.market_caps.reindex(
+    # Keep the legacy snapshot slots deterministic without inventing a size
+    # signal. The fixed public method uses only factor score and lagged raw
+    # dollar volume, both reproducible in the scheduled Pages build.
+    market_caps = pd.DataFrame(
+        np.nan,
         index=prices.index,
         columns=prices.columns,
+        dtype=float,
     )
-    market_cap_sources = market_cap_result.symbol_sources
+    market_cap_sources = pd.DataFrame(
+        [
+            {
+                "source": "not-used-by-score-liquidity-fixed-method",
+                "status": "not_used",
+                "records": 0,
+                "point_in_time_market_cap": False,
+                "note": (
+                    "The fixed allocation method uses factor score and trailing raw dollar "
+                    "volume only; no market-cap value is synthesized or copied backward."
+                ),
+            }
+        ]
+    )
     data_sources = pd.concat(
-        [acquired.data_sources, market_cap_result.source_health],
+        [acquired.data_sources, market_cap_sources],
         ignore_index=True,
         sort=False,
     )
@@ -937,9 +944,8 @@ def _live_inputs(
             "distinct raw close was unavailable; the count is disclosed."
         ),
         (
-            "Point-in-time market cap uses SEC filing dates and leaves missing facts missing; "
-            f"latest coverage is {market_cap_result.covered_symbol_count}/"
-            f"{len(returned_candidates)} ({market_cap_result.coverage_ratio:.2%})."
+            "The fixed allocation method uses factor score and trailing raw dollar volume; "
+            "market cap is not used, synthesized, or copied backward."
         ),
     ]
     if non_positive_price_cells or non_positive_raw_close_cells or negative_volume_cells:
@@ -1753,15 +1759,15 @@ def read_market_data_snapshot(config: RunConfig, snapshot_dir: Path) -> MarketDa
             *[str(note) for note in manifest.get("notes", []) if str(note).strip()],
             (
                 f"Raw-close proxy count is {raw_close_proxy_symbol_count}; "
-                "the fixed policy uses the separately verified point-in-time market-cap panel."
+                "the fixed policy uses verified factor scores and trailing raw dollar volume."
             ),
             "Verified replay of an exported actual-market snapshot; no synthetic fallback used.",
             *(
                 []
                 if schema_version == 4
                 else [
-                    "Legacy snapshot has no point-in-time market-cap panel and cannot support "
-                    "the current fixed allocation methodology."
+                    "Legacy snapshot has no point-in-time market-cap panel; that optional "
+                    "diagnostic is not used by the current fixed allocation methodology."
                 ]
             ),
             *(

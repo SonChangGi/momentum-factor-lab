@@ -264,33 +264,11 @@ def test_weighting_policy_registry_exposes_exact_fixed_formula() -> None:
     assert set(POLICY_REGISTRY) == {FIXED_WEIGHTING_POLICY}
     method = POLICY_REGISTRY[FIXED_WEIGHTING_POLICY]
     assert method["selectionRole"] == "fixed_methodology_not_optimized"
-    assert method["formula"] == (
-        "floor+0.50*factor_score_pct+0.30*lagged_raw_dollar_volume_pct+"
-        "0.20*point_in_time_market_cap_pct"
-    )
-    assert "point_in_time_market_cap" in method["requiredSignalDateInputs"]
+    assert method["formula"] == ("floor+0.70*factor_score_pct+0.30*lagged_raw_dollar_volume_pct")
+    assert "point_in_time_market_cap" not in method["requiredSignalDateInputs"]
 
 
-@pytest.mark.parametrize(
-    ("liquidity", "market_cap", "reason"),
-    [
-        (
-            None,
-            pd.Series([3.0, 2.0, 1.0], index=["AAA", "BBB", "CCC"]),
-            "no_finite_trailing_dollar_volume",
-        ),
-        (
-            pd.Series([3.0, 2.0, 1.0], index=["AAA", "BBB", "CCC"]),
-            None,
-            "no_point_in_time_market_cap",
-        ),
-    ],
-)
-def test_fixed_method_missing_required_input_fails_closed_to_cash(
-    liquidity: pd.Series | None,
-    market_cap: pd.Series | None,
-    reason: str,
-) -> None:
+def test_fixed_method_missing_required_liquidity_fails_closed_to_cash() -> None:
     symbols = pd.Index(["AAA", "BBB", "CCC"])
     allocation = construct_target_allocation(
         FIXED_WEIGHTING_POLICY,
@@ -299,12 +277,12 @@ def test_fixed_method_missing_required_input_fails_closed_to_cash(
         pd.Series([30.0, 20.0, 10.0], index=symbols),
         pd.Series(True, index=symbols),
         RunConfig(demo=True, top_n=3, max_weight=0.50),
-        trailing_dollar_volume=liquidity,
-        trailing_market_cap=market_cap,
+        trailing_dollar_volume=None,
+        trailing_market_cap=None,
     )
 
     assert allocation.status == "unavailable"
-    assert allocation.reasons == [reason]
+    assert allocation.reasons == ["no_finite_trailing_dollar_volume"]
     assert allocation.rows.empty
     assert allocation.cash_weight == pytest.approx(1.0)
 

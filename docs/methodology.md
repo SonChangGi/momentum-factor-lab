@@ -10,17 +10,17 @@
 - 라이브 실행은 후보 전체를 요청하며 내부에서 200개로 자르지 않습니다.
 - 팩터 수익률은 adjusted close를 사용합니다.
 - 거래대금은 provider raw close × raw share volume을 사용하고 필요한 proxy 수를 공개합니다.
-- 시가총액은 SEC 공시 제출일 기준 발행주식수·public float 자료를 신호일 당시 정보만으로 정렬하고 이후 split을 가격 기준과 맞춥니다.
+- 현재 고정 비중 방법은 시가총액을 사용하지 않으며 현재값 역복사나 제3자 proxy를 만들지 않습니다.
 - `data.asOf`는 마지막 실제 가격 관측일입니다. 요청 종료일이나 생성일로 덮어쓰지 않습니다.
 - 실제시장 수집 실패는 demo나 정적 이전 결과로 대체하지 않습니다.
 
-시장 스냅샷 v4는 adjusted prices, raw closes, share volumes, dollar volumes, PIT market caps와 요청
+시장 스냅샷 v4는 adjusted prices, raw closes, share volumes, dollar volumes와 요청
 universe 메타데이터, 종목별 가격 공급자(`priceSources`)·수집 source
 health(`dataSources`)를 별도 저장합니다. 모든 파일 SHA-256과 행렬·ordered symbol·canonical
 record SHA-256을 함께 기록하며, 검증된 snapshot replay는 모든 hash, universe 순서,
 후보 수와 actual as-of가 일치할 때만 허용합니다. 따라서 같은 스냅샷에서 파생한 rolling
 preset도 refresh universe의 종목명과 원래의 Yahoo/Nasdaq/Stooq/FDR provenance를 잃지
-않습니다.
+않습니다. 하위 호환 market-cap 슬롯은 `not_used`로 기록하고 값을 합성하지 않습니다.
 
 ## Eligibility
 
@@ -68,16 +68,15 @@ modeled_cost = one_way_turnover
 
 ## 고정 비중 방법
 
-### `score_liquidity_market_cap_rank`
+### `score_liquidity_rank`
 
 ```text
 raw_i = floor
-      + 0.50 × factor_score_percentile_i
+      + 0.70 × factor_score_percentile_i
       + 0.30 × trailing_raw_dollar_volume_percentile_i
-      + 0.20 × point_in_time_market_cap_percentile_i
 ```
 
-기본 floor는 0.05입니다. 시가총액 정보의 최대 연령과 전체 유니버스 커버리지 하한을 적용합니다. 현재 시가총액을 과거 신호일에 소급하거나 부분 fallback으로 채우지 않습니다. 필요한 정책 입력이 불완전하면 포트폴리오는 unavailable·현금 100%가 됩니다.
+기본 floor는 0.05입니다. 시가총액은 사용하지 않고 외부 접근 실패를 현재값 역복사나 부분 fallback으로 채우지 않습니다. 필요한 후행 거래대금 입력이 불완전하면 포트폴리오는 unavailable·현금 100%가 됩니다.
 
 ### Top-N 경계 동점
 

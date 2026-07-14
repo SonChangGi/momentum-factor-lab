@@ -1582,12 +1582,6 @@ def run_analysis(
     dollar_volumes = market.dollar_volumes.reindex(index=prices.index, columns=prices.columns)
     liquidity = _liquidity_context(dollar_volumes, config)
     market_caps = market.market_caps.reindex(index=prices.index, columns=prices.columns)
-    latest_market_cap_coverage = float(market_caps.loc[market.as_of].notna().mean())
-    if latest_market_cap_coverage < config.market_cap_min_universe_coverage:
-        raise ValueError(
-            "point-in-time market-cap coverage is insufficient for the fixed methodology: "
-            f"{latest_market_cap_coverage:.2%}"
-        )
     definitions = _canonical_factor_definitions()
     independent_definitions = definitions.loc[
         definitions["compatibility_alias_of"].isna()
@@ -2568,7 +2562,9 @@ def result_payload(result: AnalysisResult) -> dict[str, Any]:
             "comparisonPricesSha256": market.input_sha256.get("comparisonPrices"),
             "liquidityFilterApplied": config.min_avg_dollar_volume > 0.0,
             "notes": market.notes,
-            "pointInTimeMarketCapAvailable": not market.market_caps.empty,
+            "pointInTimeMarketCapAvailable": bool(
+                not market.market_caps.empty and market.market_caps.notna().to_numpy().any()
+            ),
             "latestMarketCapSecurityCount": int(
                 market.market_caps.loc[market.as_of]
                 .drop(labels=[market.benchmark], errors="ignore")

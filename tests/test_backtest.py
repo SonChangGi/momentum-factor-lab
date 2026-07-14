@@ -559,7 +559,7 @@ def test_turnover_and_cost_use_drifted_execution_close_weights() -> None:
 
 def test_missing_policy_inputs_are_recorded_with_reason_and_never_traded() -> None:
     prices, scores, eligible, config = _fixture()
-    market_cap = pd.DataFrame(np.nan, index=prices.index, columns=prices.columns)
+    liquidity = pd.DataFrame(np.nan, index=prices.index, columns=prices.columns)
 
     result = _run(
         prices,
@@ -567,13 +567,13 @@ def test_missing_policy_inputs_are_recorded_with_reason_and_never_traded() -> No
         config,
         eligible,
         policy_id=FIXED_WEIGHTING_POLICY,
-        trailing_market_cap=market_cap,
+        trailing_dollar_volume=liquidity,
     )
     signal = _rebalance_dates(prices.index, "ME")[0]
     execution = prices.index[prices.index.get_loc(signal) + 1]
 
     assert result.policy_input_statuses.loc[execution] == "unavailable"
-    assert result.policy_input_reasons.loc[execution] == ("no_point_in_time_market_cap",)
+    assert result.policy_input_reasons.loc[execution] == ("no_finite_trailing_dollar_volume",)
     assert result.signal_dates.empty
     assert result.turnover.eq(0.0).all()
     assert result.costs.eq(0.0).all()

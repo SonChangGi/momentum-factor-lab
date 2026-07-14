@@ -23,16 +23,15 @@
 
 ## 고정 비중 방법
 
-`score_liquidity_market_cap_rank` 하나만 사용합니다.
+`score_liquidity_rank` 하나만 사용합니다.
 
 ```text
 raw_i = 0.05
-      + 0.50 × factor_score_percentile_i
+      + 0.70 × factor_score_percentile_i
       + 0.30 × trailing_raw_dollar_volume_percentile_i
-      + 0.20 × point_in_time_market_cap_percentile_i
 ```
 
-각 입력은 편입 후보 안에서 동점을 보존하는 percentile rank로 변환합니다. 시가총액은 SEC 공시 제출일을 이용해 신호일 당시 알려질 수 있었던 발행주식수만 사용하고, 이후 split을 주가 기준에 맞게 정규화합니다. 현재 시가총액을 과거에 소급하지 않습니다. 필요한 거래대금 또는 PIT 시가총액이 없거나 커버리지·최대 연령 조건을 통과하지 못하면 해당 포트폴리오는 현금 100%로 실패-폐쇄됩니다.
+두 입력은 편입 후보 안에서 동점을 보존하는 percentile rank로 변환합니다. 시가총액은 이 고정 방법에 사용하지 않으며, 외부 접근 실패를 현재값 역복사나 제3자 proxy로 대체하지 않습니다. 필요한 후행 거래대금이 없으면 해당 포트폴리오는 현금 100%로 실패-폐쇄됩니다.
 
 종목당 최대 비중을 적용하고, 상한 때문에 수용하지 못한 예산은 현금으로 남깁니다. Top-N 경계 동점은 신호일까지의 후행 거래대금 내림차순, symbol 오름차순으로 결정합니다.
 
