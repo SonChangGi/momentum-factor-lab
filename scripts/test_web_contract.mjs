@@ -888,7 +888,7 @@ for (const id of [
   "window-comparison-chart",
   "leader-trend-chart",
   "weight-chart",
-  "ensemble-weight-chart",
+  "holdings-table",
   "joint-ranking-chart",
   "canonical-component-chart",
 ]) {

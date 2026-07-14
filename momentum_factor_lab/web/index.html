@@ -34,8 +34,8 @@
       <p class="eyebrow">모멘텀 팩터 랩</p>
       <h1>모멘텀 팩터 데일리 대시보드</h1>
       <p class="hero-copy">
-        매일 미국 종가 기준으로 업데이트되는 모멘텀 팩터 비교 화면입니다.
-        최근 기간별 최고 팩터와 일별 상위 종목, 모멘텀 신호, 표시용 모형 비중을 한 화면에서 비교합니다.
+        같은 조건에서 모멘텀 팩터와 비중 정책을 Python으로 비교하고, 현재 평가 기준의 선택 결과를 보여줍니다.
+        연구 입력을 바꾸면 전체 분석을 다시 실행하며, 선택 종목·점수·가격·비중·현금과 비교 성과를 한 화면에서 확인할 수 있습니다.
       </p>
       <div class="hero-actions">
         <a class="button hero-link" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="투자 리서치 프로젝트 통합 대시보드로 돌아가기">통합 대시보드</a>
@@ -58,7 +58,7 @@
       <div class="control-group control-group-run">
         <div class="control-group-heading">
           <p class="eyebrow">분석 기준</p>
-          <h2>기준일 · 기간 · 선택 팩터</h2>
+          <h2>결과 · 성과 기간 · 비교 팩터</h2>
         </div>
         <label>실행 결과
           <select id="run-select"></select>
@@ -66,74 +66,24 @@
         <label>기준일
           <select id="date-select"></select>
         </label>
-        <label>최근 기간
+        <label>성과 탐색 기간
           <select id="window-select"></select>
           <span class="control-hint">기본값은 최근 12개월입니다.</span>
         </label>
-        <label>선택 팩터 시나리오
+        <label>비교할 팩터
           <select id="factor-select"></select>
-          <span class="control-hint">초기값은 Python 공동 선택 팩터이며, 기간 최고 팩터는 비교선으로 표시합니다.</span>
+          <span class="control-hint">초기값은 Python 선택 팩터입니다. 변경해도 공식 선택 결과는 바뀌지 않으며, 비교 차트와 팩터 진단만 바뀝니다.</span>
         </label>
       </div>
-      <div class="control-group control-group-backtest">
-        <div class="control-group-heading">
-          <p class="eyebrow">브라우저 프록시 민감도 조건</p>
-          <h2>브라우저 프록시 시나리오 입력</h2>
-          <p class="control-hint">아래 입력은 팩터 막대·기간 비교·상위 N개 비중 등 브라우저 프록시 패널에만 적용됩니다. Python 전체 공통 평가기간 성과 그래프와 표, canonical 결과에는 적용되지 않습니다.</p>
-        </div>
-        <label>프록시 최근 분석 기간
-          <select id="lookback-months-select">
-            <option value="3">최근 3개월</option>
-            <option value="6">최근 6개월</option>
-            <option value="12" selected>최근 12개월</option>
-            <option value="24">최근 24개월</option>
-          </select>
-        </label>
-        <label>상위 N개 종목
-          <input id="topn-input" type="number" min="1" max="20" value="20" />
-          <span id="topn-hint" class="control-hint">현재 공개 payload에 저장된 선택 팩터의 canonical 구성종목 20개 안에서만 프록시를 계산합니다.</span>
-        </label>
-        <label>브라우저 시나리오 종목당 최대 비중
-          <input id="max-weight-input" type="number" min="1" max="50" step="1" value="50" />
-          <span class="unit">%</span>
-          <span class="control-hint">표시용 가정 기본값 50%. 변경 시 브라우저 프록시 비중과 민감도 패널만 갱신됩니다.</span>
-        </label>
-        <label>리밸런싱 주기
-          <select id="rebalance-select">
-            <option value="W">주간</option>
-            <option value="ME" selected>월간</option>
-            <option value="QE">분기</option>
-          </select>
-        </label>
-        <label>거래 비용
-          <input id="transaction-cost-input" type="number" min="0" max="200" step="1" value="5" />
-          <span class="unit">bps</span>
-        </label>
-        <label>슬리피지
-          <input id="slippage-input" type="number" min="0" max="200" step="1" value="5" />
-          <span class="unit">bps</span>
-        </label>
-        <div class="preset-row" aria-label="빠른 입력 프리셋">
-          <button type="button" data-topn-preset="10">상위 10</button>
-          <button type="button" data-topn-preset="20">상위 20</button>
-          <button type="button" data-topn-preset="30" disabled aria-disabled="true" title="현재 공개 payload에는 팩터별 canonical 구성종목이 20개만 저장되어 있습니다.">상위 30</button>
-          <button type="button" data-max-weight-preset="10">최대 10%</button>
-          <button type="button" data-max-weight-preset="20">최대 20%</button>
-          <button type="button" data-max-weight-preset="50">최대 50%</button>
-        </div>
-        <p id="scenario-live-summary" class="scenario-live-summary" aria-live="polite">선택값을 불러오는 중입니다.</p>
-      </div>
-      <details id="research-controls" class="advanced-canonical-inputs canonical-input-details">
-        <summary>Canonical Python ResearchInputs · 정적 preset / 로컬 API</summary>
+      <section id="research-controls" class="advanced-canonical-inputs canonical-input-details" aria-labelledby="research-input-title">
         <div class="canonical-input-shell">
           <div class="canonical-input-heading">
             <div>
-              <p class="eyebrow">검증된 Python 입력</p>
-              <h2>정적 preset과 임의 Python 분석 조건</h2>
+              <p class="eyebrow">공식 연구 입력</p>
+              <h2 id="research-input-title">Python 분석 조건</h2>
               <p>
-                위 실행 결과 선택은 manifest에 있는 정확한 preset을 엽니다. 아래 입력은 별도의 canonical
-                ResearchInputs이며, 정확한 정적 결과가 없을 때만 loopback Python API로 전달됩니다.
-                브라우저 프록시 입력과 서로 섞이지 않습니다.
+                아래 값이 공식 결과의 입력입니다. 정확히 일치하는 공개 preset은 즉시 열고, 그 밖의 조합은
+                로컬 Python API에서 전체 팩터×비중 정책을 다시 계산합니다. 브라우저가 비중이나 성과를 대신 계산하지 않습니다.
               </p>
             </div>
             <div class="result-identity" aria-live="polite">
@@ -245,30 +195,30 @@
               <input id="input-selection-penalty-points" name="selection_extreme_event_penalty_points" type="number" min="0" step="0.1" inputmode="decimal" />
             </label>
             <div class="input-actions">
-              <button class="primary-button" type="submit">이 조건 분석·열기</button>
-              <button id="reset-default-inputs" class="secondary-button" type="button">기본 preset으로 복원</button>
+              <button class="primary-button" type="submit">이 조건으로 Python 분석</button>
+              <button id="reset-default-inputs" class="secondary-button" type="button">공개 기본값으로 복원</button>
             </div>
           </form>
           <div id="input-status" class="input-status" role="status" aria-live="polite">
             정적 grid manifest를 불러오는 중입니다.
           </div>
           <p class="local-api-note">
-            manifest와 정확히 일치하는 입력은 서명된 정적 detail/summary만 엽니다. 그 밖의 입력은
-            <code>127.0.0.1:8765</code>의 loopback API가 실행 중일 때만 제출되며, 실제시장 2,700개 이상
-            종목·identity·공동 grid 계약을 다시 검증한 뒤 표시합니다.
+            공개 GitHub Pages는 Python을 실행할 수 없는 정적 호스팅입니다. 임의 입력을 계산하려면 이 저장소에서
+            <code>uv run python -m momentum_factor_lab.cli serve-local-api --live --start-date 2016-01-01 --min-avg-dollar-volume 5000000 --host 127.0.0.1 --port 8765</code>를 먼저 실행하세요.
+            결과는 실제시장 전체 유니버스·identity·공동 grid 계약을 검증한 뒤에만 표시됩니다.
           </p>
         </div>
-      </details>
+      </section>
     </section>
 
     <section class="cards" aria-label="요약 카드">
       <article class="card">
-        <span>선택된 최고 팩터</span>
+        <span>Python 선택 팩터</span>
         <strong id="best-factor">-</strong>
         <small id="best-factor-detail">-</small>
       </article>
       <article class="card">
-        <span>선택 팩터 시나리오</span>
+        <span>비교 중인 팩터</span>
         <strong id="selected-factor">-</strong>
         <small id="selected-factor-detail">-</small>
       </article>
@@ -283,21 +233,21 @@
         <small id="latest-run-detail">-</small>
       </article>
       <article class="card">
-        <span>시나리오 비중 합계</span>
+        <span>선택 포트폴리오</span>
         <strong id="weight-summary">-</strong>
-        <small>브라우저에서 선택 팩터 점수와 최대 비중 가정으로 다시 계산한 표시용 목표 비중입니다.</small>
+        <small>사용자 입력으로 Python이 계산한 종목 비중과 현금입니다.</small>
       </article>
     </section>
 
     <section class="panel canonical-panel" id="canonical-research" aria-labelledby="canonical-title">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">검증된 Python 결과 · 추가 분석</p>
-          <h2 id="canonical-title">전체 팩터×비중 정책 공동 선택과 현재 연구 목표</h2>
+          <p class="eyebrow">Python 공식 결과</p>
+          <h2 id="canonical-title">전체 팩터×비중 정책 공동 선택</h2>
         </div>
         <p>
-          아래 영역은 브라우저 민감도 프록시와 분리된 canonical schema-v4 결과입니다.
-          전체 2,700개 이상 종목, 네 가지 비중 정책, 절대 가드레일을 Python에서 계산한 값을 그대로 표시합니다.
+          입력 조건과 동일한 유니버스·리밸런싱·Top-N·비중 상한·비용으로 모든 조합을 비교한 결과입니다.
+          선택 팩터와 정책, 점수 구성, 제외 사유는 Python 계산값만 표시합니다.
         </p>
       </div>
 
@@ -313,7 +263,7 @@
           <small id="canonical-funnel">-</small>
         </article>
         <article class="card">
-          <span>공동 선택 팩터</span>
+          <span>선택 팩터</span>
           <strong id="canonical-factor">-</strong>
           <small id="canonical-factor-score">-</small>
         </article>
@@ -323,7 +273,7 @@
           <small id="canonical-policy-version">-</small>
         </article>
         <article class="card">
-          <span>현재 연구 목표</span>
+          <span>선택 포트폴리오</span>
           <strong id="canonical-invested">-</strong>
           <small id="canonical-cash">-</small>
         </article>
@@ -335,27 +285,6 @@
       </div>
 
       <div class="viz-grid canonical-viz-grid">
-        <article class="viz-card wide">
-          <div class="viz-card-heading">
-            <div>
-              <p class="eyebrow">현재 canonical 목표</p>
-              <h3>지금 어떤 종목을 얼마만큼 담는가</h3>
-            </div>
-            <span id="canonical-allocation-meta" class="chart-meta">-</span>
-          </div>
-          <div id="canonical-allocation-chart" class="bar-chart compact-bars" aria-live="polite"></div>
-          <div class="table-wrap compact canonical-table-wrap">
-            <table id="canonical-allocation-table">
-              <thead>
-                <tr>
-                  <th>순위</th><th>종목</th><th>기업명</th><th>팩터 점수</th><th>목표 비중</th><th>정책 원점수</th><th>상한</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </article>
-
         <article class="viz-card wide">
           <div class="viz-card-heading joint-ranking-heading">
             <div>
@@ -458,10 +387,10 @@
       <div class="panel-heading">
         <div>
           <p class="eyebrow">시각화 대시보드</p>
-          <h2>팩터별 비교 · 백테스트 추이 · 상위 N개 비중</h2>
+          <h2>팩터별 성과 비교 · 백테스트 추이 · 선택 포트폴리오</h2>
         </div>
         <p>
-          프록시 입력값을 바꾸면 해당 민감도 차트가 즉시 갱신됩니다. Python 전체 공통 평가기간 성과 그래프와 표는 원자료 그대로 유지됩니다. 임의 팩터/날짜 선택은 사후 비교 분석입니다.
+          모든 수치와 비중은 현재 Python 결과에서 읽습니다. 성과 기간·비교 팩터·기준일은 사후 탐색용이며 공식 선택 결과를 바꾸지 않습니다.
         </p>
       </div>
       <div class="viz-grid">
@@ -479,11 +408,11 @@
           <div class="viz-card-heading">
             <div>
               <p class="eyebrow">Python 원자료 · 전체 공통 평가기간</p>
-              <h3>선택 팩터와 기간 최고 팩터 누적 성과 비교</h3>
+              <h3>Python 선택 팩터와 기간 수익률 1위 비교</h3>
             </div>
             <span id="backtest-chart-meta" class="chart-meta">-</span>
           </div>
-          <p class="scenario-note">이 그래프와 아래 성과표는 Python 원자료입니다. 그래프는 전체 공통 평가기간을 유지하고, 선택한 최근 기간은 비교 팩터를 정하는 데만 사용합니다. 상위 N·최대 비중·리밸런싱·비용·슬리피지 프록시 입력은 적용하지 않습니다.</p>
+          <p class="scenario-note">그래프와 성과표는 현재 입력으로 Python이 계산한 원자료입니다. 성과 탐색 기간은 비교선만 정하며, 공식 선택은 입력 폼의 평가기간과 합성 점수·가드레일을 사용합니다.</p>
           <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
           <div id="backtest-chart" class="line-chart" aria-live="polite"></div>
           <div id="performance-metrics-table" class="performance-metrics" aria-live="polite"></div>
@@ -509,53 +438,13 @@
         <article class="viz-card">
           <div class="viz-card-heading">
             <div>
-              <p class="eyebrow">모형 비중</p>
-              <h3>상위 N개 모형 비중 시각화</h3>
+              <p class="eyebrow">Python 선택 포트폴리오</p>
+              <h3>선택 종목 비중</h3>
             </div>
             <span id="weight-chart-meta" class="chart-meta">-</span>
           </div>
           <div id="weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
         </article>
-        <article class="viz-card">
-          <div class="viz-card-heading">
-            <div>
-              <p class="eyebrow">팩터 앙상블</p>
-              <h3>상위 10개 팩터 동일비중 합산</h3>
-            </div>
-            <span id="ensemble-chart-meta" class="chart-meta">-</span>
-          </div>
-          <div id="ensemble-weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
-        </article>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-heading">
-        <div>
-          <p class="eyebrow">최신 출력</p>
-          <h2>기존 결과물 기준 · 해당 날짜 최고 팩터 추천/연구 신호</h2>
-        </div>
-        <p>
-          기준일·기간 최고 팩터의 기존 출력입니다. 매매 비중 0%는 연구용 신호이며 주문 비중이 아닙니다.
-        </p>
-      </div>
-      <p id="current-output-note" class="scenario-note">-</p>
-      <div class="table-wrap">
-        <table id="current-output-table">
-          <thead>
-            <tr>
-              <th>순위</th>
-              <th>종목</th>
-              <th>모멘텀 신호</th>
-              <th>기준 팩터</th>
-              <th>최종 매매 비중</th>
-              <th>게이트 전 모형 비중</th>
-              <th>비중 산출 방식</th>
-              <th>신호일</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
       </div>
     </section>
 
@@ -574,9 +463,9 @@
               <th>기준일</th>
               <th>기간</th>
               <th>최고 팩터</th>
-              <th>브라우저 시나리오 최고 수익률</th>
-              <th>선택 팩터 시나리오 수익률</th>
-              <th>선택 팩터 순위</th>
+              <th>기간 수익률 1위</th>
+              <th>비교 팩터 수익률</th>
+              <th>비교 팩터 순위</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -587,10 +476,10 @@
     <section class="panel">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">선택 팩터 시나리오</p>
-          <h2>일별 상위 종목 · 모멘텀 신호 · 산출 비중</h2>
+          <p class="eyebrow">Python 선택 결과</p>
+          <h2>선택 종목 · 순위 · 점수 · 가격 · 비중</h2>
         </div>
-        <p id="holdings-availability">선택 팩터 점수와 최대 비중 가정으로 표시용 목표 비중을 계산합니다.</p>
+        <p id="holdings-availability">현재 입력으로 Python이 선택한 팩터·정책의 포트폴리오를 표시합니다.</p>
       </div>
       <div class="table-wrap">
         <table id="holdings-table">
@@ -598,9 +487,10 @@
             <tr>
               <th>순위</th>
               <th>종목</th>
-              <th>모멘텀 신호</th>
-              <th>시나리오 목표 비중</th>
-              <th>팩터</th>
+              <th>기업명</th>
+              <th>팩터 점수</th>
+              <th>최근 가격</th>
+              <th>비중</th>
               <th>신호일</th>
             </tr>
           </thead>
@@ -613,24 +503,24 @@
       <div class="panel-heading">
         <div>
           <p class="eyebrow">추가 분석</p>
-          <h2>선택 팩터 일별 투자 비중</h2>
+          <h2>비교 팩터의 실제 백테스트 보유 이력</h2>
         </div>
-        <p id="daily-weight-analysis-note">웹페이지에서 선택한 팩터의 실제 백테스트 보유 이력과 같은 팩터의 현재 Python 연구 목표를 구분해 비교합니다.</p>
+        <p id="daily-weight-analysis-note">비교 팩터의 실제 백테스트 보유 이력과 같은 팩터의 현재 Python 포트폴리오를 구분해 비교합니다.</p>
       </div>
       <div
         class="table-wrap daily-weights-scroll"
         role="region"
         tabindex="0"
-        aria-label="선택 팩터 실제 백테스트 보유와 현재 연구 목표 비교표"
+        aria-label="비교 팩터 실제 백테스트 보유와 현재 Python 포트폴리오 비교표"
         aria-describedby="daily-weight-analysis-note"
       >
         <table id="daily-weights-table" aria-describedby="daily-weight-analysis-note">
-          <caption class="visually-hidden">선택 팩터의 최근 최대 21개 보유 세션별 실제 백테스트 보유 비중과 현재 Python 연구 목표 비교</caption>
+          <caption class="visually-hidden">비교 팩터의 최근 최대 21개 보유 세션별 실제 백테스트 보유 비중과 현재 Python 포트폴리오 비교</caption>
           <thead>
             <tr>
               <th scope="col">보유 기준일</th>
               <th scope="col">신호일 · 체결일</th>
-              <th scope="col">종목별 백테스트 보유 / 현재 연구 목표</th>
+              <th scope="col">종목별 백테스트 보유 / 현재 Python 포트폴리오</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -653,12 +543,12 @@
         <p class="eyebrow">읽는 방법</p>
         <h2>대시보드 설명</h2>
         <ul>
-          <li><strong>최고 팩터</strong>는 선택 기간의 누적 전략 수익률이 가장 높은 팩터입니다.</li>
+          <li><strong>Python 선택 팩터</strong>는 입력 폼의 평가기간에서 네 가지 비중 정책을 포함한 전체 조합 중 합성 점수와 가드레일을 통과해 선택된 결과입니다.</li>
           <li><strong>모멘텀 신호</strong>는 해당 팩터가 계산한 종목별 점수이며, 높을수록 상위 후보입니다.</li>
-          <li><strong>기간 최고 팩터</strong>는 선택 기간의 과거 누적 수익률이 가장 높았던 팩터입니다.</li>
-          <li><strong>선택 팩터 시나리오</strong>는 사용자가 고른 팩터의 점수 스냅샷으로 브라우저가 다시 계산한 표시용 비교입니다.</li>
-          <li><strong>시나리오 목표 비중</strong>은 선택 팩터 점수가 높은 종목에 더 큰 비중을 주되 종목당 최대 비중을 넘지 않도록 계산하며, 상한 때문에 남는 금액은 현금/미사용으로 표시합니다.</li>
-          <li>브라우저 입력값은 자동 실행 설정이나 GitHub Actions 입력값을 바꾸지 않습니다.</li>
+          <li><strong>기간 수익률 1위</strong>는 성과 탐색 기간의 과거 누적 수익률만 가장 높은 비교선이며 공식 선택을 뜻하지 않습니다.</li>
+          <li><strong>비교할 팩터</strong>는 성과와 보유 이력을 살펴보기 위한 선택입니다. 공식 선택 팩터·정책·포트폴리오는 바뀌지 않습니다.</li>
+          <li><strong>선택 포트폴리오</strong>는 Python이 Top-N, 비중 정책, 종목당 상한을 적용한 결과이며 남는 금액은 현금으로 표시합니다.</li>
+          <li>입력 폼을 제출하면 정확한 정적 preset을 열거나 로컬 Python API에서 전체 분석을 새로 실행합니다.</li>
           <li>데이터 품질, 유동성, 생존편향, 무료 데이터 한계는 기존 리포트와 동일하게 적용됩니다.</li>
         </ul>
       </div>
@@ -733,8 +623,8 @@
     </section>
 
     <section class="notice moved-notice">
-      <strong>운영 고지:</strong> 이 웹사이트의 선택값은 브라우저에서 비교/표시만 바꾸며,
-      다음 수동 실행 입력값을 저장하지 않습니다. 검토된 live-run 입력값은 저장소 설정에서 관리합니다. 자동 예약 실행과 watchdog 예약은 중지되어 있으며, 새 데이터 반영은 GitHub Actions 수동 실행 후 publication safety gate를 통과해야 합니다.
+      <strong>운영 고지:</strong> 성과 기간·비교 팩터·기준일은 화면 탐색만 바꿉니다.
+      공식 연구 입력은 위 Python 분석 조건이며, 공개 preset이 아닌 조합은 로컬 API가 실행 중일 때만 계산됩니다. 자동 예약 실행과 watchdog 예약은 중지되어 있으며, 공개 데이터 반영은 GitHub Actions 수동 실행 후 publication safety gate를 통과해야 합니다.
     </section>
 
     <section class="disclaimer">

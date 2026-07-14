@@ -3046,28 +3046,21 @@ function selectedFactor() {
 }
 
 function selectedLookbackMonths() {
-  const selector = document.querySelector('#lookback-months-select');
-  return Math.round(clampNumber(selector?.value, 1, 60, DASHBOARD_INPUT_DEFAULTS.lookbackMonths));
+  const sessions = Number(state.v4Payload?.config?.evaluation_window_days);
+  return Number.isFinite(sessions) ? Math.max(1, Math.round(sessions / 21)) : DASHBOARD_INPUT_DEFAULTS.lookbackMonths;
 }
 
 function selectedRebalanceFrequency() {
-  const selector = document.querySelector('#rebalance-select');
-  const value = selector?.value || DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
+  const value = state.v4Payload?.config?.rebalance_frequency || DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
   return ['W', 'ME', 'QE'].includes(value) ? value : DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
 }
 
 function clampedTransactionCostBps() {
-  const input = document.querySelector('#transaction-cost-input');
-  const value = clampNumber(input?.value, 0, 200, DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
-  if (input && String(input.value) !== String(value)) input.value = String(value);
-  return value;
+  return clampNumber(state.v4Payload?.config?.transaction_cost_bps, 0, 200, DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
 }
 
 function clampedSlippageBps() {
-  const input = document.querySelector('#slippage-input');
-  const value = clampNumber(input?.value, 0, 200, DASHBOARD_INPUT_DEFAULTS.slippageBps);
-  if (input && String(input.value) !== String(value)) input.value = String(value);
-  return value;
+  return clampNumber(state.v4Payload?.config?.slippage_bps, 0, 200, DASHBOARD_INPUT_DEFAULTS.slippageBps);
 }
 
 function clampNumber(value, minValue, maxValue, fallback) {
@@ -3083,11 +3076,7 @@ function optionalNumber(value) {
 }
 
 function clampedTopN() {
-  const input = document.querySelector('#topn-input');
-  const limit = storedScenarioRowLimit(currentRun(), selectedFactor());
-  const value = Math.round(clampNumber(input?.value, 1, limit, Math.min(DASHBOARD_INPUT_DEFAULTS.topN, limit)));
-  if (input && String(input.value) !== String(value)) input.value = String(value);
-  return value;
+  return Math.round(clampNumber(state.v4Payload?.config?.top_n, 1, 50, DASHBOARD_INPUT_DEFAULTS.topN));
 }
 
 function storedScenarioRowLimit(run = currentRun(), factor = selectedFactor()) {
@@ -3102,40 +3091,11 @@ function storedScenarioRowLimit(run = currentRun(), factor = selectedFactor()) {
 }
 
 function syncTopNAvailability(run = currentRun(), factor = selectedFactor()) {
-  const limit = storedScenarioRowLimit(run, factor);
-  const input = document.querySelector('#topn-input');
-  if (input) {
-    input.max = String(limit);
-    input.value = String(Math.round(clampNumber(
-      input.value,
-      1,
-      limit,
-      Math.min(DASHBOARD_INPUT_DEFAULTS.topN, limit),
-    )));
-  }
-  if (typeof document.querySelectorAll === 'function') {
-    document.querySelectorAll('[data-topn-preset]').forEach((button) => {
-      const requested = Number(button.getAttribute('data-topn-preset'));
-      const unavailable = Number.isFinite(requested) && requested > limit;
-      button.disabled = unavailable;
-      button.setAttribute('aria-disabled', String(unavailable));
-      button.title = unavailable
-        ? `현재 공개 payload에는 선택 팩터 구성종목이 ${formatInteger(limit)}개만 저장되어 있습니다.`
-        : '';
-    });
-  }
-  const hint = document.querySelector('#topn-hint');
-  if (hint) {
-    hint.textContent = `현재 공개 payload에 저장된 선택 팩터의 canonical 구성종목 ${formatInteger(limit)}개 안에서만 프록시를 계산합니다.`;
-  }
-  return limit;
+  return storedScenarioRowLimit(run, factor);
 }
 
 function clampedMaxWeight() {
-  const input = document.querySelector('#max-weight-input');
-  const percent = clampNumber(input?.value, 1, 50, DASHBOARD_INPUT_DEFAULTS.maxWeightPercent);
-  if (input && String(input.value) !== String(percent)) input.value = String(percent);
-  return percent / 100;
+  return clampNumber(state.v4Payload?.config?.max_weight, 0.01, 1, DASHBOARD_INPUT_DEFAULTS.maxWeightPercent / 100);
 }
 
 function inputScenarioParameters() {
@@ -3841,34 +3801,32 @@ function scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeig
 }
 
 function currentWeightedHoldings() {
-  const run = currentRun();
-  const date = selectedDate();
-  const windowKey = selectedWindow();
-  const factor = selectedFactor();
-  const topN = clampedTopN();
-  const maxWeight = clampedMaxWeight();
-  const { allocation, snapshot, fallbackSource, latestOutputRowsFactor } = scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeight);
-  const availableDates = factorAvailableDates(run, factor);
-  const stats = periodFactorStats(run, date, windowKey, factor);
+  const payload = state.v4Payload || {};
+  const target = payload.currentResearchTarget || {};
+  const rows = Array.isArray(target.weights) ? target.weights : [];
+  const weighted = rows.map((row, index) => ({
+    ...row,
+    display_rank: row.rank || index + 1,
+    score: optionalNumber(row.factorScore),
+    display_weight: Math.max(0, Number(row.weight) || 0),
+  }));
+  const investedTotal = weighted.reduce((sum, row) => sum + row.display_weight, 0);
+  const cashTotal = Math.max(0, optionalNumber(target.cashWeight) ?? (1 - investedTotal));
   return {
-    ...allocation,
-    snapshot,
-    selectedFactor: factor || '-',
-    windowLabel: stats?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || windowKey || '-',
-    scoreDate: snapshot?.score_date || (fallbackSource ? run.summary?.data_as_of || null : null),
-    scoreScope: snapshot?.score_scope || fallbackSource,
-    latestOutputRowsFactor,
-    rawAvailableCount: snapshot?.raw_available_count ?? null,
-    eligibilityFilterApplied: snapshot?.eligibility_filter_applied === true,
-    missingReason: snapshot
+    weighted,
+    investedTotal,
+    displayedTotal: investedTotal,
+    portfolioTotal: investedTotal,
+    cashTotal,
+    topN: Number(payload.config?.top_n) || weighted.length,
+    maxWeight: Number(payload.config?.max_weight) || 0,
+    availableCount: Number(target.eligibleSecurityCount) || weighted.length,
+    selectedFactor: payload.selectedFactor || target.factor || '-',
+    weightingPolicyId: payload.selectedWeightingPolicy || target.weightingPolicyId || '-',
+    scoreDate: target.signalDate || target.asOf || payload.data?.asOf || null,
+    missingReason: target.status === 'available' && weighted.length
       ? null
-      : fallbackSource
-      ? null
-      : latestOutputRowsFactor && factor && latestOutputRowsFactor !== factor
-      ? `저장된 latest_output_rows는 ${latestOutputRowsFactor} 기준이라 선택 팩터 ${factor} 시나리오로 표시하지 않습니다.`
-      : availableDates.size && !availableDates.has(date)
-      ? '선택한 기준일은 용량과 로딩 속도 제한 때문에 종목/비중 스냅샷 보관 범위 밖입니다.'
-      : '선택한 기준일에 이 팩터의 점수 스냅샷이 없습니다.',
+      : (target.reasons || []).join(', ') || 'Python 선택 포트폴리오를 사용할 수 없습니다.',
   };
 }
 
@@ -4020,54 +3978,38 @@ function fillControls() {
   factorSelect.value = defaultFactorForRun(run, factors, previousFactor, bestDefaultFactor);
 
   fillDateOptions(run, selectedDate());
-  document.querySelector('#topn-input').value = DASHBOARD_INPUT_DEFAULTS.topN;
-  syncTopNAvailability(run, factorSelect.value);
-  document.querySelector('#max-weight-input').value = DASHBOARD_INPUT_DEFAULTS.maxWeightPercent;
-  const lookback = document.querySelector('#lookback-months-select');
-  if (lookback) lookback.value = String(DASHBOARD_INPUT_DEFAULTS.lookbackMonths);
-  const rebalance = document.querySelector('#rebalance-select');
-  if (rebalance) rebalance.value = DASHBOARD_INPUT_DEFAULTS.rebalanceFrequency;
-  const transactionCost = document.querySelector('#transaction-cost-input');
-  if (transactionCost) transactionCost.value = String(DASHBOARD_INPUT_DEFAULTS.transactionCostBps);
-  const slippage = document.querySelector('#slippage-input');
-  if (slippage) slippage.value = String(DASHBOARD_INPUT_DEFAULTS.slippageBps);
 }
 
 function renderSummary() {
   const run = currentRun();
   const date = selectedDate();
   const windowKey = selectedWindow();
-  const params = inputScenarioParameters();
-  const scenarioRows = scenarioPeriodRows(run, date, windowKey, params);
-  const best = scenarioRows[0] || scenarioBestStats(run, date, windowKey, params);
-  const factor = selectedFactor();
-  const selectedStats = scenarioRows.find((row) => row.factor === factor) || scenarioFactorStats(run, date, windowKey, factor, params);
+  const payload = state.v4Payload || {};
+  const officialFactor = payload.selectedFactor || run.summary?.selected_factor;
+  const selectedRow = canonicalSelectedRow(payload);
+  const comparisonFactor = selectedFactor();
+  const comparisonStats = periodFactorStats(run, date, windowKey, comparisonFactor);
   const summary = run.summary || {};
   const latestRunAt = formatKoreanDateTime(summary.run_timestamp_utc);
   const runPayloadGeneratedAtText = formatKoreanDateTime(runPayloadGeneratedAt(run));
-  setText('#best-factor', best?.factor || '-');
+  setText('#best-factor', officialFactor || '-');
   setText(
     '#best-factor-detail',
-    best
-      ? `${best.window_label} 브라우저 시나리오 수익률 ${formatPercent(best.period_return)}${best.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(best.raw_period_return)}` : ''}`
-      : '-',
+    `${canonicalPolicyLabel(payload, payload.selectedWeightingPolicy)} · 합성 점수 ${formatNumber(selectedRow?.selection_score)} / 100`,
   );
-  setText('#selected-factor', factor || '-');
+  setText('#selected-factor', comparisonFactor || '-');
   setText(
     '#selected-factor-detail',
-    selectedStats && selectedStats.rank
-      ? `${selectedStats.window_label} 브라우저 시나리오 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'} · ${formatPercent(selectedStats.period_return)}${selectedStats.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(selectedStats.raw_period_return)}` : ''} · ${factorDescription(factor, run)}`
-      : `자료 없음 · ${factorDescription(factor, run)}`,
+    comparisonStats && comparisonStats.rank
+      ? `${comparisonStats.window_label} Python 기간 수익률 순위 ${comparisonStats.rank}/${comparisonStats.factor_count || '-'} · ${formatPercent(comparisonStats.period_return)} · ${factorDescription(comparisonFactor, run)}`
+      : `자료 없음 · ${factorDescription(comparisonFactor, run)}`,
   );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
   setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
   setText('#latest-run-at', latestRunAt);
   setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
-  const scenario = currentWeightedHoldings();
-  setText(
-    '#scenario-live-summary',
-    `브라우저 시나리오/프록시 입력 · 최근 ${params.lookbackMonths}개월 · 상위 ${params.topN}개 · 종목당 최대 ${formatPercent(params.maxWeight)} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 리밸런싱 · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps · 시나리오 투자 ${formatPercent(scenario.investedTotal)} · 현금/미사용 ${formatPercent(scenario.cashTotal)}`,
-  );
+  const portfolio = currentWeightedHoldings();
+  setText('#weight-summary', `${formatInteger(portfolio.weighted.length)}종목 · 투자 ${formatPercent(portfolio.investedTotal)} · 현금 ${formatPercent(portfolio.cashTotal)}`);
 
   const statusCard = document.querySelector('#run-status');
   statusCard.replaceChildren();
@@ -4450,80 +4392,46 @@ function renderFactorTable() {
   const run = currentRun();
   const windowKey = selectedWindow();
   const factor = selectedFactor();
-  const params = inputScenarioParameters();
   const rows = (run.factor_leaders || []).filter((row) => row.window === windowKey).slice(-30).reverse();
   const tbody = document.querySelector('#factor-table tbody');
   tbody.replaceChildren();
   rows.forEach((row) => {
-    const scenarioRows = scenarioPeriodRows(run, row.date, row.window, params);
-    const bestStats = scenarioRows[0] || periodBestStats(run, row.date, row.window);
-    const selectedStats = scenarioRows.find((item) => item.factor === factor) || scenarioFactorStats(run, row.date, row.window, factor, params);
+    const bestStats = periodBestStats(run, row.date, row.window);
+    const selectedStats = periodFactorStats(run, row.date, row.window, factor);
     const tr = document.createElement('tr');
     appendCell(tr, row.date);
     appendCell(tr, row.window_label, { badge: true });
     appendCell(tr, bestStats?.factor || row.best_factor);
-    appendCell(tr, bestStats?.period_return == null ? '자료 없음' : `${formatPercent(bestStats.period_return)} · 시나리오`, { className: classForNumber(bestStats?.period_return) });
-    appendCell(tr, selectedStats?.period_return == null ? '자료 없음' : `${formatPercent(selectedStats.period_return)} · 시나리오`, { className: classForNumber(selectedStats?.period_return) });
+    appendCell(tr, bestStats?.period_return == null ? '자료 없음' : formatPercent(bestStats.period_return), { className: classForNumber(bestStats?.period_return) });
+    appendCell(tr, selectedStats?.period_return == null ? '자료 없음' : formatPercent(selectedStats.period_return), { className: classForNumber(selectedStats?.period_return) });
     appendCell(tr, selectedStats?.rank ? `${selectedStats.rank}/${selectedStats.factor_count || '-'}` : '자료 없음');
     tbody.appendChild(tr);
   });
 }
 
 function renderHoldingsTable() {
-  const run = currentRun();
   const {
     weighted,
-    displayedTotal,
-    portfolioTotal,
+    investedTotal,
     cashTotal,
     topN,
-    availableCount,
     selectedFactor: factor,
-    windowLabel,
+    weightingPolicyId,
     scoreDate,
-    scoreScope,
-    unusedCandidateCount,
     maxWeight,
-    rawAvailableCount,
-    eligibilityFilterApplied,
     missingReason,
   } = currentWeightedHoldings();
-  const weightLabel = isPracticalRun(run) ? '표시용 투자 시나리오 비중' : '표시용 연구 시나리오 비중';
-  setText(
-    '#weight-summary',
-    `시나리오 배분 ${formatPercent(portfolioTotal)} · 화면 표시 ${formatPercent(displayedTotal)} · 현금/미사용 ${formatPercent(cashTotal)}`,
-  );
-  const capNote = topN * maxWeight < 1
-    ? `종목 수와 최대 비중 가정상 ${formatPercent(cashTotal)}는 현금/미사용으로 남습니다.`
-    : '선택한 종목 수와 최대 비중 가정으로 100% 배분이 가능합니다.';
-  const usingLatestOutputFallback = scoreScope === 'latest_output_rows_fallback';
-  const usingCanonicalStoredConstituents = scoreScope === 'schema_v4_current_python_portfolio_top_constituents';
-  const scopeNote = usingLatestOutputFallback
-    ? `점수 스냅샷이 없어 저장된 latest_output_rows ${formatInteger(availableCount)}개를 선택 팩터 시나리오 fallback으로 표시합니다.`
-    : usingCanonicalStoredConstituents
-    ? `Python factorPortfolios에 공개 저장된 현재 canonical 구성종목 ${formatInteger(availableCount)}개만 사용합니다. 최종 적격 종목 전체의 팩터 점수는 공개 payload에 없으므로 후보 전체 스냅샷으로 확대 해석하지 않습니다.`
-    : eligibilityFilterApplied
-    ? `현재 모델 편입 가능 필터를 통과한 ${formatInteger(availableCount)}개 후보를 사용합니다${rawAvailableCount && rawAvailableCount !== availableCount ? ` (원점수 후보 ${formatInteger(rawAvailableCount)}개 중 실무 필터 통과분)` : ''}.`
-    : `편입 가능 필터 정보가 없어 원점수 후보 ${formatInteger(availableCount)}개를 연구 진단용으로 표시합니다.`;
   setText(
     '#holdings-availability',
-    missingReason
-      ? `${missingReason} 기간 최고 팩터 보유를 대신 보여주지 않습니다.`
-      : run.history_payload_type === 'summary'
-      ? '이전 실행은 페이지 속도를 위해 요약 이력만 보관합니다. 상위 종목과 비중은 최신 실행에서 전체 표시됩니다.'
-      : usingLatestOutputFallback
-      ? `${windowLabel} 선택 팩터 ${factor}의 점수 스냅샷이 없어 기존 최신 출력 행 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, 저장된 게이트 전 비중을 종목당 최대 ${formatPercent(maxWeight)}로 제한해 표시합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`
-      : usingCanonicalStoredConstituents
-      ? `${scoreDate || run.summary?.data_as_of || '최근'} 현재 선택 팩터 ${factor}의 canonical ${formatInteger(availableCount)}종목 snapshot 프록시입니다. 선택한 성과 기간의 과거 종목 구성이 아닙니다. ${scopeNote} 저장 범위 안에서 상위 ${Math.min(topN, availableCount)}개를 표시하고, 브라우저가 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정을 적용합니다. 미선택 저장 행 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`
-      : `${windowLabel} 선택 팩터 ${factor}의 ${scoreDate || '최근'} 점수 스냅샷 기준입니다. ${scopeNote} 상위 ${Math.min(topN, availableCount)}개를 표시하며, ${weightLabel}은 브라우저가 팩터 점수 비례 배분과 종목당 최대 ${formatPercent(maxWeight)} 가정으로 계산합니다. 미선택 후보 ${formatInteger(unusedCandidateCount)}개 · ${capNote}`,
+    missingReason || `${scoreDate || '-'} 신호 · ${factor} × ${canonicalPolicyLabel(state.v4Payload || {}, weightingPolicyId)} · Top ${formatInteger(topN)} · 상한 ${formatPercent(maxWeight)} · 투자 ${formatPercent(investedTotal)} · 현금 ${formatPercent(cashTotal)}. 모든 값은 Python 결과입니다.`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
   if (!weighted.length) {
     const tr = document.createElement('tr');
     const td = document.createElement('td');
-    td.colSpan = 6;
-    td.textContent = '선택한 기준일과 팩터에 표시할 점수 스냅샷이 없습니다.';
+    td.colSpan = 7;
+    td.textContent = missingReason || 'Python 선택 포트폴리오가 없습니다.';
     tr.appendChild(td);
     tbody.appendChild(tr);
     return;
@@ -4532,87 +4440,13 @@ function renderHoldingsTable() {
     const tr = document.createElement('tr');
     appendCell(tr, row.display_rank);
     appendCell(tr, row.symbol, { strong: true });
+    appendCell(tr, row.name || '-');
     appendCell(tr, formatNumber(row.score));
+    appendCell(tr, Number.isFinite(Number(row.latestPrice)) ? `$${formatNumber(row.latestPrice)}` : '-');
     appendCell(tr, formatPercent(row.display_weight));
-    appendCell(tr, factor);
-    appendCell(tr, scoreDate || selectedDate());
+    appendCell(tr, scoreDate || '-');
     tbody.appendChild(tr);
   });
-}
-
-function renderCurrentOutputTable() {
-  const run = currentRun();
-  const summary = run.summary || {};
-  const quality = run.data_quality_summary || {};
-  const date = selectedDate();
-  const windowKey = selectedWindow();
-  const topN = clampedTopN();
-  const maxWeight = clampedMaxWeight();
-  const {
-    rows,
-    best,
-    snapshot,
-    allocation,
-    researchOnly,
-    signalSource,
-    windowLabel,
-  } = bestFactorSignalRows(run, date, windowKey, topN, maxWeight);
-  const tbody = document.querySelector('#current-output-table tbody');
-  const note = document.querySelector('#current-output-note');
-  tbody.replaceChildren();
-  if (note) {
-    const blockers = joinReasonList(summary.tradability_blockers) || joinReasonList(summary.fail_closed_reasons) || '실전 매매 게이트 미통과';
-    const candidateCount = formatCount(summary.candidate_universe_size ?? quality.candidate_universe_size);
-    const eligibleCount = formatCount(summary.eligible_price_universe_size ?? quality.eligible_price_universe_size);
-    const finalEligibleCount = formatCount(summary.liquidity_eligible_universe_size ?? quality.liquidity_eligible_universe_size);
-    const usingLatestOutputFallback = signalSource === 'latest_output_rows_fallback';
-    const usingCanonicalStoredConstituents = snapshot?.score_scope === 'schema_v4_current_python_portfolio_top_constituents';
-    const scope = usingLatestOutputFallback
-      ? `${run.summary?.data_as_of || date || '-'} · 기존 최신 출력 행`
-      : best?.factor
-      ? `${date || '-'} · ${windowLabel} 최고 팩터 ${best.factor}`
-      : `${date || '-'} · ${windowLabel} 최고 팩터 자료 없음`;
-    const availability = usingLatestOutputFallback
-      ? `최고 팩터 점수 스냅샷이 없어 저장된 latest_output_rows ${formatInteger(rows.length)}개를 투명한 fallback으로 표시합니다.`
-      : usingCanonicalStoredConstituents
-      ? `공개 payload에 저장된 해당 팩터의 현재 canonical 구성종목 ${formatInteger(allocation.availableCount)}개 안에서만 상위 ${rows.length}개를 표시합니다. 최종 적격 종목 전체의 팩터 점수 스냅샷은 아닙니다.`
-      : snapshot
-      ? `모델 편입 가능 후보 ${formatInteger(allocation.availableCount)}개 중 상위 ${rows.length}개를 표시합니다.`
-      : '해당 최고 팩터의 종목 점수 스냅샷이 없어 행을 표시하지 못했습니다.';
-    const bestFactorCaution = 'Best factor는 해당 기간의 과거 성과 1위 팩터이므로 미래 우위를 보장하지 않으며, 선택 팩터 드롭다운과 별개입니다.';
-    note.textContent = researchOnly
-      ? `${scope} · 연구용 신호(매매 비중 0%). ${availability} ${bestFactorCaution} 미충족: ${blockers}. 후보 ${candidateCount} · 가격 분석 가능 ${eligibleCount} · 최종 편입 적격 ${finalEligibleCount}.`
-      : `${scope} 기준 표시용 best-factor 신호입니다. ${availability} ${bestFactorCaution} 후보 ${candidateCount}, 가격 분석 가능 ${eligibleCount}, 최종 편입 적격 ${finalEligibleCount}.`;
-  }
-  if (!rows.length) {
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 8;
-    td.textContent = '선택한 기준일과 기간의 최고 팩터에 표시할 신호 스냅샷이 없습니다.';
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-    return;
-  }
-  rows.forEach((row, index) => {
-    const tr = document.createElement('tr');
-    appendCell(tr, row.rank || index + 1);
-    appendCell(tr, row.symbol, { strong: true });
-    appendCell(tr, formatNumber(row.score));
-    appendCell(tr, row.selected_factor || best?.factor || '-');
-    appendCell(tr, formatPercent(row.weight), { className: classForNumber(row.weight) });
-    appendCell(tr, formatPercent(row.pre_cap_weight), { className: classForNumber(row.pre_cap_weight) });
-    appendCell(tr, humanWeightingMethod(row.weighting_method));
-    appendCell(tr, row.signal_date || run.summary?.data_as_of || '-');
-    tbody.appendChild(tr);
-  });
-  if (!rows.length) {
-    const tr = document.createElement('tr');
-    const td = document.createElement('td');
-    td.colSpan = 7;
-    td.textContent = '최신 추천/연구 신호 출력 행이 없습니다.';
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-  }
 }
 
 function renderFactorReturnChart() {
@@ -4620,9 +4454,8 @@ function renderFactorReturnChart() {
   const date = selectedDate();
   const windowKey = selectedWindow();
   const factor = selectedFactor();
-  const params = inputScenarioParameters();
-  let rows = scenarioPeriodRows(run, date, windowKey, params);
-  const best = rows[0] || scenarioBestStats(run, date, windowKey, params);
+  let rows = rawPeriodRows(run, date, windowKey);
+  const best = rows[0] || periodBestStats(run, date, windowKey);
   const selectedRow = rows.find((row) => row.factor === factor);
   rows = rows.slice(0, 10);
   if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
@@ -4631,7 +4464,7 @@ function renderFactorReturnChart() {
   const windowLabel = rows[0]?.window_label || (run.periods || []).find((period) => period.key === windowKey)?.label || '-';
   setText(
     '#factor-chart-meta',
-    `${date || '-'} · ${windowLabel} · 브라우저 시나리오/프록시 · 최근 ${params.lookbackMonths}개월 · 선택 ${factor || '-'} · 상위 ${params.topN}개 · 최대 ${formatPercent(params.maxWeight)} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps`,
+    `${date || '-'} · ${windowLabel} · Python 기간 성과 · 비교 ${factor || '-'} · 공식 선택 ${state.v4Payload?.selectedFactor || '-'}`,
   );
   if (!rows.length) {
     appendEmpty('#factor-return-chart', '선택한 기준일과 기간에 표시할 팩터 수익률 데이터가 없습니다.');
@@ -4641,7 +4474,7 @@ function renderFactorReturnChart() {
   rows.forEach((row) => appendBarRow(
     target,
     `${row.rank}. ${row.factor}`,
-    `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(row.raw_period_return)}` : ''}`,
+    formatPercent(row.period_return),
     row.period_return,
     maxAbs,
     {
@@ -4655,11 +4488,6 @@ function renderFactorReturnChart() {
       ].filter(Boolean).join(' '),
     },
   ));
-  const note = document.createElement('div');
-  note.className = 'scenario-note';
-  const fallbackCount = rows.filter((row) => !row.scenario_adjusted).length;
-  note.textContent = `막대값은 저장된 팩터 성과에 현재 입력값을 반영한 브라우저 시나리오/민감도 프록시입니다.${fallbackCount ? ` ${fallbackCount}개 팩터는 원자료 수익률 fallback을 사용했습니다.` : ''}`;
-  target.appendChild(note);
   if (!selectedRow) {
     const missingNote = document.createElement('div');
     missingNote.className = 'scenario-note';
@@ -4672,7 +4500,6 @@ function renderWindowComparisonChart() {
   const run = currentRun();
   const date = selectedDate();
   const selectedFactorName = selectedFactor();
-  const params = inputScenarioParameters();
   const periodOrder = (run.periods || []).map((period) => period.key);
   const rows = (run.factor_leaders || [])
     .filter((row) => row.date === date)
@@ -4688,15 +4515,14 @@ function renderWindowComparisonChart() {
     chip.className = 'window-chip';
     const label = document.createElement('span');
     label.textContent = row.window_label || row.window;
-    const scenarioRows = scenarioPeriodRows(run, row.date, row.window, params);
-    const best = scenarioRows[0] || periodBestStats(run, row.date, row.window);
-    const selectedStats = scenarioRows.find((item) => item.factor === selectedFactorName) || scenarioFactorStats(run, row.date, row.window, selectedFactorName, params);
+    const best = periodBestStats(run, row.date, row.window);
+    const selectedStats = periodFactorStats(run, row.date, row.window, selectedFactorName);
     const factorNode = document.createElement('strong');
     factorNode.textContent = best?.factor || row.best_factor || '-';
     const detail = document.createElement('small');
     detail.textContent = selectedStats?.rank
-      ? `브라우저 시나리오 최고 ${formatPercent(best?.period_return)} · 선택 팩터 ${formatPercent(selectedStats.period_return)} · 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
-      : `브라우저 시나리오 최고 ${formatPercent(best?.period_return)} · 선택 팩터 자료 없음`;
+      ? `기간 1위 ${formatPercent(best?.period_return)} · 비교 팩터 ${formatPercent(selectedStats.period_return)} · 순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
+      : `기간 1위 ${formatPercent(best?.period_return)} · 비교 팩터 자료 없음`;
     chip.append(label, factorNode, detail);
     target.appendChild(chip);
   });
@@ -4705,20 +4531,10 @@ function renderWindowComparisonChart() {
 function renderLeaderTrendChart() {
   const run = currentRun();
   const windowKey = selectedWindow();
-  const params = inputScenarioParameters();
   const rows = (run.factor_leaders || [])
     .filter((row) => row.window === windowKey)
     .sort((a, b) => String(a.date).localeCompare(String(b.date)))
-    .slice(-30)
-    .map((row) => {
-      const best = scenarioBestStats(run, row.date, row.window, params);
-      return {
-        ...row,
-        best_factor: best?.factor || row.best_factor,
-        best_return: best?.period_return ?? row.best_return,
-        scenario_adjusted: best?.scenario_adjusted === true,
-      };
-    });
+    .slice(-30);
   const target = document.querySelector('#leader-trend-chart');
   target.replaceChildren();
   if (!rows.length) {
@@ -4731,7 +4547,7 @@ function renderLeaderTrendChart() {
   rows.forEach((row) => {
     const bar = document.createElement('div');
     bar.className = 'trend-bar';
-    bar.title = `${row.date} · ${row.best_factor} · ${formatPercent(row.best_return)} · 브라우저 시나리오/프록시`;
+    bar.title = `${row.date} · ${row.best_factor} · ${formatPercent(row.best_return)} · Python 기간 성과`;
     const fill = document.createElement('div');
     fill.className = `trend-fill chart-trend-focal ${Number(row.best_return) < 0 ? 'negative' : ''}`.trim();
     fill.style.setProperty('--bar-height', barWidth(row.best_return, maxAbs));
@@ -4745,13 +4561,12 @@ function renderLeaderTrendChart() {
 }
 
 function renderWeightChart() {
-  const run = currentRun();
-  const { weighted, cashTotal, topN, maxWeight, unusedCandidateCount } = currentWeightedHoldings();
+  const { weighted, cashTotal, topN, maxWeight, selectedFactor: factor, weightingPolicyId } = currentWeightedHoldings();
   const target = document.querySelector('#weight-chart');
   target.replaceChildren();
-  setText('#weight-chart-meta', `${isPracticalRun(run) ? '투자 시나리오' : '연구 시나리오'} · 선택 팩터 ${selectedFactor() || '-'} · 상위 ${topN}개 · 최대 ${formatPercent(maxWeight)}`);
+  setText('#weight-chart-meta', `Python 선택 · ${factor} × ${canonicalPolicyLabel(state.v4Payload || {}, weightingPolicyId)} · Top ${topN} · 상한 ${formatPercent(maxWeight)}`);
   if (!weighted.length) {
-    appendEmpty('#weight-chart', '선택한 기준일과 팩터에 표시할 상위 종목 점수 스냅샷이 없습니다.');
+    appendEmpty('#weight-chart', 'Python 선택 포트폴리오가 없습니다.');
     return;
   }
   const maxWeightValue = Math.max(
@@ -4777,57 +4592,6 @@ function renderWeightChart() {
       { className: CHART_PALETTE_CLASS_MAP.bars.neutralOpen },
     );
   }
-  if (unusedCandidateCount > 0) {
-    const note = document.createElement('div');
-    note.className = 'scenario-note';
-    note.textContent = `상위 N개 제한 때문에 ${formatInteger(unusedCandidateCount)}개 후보는 이번 브라우저 시나리오 목표 비중에서 제외했습니다.`;
-    target.appendChild(note);
-  }
-}
-
-function renderEnsembleWeightChart() {
-  const run = currentRun();
-  const date = selectedDate();
-  const windowKey = selectedWindow();
-  const topN = clampedTopN();
-  const maxWeight = clampedMaxWeight();
-  const target = document.querySelector('#ensemble-weight-chart');
-  target.replaceChildren();
-  const ensemble = topFactorEnsembleAllocation(run, date, windowKey, topN, maxWeight, 10);
-  setText(
-    '#ensemble-chart-meta',
-    `${date || '-'} · ${ensemble.windowLabel} · ${ensemble.factorsUsedCount}/${Math.min(10, ensemble.factorRows.length)}개 팩터 · 최종 상한 ${formatPercent(ensemble.maxWeight)}`,
-  );
-  if (!ensemble.weighted.length) {
-    appendEmpty(
-      '#ensemble-weight-chart',
-      '선택한 기준일과 기간에 상위 팩터의 백테스트 보유 비중 스냅샷이 없어 합산 비중을 표시할 수 없습니다.',
-    );
-    return;
-  }
-  const maxWeightValue = Math.max(
-    ...ensemble.weighted.map((row) => Number(row.display_weight) || 0),
-    0.01,
-  );
-  ensemble.weighted.forEach((row) => {
-    const label = `${row.symbol} · ${row.factor_count}개 팩터`;
-    appendBarRow(
-      target,
-      label,
-      formatPercent(row.display_weight),
-      row.display_weight,
-      maxWeightValue,
-      { className: CHART_PALETTE_CLASS_MAP.bars.support },
-    );
-  });
-  const factorNames = ensemble.sleeves.map((sleeve) => `${sleeve.rank}. ${sleeve.factor}`).join(', ');
-  const note = document.createElement('div');
-  note.className = 'scenario-note';
-  const missing = ensemble.missingFactors.length
-    ? ` 스냅샷이 없는 팩터 ${ensemble.missingFactors.length}개는 제외했습니다.`
-    : '';
-  note.textContent = `해석: ${ensemble.windowLabel} 성과 상위 팩터를 동일 sleeve로 합산하되, 각 팩터 내부에는 백테스트 일별 보유 이력이 아니라 Python factorPortfolios에 공개 저장된 현재 canonical 구성종목 최대 ${formatInteger(storedScenarioRowLimit(run))}개의 목표 비중을 사용합니다. 따라서 선택 기간의 과거 포트폴리오를 재현한 백테스트가 아니라 현재 snapshot 프록시입니다. 합산 후 브라우저 종목당 최대 비중 ${formatPercent(ensemble.maxWeight)}를 최종 상한으로 적용했습니다. 시각화는 개별 종목 ${ensemble.weighted.length}개만 표시하고, 미표시 저장 행 합계 ${formatPercent(ensemble.hiddenWeight)} 및 현금/상한 미사용 ${formatPercent(ensemble.cashTotal)}는 숫자로만 제공합니다. 전체 중복 제거 저장 종목 ${ensemble.totalCandidateCount}개. 사용 팩터: ${factorNames}.${missing}`;
-  target.appendChild(note);
 }
 
 function factorBacktestSeries(run, factor) {
@@ -5428,7 +5192,7 @@ function renderBacktestComparisonSummary(run, {
   target.replaceChildren();
   const selectedStats = periodFactorStatsIncludingDiagnostic(run, date, windowKey, factor);
   const windowLabel = selectedStats?.window_label || best?.window_label || windowKey;
-  const canonical = factor === run.summary?.selected_factor;
+  const official = factor === state.v4Payload?.selectedFactor;
   const selectedRankDetail = selectedStats?.rank
     ? `순위 ${selectedStats.rank}/${selectedStats.factor_count || '-'}`
     : selectedStats?.diagnostic_fallback && selectedStats?.selection_eligible !== true
@@ -5436,7 +5200,7 @@ function renderBacktestComparisonSummary(run, {
       : '순위 자료 없음';
   appendComparisonSummaryItem(
     target,
-    canonical ? '현재 연구 목표 팩터' : '사용자 선택 팩터',
+    official ? 'Python 선택 팩터' : '비교 팩터',
     factor || '-',
     `${windowLabel} ${formatPercent(selectedStats?.period_return)} · ${selectedRankDetail}`,
     'selected',
@@ -5466,8 +5230,8 @@ function renderBacktestComparisonSummary(run, {
   appendComparisonSummaryItem(
     target,
     '그래프 평가범위',
-    commonPeriod ? `${commonPeriod.startDate} → ${commonPeriod.endDate}` : `최근 ${inputLookbackMonths()}개월`,
-    `${commonPeriod ? `전체 공통 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률` : '브라우저 민감도'}${gapParts.length ? ` · ${gapParts.join(' · ')}` : ' · 내부 결측 없음'}${commonPeriod && date !== commonPeriod.endDate ? ' · 과거 리더의 이후 성과까지 보는 사후 탐색' : ''}`,
+    commonPeriod ? `${commonPeriod.startDate} → ${commonPeriod.endDate}` : 'Python 원자료 없음',
+    `${commonPeriod ? `전체 공통 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률` : '브라우저 재계산 안 함'}${gapParts.length ? ` · ${gapParts.join(' · ')}` : ' · 내부 결측 없음'}${commonPeriod && date !== commonPeriod.endDate ? ' · 과거 리더의 이후 성과까지 보는 사후 탐색' : ''}`,
   );
 }
 
@@ -5480,31 +5244,16 @@ function renderBacktestChart() {
   const benchmarks = Array.isArray(run.comparison_benchmark_series) && run.comparison_benchmark_series.length
     ? run.comparison_benchmark_series
     : (benchmark ? [benchmark] : []);
-  const params = inputScenarioParameters();
   const commonPeriod = run.common_evaluation_period;
-  const best = commonPeriod
-    ? periodBestStats(run, date, windowKey)
-    : scenarioBestStats(run, date, windowKey, params);
-  const selectedAllocation = commonPeriod
-    ? null
-    : scenarioAllocationForFactor(run, date, windowKey, factor, params.topN, params.maxWeight).allocation;
-  const selectedProxyPoints = commonPeriod
-    ? []
-    : normalizedLine(scenarioAdjustedSeriesPoints(factorBacktestSeries(run, factor), date, params, selectedAllocation));
+  const best = periodBestStats(run, date, windowKey);
   const selectedModel = commonPeriod
     ? commonEvaluationSeriesSegments(factorBacktestSeries(run, factor), commonPeriod)
-    : chartSeriesModel(selectedProxyPoints);
+    : chartSeriesModel([]);
   const selectedSeries = selectedModel.points;
-  const bestAllocation = best?.factor && !commonPeriod
-    ? scenarioAllocationForFactor(run, date, windowKey, best.factor, params.topN, params.maxWeight).allocation
-    : null;
-  const bestProxyPoints = best?.factor && !commonPeriod
-    ? normalizedLine(scenarioAdjustedSeriesPoints(factorBacktestSeries(run, best.factor), date, params, bestAllocation))
-    : [];
   const bestModel = best?.factor
     ? (commonPeriod
       ? commonEvaluationSeriesSegments(factorBacktestSeries(run, best.factor), commonPeriod)
-      : chartSeriesModel(bestProxyPoints))
+      : chartSeriesModel([]))
     : chartSeriesModel([]);
   const bestMetricSeries = bestModel.points;
   const bestSeries = best?.factor && best.factor !== factor ? bestMetricSeries : [];
@@ -5514,7 +5263,7 @@ function renderBacktestChart() {
     label: series.label_ko || V4_BENCHMARK_LABELS[series.symbol] || series.symbol,
     model: commonPeriod
       ? commonEvaluationSeriesSegments(series, commonPeriod)
-      : chartSeriesModel(normalizedLine(lookbackFilteredPoints(seriesPointsThroughDate(series, date, 2000), params.lookbackMonths))),
+      : chartSeriesModel([]),
   })).map((series) => ({ ...series, points: series.model.points }));
   const benchmarkLabels = benchmarkSeriesList.map((series) => series.label).join(' · ');
   const target = document.querySelector('#backtest-chart');
@@ -5522,8 +5271,8 @@ function renderBacktestChart() {
   setText(
     '#backtest-chart-meta',
     commonPeriod
-      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · Python 전체 공통 평가기간 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률 · 기간 최고 판정 ${date || '-'} ${windowKey} · 기준 1.0 · 프록시 입력 미적용 · 선택 ${factor || '-'}${best?.factor ? ` · 원자료 기간 최고 ${best.factor}` : ''}${benchmarkLabels ? ` · 비교 ${benchmarkLabels}` : ''}${date !== commonPeriod.endDate ? ' · 과거 판정 리더의 이후 성과를 포함한 사후 탐색' : ''}`
-      : `${date || '-'} 기준 · 브라우저 프록시/민감도 뷰 · 최근 ${params.lookbackMonths}개월 · 선택 ${factor || '-'}${best?.factor ? ` · 기간 최고 ${best.factor}` : ''}${benchmarkLabels ? ` · 비교 ${benchmarkLabels}` : ''} · ${rebalanceFrequencyLabel(params.rebalanceFrequency)} · 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps · 최대 ${formatPercent(params.maxWeight)} · 저장된 팩터 곡선을 현재 비중 집중도와 비용 가정으로 조정`
+      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · Python 전체 공통 평가기간 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률 · 기간 최고 판정 ${date || '-'} ${windowKey} · 기준 1.0 · 브라우저 재계산 안 함 · 선택 ${factor || '-'}${best?.factor ? ` · 원자료 기간 최고 ${best.factor}` : ''}${benchmarkLabels ? ` · 비교 ${benchmarkLabels}` : ''}${date !== commonPeriod.endDate ? ' · 과거 판정 리더의 이후 성과를 포함한 사후 탐색' : ''}`
+      : 'Python 공통 평가기간 원자료가 없어 그래프를 표시하지 않습니다. 브라우저 추정값으로 대체하지 않습니다.'
   );
   renderBacktestComparisonSummary(run, {
     date,
@@ -5553,9 +5302,7 @@ function renderBacktestChart() {
   if (!allPoints.length) {
     appendEmpty(
       '#backtest-chart',
-      commonPeriod
-        ? '선택 팩터·기간 최고 팩터·비교지수 모두 전체 공통 평가기간 누적 성과를 표시할 수 없습니다. 서로의 값으로 대체하지 않습니다.'
-        : '선택 팩터·기간 최고 팩터·비교지수의 최근 백테스트 추이 데이터가 없습니다. 서로의 값으로 대체하지 않습니다.',
+      '선택 팩터·기간 최고 팩터·비교지수의 Python 공통 평가기간 원자료가 없습니다. 브라우저 추정값으로 대체하지 않습니다.',
     );
     renderPerformanceMetricsTable(performanceSeries);
     return;
@@ -5821,86 +5568,10 @@ function renderPerformanceMetricsTable(seriesList) {
     return;
   }
   target.replaceChildren();
-  const availableSeries = (seriesList || []).filter((series) => Array.isArray(series.points) && series.points.length >= 2);
-  if (!availableSeries.length) {
-    appendEmpty('#performance-metrics-table', '성과 지표를 계산할 수 있는 누적 성과 데이터가 없습니다.');
-    return;
-  }
-
-  const heading = document.createElement('div');
-  heading.className = 'performance-metrics-heading';
-  const headingText = document.createElement('div');
-  const title = document.createElement('h4');
-  title.textContent = '기간별 프록시 성과 지표 비교';
-  const note = document.createElement('p');
-  note.id = 'proxy-performance-metrics-note';
-  note.textContent = '각 기간 카드에서 같은 지표를 비교합니다. 선택/기간 최고 팩터 값은 새 백엔드 재백테스트가 아니라 저장된 누적성과에 현재 입력값을 반영한 브라우저 프록시입니다. CVaR은 최악 5% 일간 손실 평균입니다. 실제 일별 구성종목 재매매 결과로 해석하지 마세요.';
-  headingText.append(title, note);
-  heading.appendChild(headingText);
-  target.appendChild(heading);
-
-  const metricCache = new Map(availableSeries.map((series) => [
-    series.key,
-    new Map(PERFORMANCE_PERIODS.map((period) => [period.key, performanceMetrics(series.points, period)])),
-  ]));
-  const shortSeriesLabel = (series) => ({
-    selected: '선택 팩터',
-    best: '기간 최고',
-    benchmark: '나스닥',
-  })[series.key] || series.label;
-
-  const grid = document.createElement('div');
-  grid.className = 'performance-period-grid';
-  PERFORMANCE_PERIODS.forEach((period) => {
-    const card = document.createElement('section');
-    card.className = 'performance-period-card';
-    const periodTitle = document.createElement('h5');
-    periodTitle.textContent = period.label;
-    card.appendChild(periodTitle);
-
-    const wrap = document.createElement('div');
-    wrap.className = 'performance-table-wrap';
-    wrap.setAttribute('role', 'region');
-    wrap.setAttribute('tabindex', '0');
-    wrap.setAttribute('aria-label', `${period.label} 프록시 성과 지표 표`);
-    wrap.setAttribute('aria-describedby', 'proxy-performance-metrics-note');
-    const table = document.createElement('table');
-    table.className = 'performance-table';
-    table.setAttribute('aria-label', `${period.label} 선택 팩터, 기간 최고 팩터, 나스닥 벤치마크 성과 지표 비교`);
-    const thead = document.createElement('thead');
-    const header = document.createElement('tr');
-    appendHeader(header, '지표');
-    availableSeries.forEach((series) => {
-      const th = document.createElement('th');
-      th.setAttribute('scope', 'col');
-      const label = document.createElement('span');
-      label.className = `series-name ${series.key}`;
-      label.textContent = shortSeriesLabel(series);
-      th.appendChild(label);
-      header.appendChild(th);
-    });
-    thead.appendChild(header);
-    table.appendChild(thead);
-
-    const tbody = document.createElement('tbody');
-    PERFORMANCE_METRICS.forEach((metric) => {
-      const tr = document.createElement('tr');
-      appendCell(tr, metric.label, { strong: true });
-      availableSeries.forEach((series) => {
-        const metrics = metricCache.get(series.key)?.get(period.key);
-        const value = metrics?.[metric.key];
-        const signedMetric = ['cumulativeReturn', 'maxDrawdown', 'cvar'].includes(metric.key);
-        const className = signedMetric && Number.isFinite(Number(value)) ? classForNumber(value) : '';
-        appendCell(tr, metric.formatter(value), { className });
-      });
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    wrap.appendChild(table);
-    card.appendChild(wrap);
-    grid.appendChild(card);
-  });
-  target.appendChild(grid);
+  appendEmpty(
+    '#performance-metrics-table',
+    'Python 기간별 성과 원자료가 없습니다. 브라우저가 지표를 재계산하거나 추정값으로 대체하지 않습니다.',
+  );
 }
 
 function normalizeDailyActualRows(sourceRows, sourceMeta = {}) {
@@ -6405,14 +6076,13 @@ function appendMethodItem(target, label, value) {
 function renderSelectedFactorMethod() {
   const run = currentRun();
   const factor = selectedFactor();
-  const params = inputScenarioParameters();
   const option = factorOptions(run).find((item) => item.factor === factor) || {};
   const method = parseSelectedFactorMethod(factor, option);
   setText('#selected-factor-method-title', factor || '-');
-  setText('#selected-factor-method-badge', `${method.category} · 브라우저 시나리오 설명`);
+  setText('#selected-factor-method-badge', `${method.category} · Python 팩터 정의`);
   setText(
     '#selected-factor-method-summary',
-    `${factor || '-'}: ${method.score} 화면 비교는 최근 ${params.lookbackMonths}개월, 상위 ${params.topN}개, 종목당 최대 ${formatPercent(params.maxWeight)}, ${rebalanceFrequencyLabel(params.rebalanceFrequency)}, 비용 ${(params.transactionCostBps + params.slippageBps).toFixed(0)}bps를 적용한 브라우저 시나리오/민감도 프록시입니다.`,
+    `${factor || '-'}: ${method.score} 이 팩터의 성과와 현재 포트폴리오는 현재 실행의 Python 계산 결과에서 읽습니다.`,
   );
   const steps = document.querySelector('#selected-factor-method-steps');
   if (steps) {
@@ -6421,12 +6091,13 @@ function renderSelectedFactorMethod() {
     appendMethodItem(steps, '핵심 산식', method.formulaLabel);
     appendMethodItem(steps, '관찰 구간', method.lookback);
     appendMethodItem(steps, '최근 구간 제외', method.skip);
-    appendMethodItem(steps, '비중 적용', `점수 상위 ${params.topN}개를 점수 비례로 배분하고 종목당 ${formatPercent(params.maxWeight)} 상한을 적용합니다.`);
-    appendMethodItem(steps, '성과 적용', `저장된 팩터 누적성과를 비중 집중도와 ${rebalanceFrequencyLabel(params.rebalanceFrequency)} 비용 프록시로 조정합니다.`);
+    appendMethodItem(steps, '현재 실행 Top-N', formatInteger(state.v4Payload?.config?.top_n));
+    appendMethodItem(steps, '현재 실행 비중 정책', canonicalPolicyLabel(state.v4Payload || {}, state.v4Payload?.selectedWeightingPolicy));
+    appendMethodItem(steps, '성과 계산', 'Python 백테스트 원자료 · 현재 실행의 리밸런싱과 거래비용 적용');
   }
   setText(
     '#selected-factor-method-note',
-    `${method.caveat} 입력값은 저장된 점수/비중 스냅샷과 팩터 누적성과를 다시 해석합니다.`,
+    `${method.caveat} 비교 팩터 변경은 공식 선택 결과를 바꾸지 않습니다. 공식 결과를 바꾸려면 위 Python 분석 조건을 제출하세요.`,
   );
 }
 
@@ -6435,8 +6106,7 @@ function renderPeriodRankingTable() {
   const date = selectedDate();
   const windowKey = selectedWindow();
   const factor = selectedFactor();
-  const params = inputScenarioParameters();
-  let rows = scenarioPeriodRows(run, date, windowKey, params);
+  let rows = rawPeriodRows(run, date, windowKey);
   const selectedRow = rows.find((row) => row.factor === factor);
   rows = rows.slice(0, 40);
   if (selectedRow && !rows.some((row) => row.factor === selectedRow.factor)) rows.push(selectedRow);
@@ -6444,9 +6114,9 @@ function renderPeriodRankingTable() {
   tbody.replaceChildren();
   rows.forEach((row) => {
     const tr = document.createElement('tr');
-    appendCell(tr, `${row.window_label || windowKey} · 시나리오`);
+    appendCell(tr, `${row.window_label || windowKey} · Python`);
     appendCell(tr, row.factor, { strong: row.factor === factor });
-    appendCell(tr, `${formatPercent(row.period_return)}${row.raw_period_return != null ? ` · 원자료(저장값) ${formatPercent(row.raw_period_return)}` : ''}`, { className: classForNumber(row.period_return) });
+    appendCell(tr, formatPercent(row.period_return), { className: classForNumber(row.period_return) });
     appendCell(tr, row.rank);
     tbody.appendChild(tr);
   });
@@ -7543,45 +7213,6 @@ function canonicalFilteredRanking(payload) {
     ));
 }
 
-function renderCanonicalAllocation(payload) {
-  const target = payload.currentResearchTarget || {};
-  const rows = Array.isArray(target.weights) ? target.weights : [];
-  const chart = document.querySelector('#canonical-allocation-chart');
-  const tbody = document.querySelector('#canonical-allocation-table tbody');
-  chart.replaceChildren();
-  tbody.replaceChildren();
-  const maxWeight = Math.max(...rows.map((row) => Number(row.weight) || 0), Number(target.cashWeight) || 0, 0.01);
-  rows.forEach((row) => {
-    appendCanonicalBar(chart, {
-      label: row.symbol,
-      detail: row.name || `팩터 점수 ${formatNumber(row.factorScore)}`,
-      width: Number(row.weight) / maxWeight * 100,
-      valueLabel: formatPercent(row.weight),
-      className: `${canonicalPolicyClass(target.weightingPolicyId)} ${CHART_PALETTE_CLASS_MAP.bars.focal}`,
-    });
-    const tr = document.createElement('tr');
-    appendCell(tr, row.rank);
-    appendCell(tr, row.symbol, { strong: true });
-    appendCell(tr, row.name || '-');
-    appendCell(tr, formatNumber(row.factorScore));
-    appendCell(tr, formatPercent(row.weight), { className: 'positive' });
-    appendCell(tr, formatNumber(row.rawPolicyScore));
-    appendCell(tr, row.capBinding ? '상한 적용' : '상한 미적용');
-    tbody.appendChild(tr);
-  });
-  if (Number(target.cashWeight) > 0) {
-    appendCanonicalBar(chart, {
-      label: '현금 / 미사용',
-      detail: 'Python residual cash',
-      width: Number(target.cashWeight) / maxWeight * 100,
-      valueLabel: formatPercent(target.cashWeight),
-      className: `neutral ${CHART_PALETTE_CLASS_MAP.bars.neutralOpen}`,
-    });
-  }
-  if (!rows.length) appendEmpty('#canonical-allocation-chart', '현재 Python 연구 목표 종목이 없습니다.');
-  setText('#canonical-allocation-meta', `${canonicalPolicyLabel(payload, target.weightingPolicyId)} · ${formatInteger(rows.length)}개 · 상한 ${formatPercent(payload.config?.max_weight)}`);
-}
-
 function renderCanonicalRanking(payload) {
   const rows = canonicalFilteredRanking(payload);
   const accounting = canonicalGridAccounting(payload);
@@ -7834,7 +7465,6 @@ function renderCanonicalResearch() {
   const universeScope = canonicalUniverseScopeEvidence(payload);
   setText('#canonical-universe-scope', universeScope.scope);
   setText('#canonical-universe-evidence', universeScope.evidence);
-  renderCanonicalAllocation(payload);
   renderCanonicalRanking(payload);
   renderCanonicalComponents(payload, selected);
   renderCanonicalPolicies(payload);
@@ -7857,7 +7487,6 @@ function bindCanonicalControls() {
 
 function renderAll() {
   if (!state.data) return;
-  syncTopNAvailability(currentRun(), selectedFactor());
   renderSummary();
   renderDiagnostics();
   renderSelectedFactorMethod();
@@ -7866,8 +7495,6 @@ function renderAll() {
   renderWindowComparisonChart();
   renderLeaderTrendChart();
   renderWeightChart();
-  renderEnsembleWeightChart();
-  renderCurrentOutputTable();
   renderFactorTable();
   renderHoldingsTable();
   renderDailyWeightsAnalysis();
@@ -8208,28 +7835,6 @@ function bindBrowserContractControls() {
 function bindDashboardControls() {
   if (state.dashboardControlsBound) return;
   state.dashboardControlsBound = true;
-  if (typeof document.querySelectorAll === 'function') {
-    document.querySelectorAll('[data-topn-preset]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const input = document.querySelector('#topn-input');
-        if (input) {
-          input.value = button.getAttribute('data-topn-preset') || DASHBOARD_INPUT_DEFAULTS.topN;
-        }
-        syncTopNAvailability(currentRun(), selectedFactor());
-        renderWithBusy('상위 종목 수 프리셋을 반영하는 중입니다...');
-      });
-    });
-    document.querySelectorAll('[data-max-weight-preset]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const input = document.querySelector('#max-weight-input');
-        if (input) {
-          input.value = button.getAttribute('data-max-weight-preset')
-            || DASHBOARD_INPUT_DEFAULTS.maxWeightPercent;
-        }
-        renderWithBusy('최대 비중 프리셋을 반영하는 중입니다...');
-      });
-    });
-  }
   document.querySelector('#factor-select').addEventListener('change', () => {
     state.hasUserSelectedFactor = true;
     syncFactorDependentControls(currentRun(), selectedFactor(), selectedDate());
@@ -8244,23 +7849,6 @@ function bindDashboardControls() {
       syncDefaultFactorToCurrentBasis();
       renderWithBusy('기준일·기간의 최고 팩터를 반영하는 중입니다...');
     });
-  });
-  [
-    '#lookback-months-select',
-    '#topn-input',
-    '#max-weight-input',
-    '#rebalance-select',
-    '#transaction-cost-input',
-    '#slippage-input',
-  ].forEach((selector) => {
-    document.querySelector(selector).addEventListener(
-      'input',
-      () => renderWithBusy('선택값을 반영하는 중입니다...'),
-    );
-    document.querySelector(selector).addEventListener(
-      'change',
-      () => renderWithBusy('선택값을 반영하는 중입니다...'),
-    );
   });
 }
 

@@ -34,7 +34,7 @@ const fixtureSiteRoot = process.env.MFL_TEST_SITE_ROOT
   || "docs";
 
 assert.match(html, /id="research-controls" class="advanced-canonical-inputs canonical-input-details"/);
-assert.match(html, /브라우저 프록시 입력과 서로 섞이지 않습니다/);
+assert.match(html, /로컬 Python API에서 전체 팩터×비중 정책을 다시 계산합니다/);
 assert.match(html, /id="result-source"/);
 assert.match(html, /id="result-key"/);
 assert.match(css, /span\[data-source="static_grid"\]/);
@@ -55,6 +55,9 @@ assert(
   api.INPUT_FIELDS.every((field) => !proxyIds.has(field.id)),
   "canonical ResearchInputs must never reuse browser proxy controls",
 );
+for (const id of proxyIds) {
+  assert(!html.includes(`id="${id}"`), `removed browser proxy control must not return: ${id}`);
+}
 
 const manifest = api.validateManifest(JSON.parse(
   readFileSync(join(fixtureSiteRoot, "data/grid/v1/manifest.json"), "utf8"),
@@ -186,5 +189,5 @@ assert.match(source, /loadLocalApiResult\(apiRequest\.requestedInputs, apiReques
 assert.match(source, /setResultSource\(source, entry\.resultKey\)/);
 
 console.log(
-  "PASS separate canonical form, local API POST/202 polling, source badge, validation, and shareable replay contracts",
+  "PASS official Python research form, local API POST/202 polling, source badge, validation, and shareable replay contracts",
 );

@@ -12,12 +12,12 @@ const baselineIds = [
   "date-select",
   "window-select",
   "factor-select",
-  "lookback-months-select",
-  "topn-input",
-  "max-weight-input",
-  "rebalance-select",
-  "transaction-cost-input",
-  "slippage-input",
+  "research-input-form",
+  "input-evaluation-years",
+  "input-top-n",
+  "input-max-weight",
+  "input-transaction-cost",
+  "input-slippage",
   "data-quality-summary",
   "tradability-gate-list",
   "selected-factor-method-steps",
@@ -30,8 +30,6 @@ const baselineIds = [
   "window-comparison-chart",
   "leader-trend-chart",
   "weight-chart",
-  "ensemble-weight-chart",
-  "current-output-table",
   "factor-table",
   "holdings-table",
   "daily-weights-table",
@@ -43,8 +41,6 @@ const baselineIds = [
 ];
 const additiveIds = [
   "canonical-research",
-  "canonical-allocation-chart",
-  "canonical-allocation-table",
   "joint-policy-filter",
   "joint-factor-search",
   "joint-ranking-chart",
@@ -79,22 +75,22 @@ for (const path of requiredProjectLinks) {
   assert.ok(html.includes(path), `missing original project navigation link: ${path}`);
 }
 
-assert.match(html, /기준일 · 기간 · 선택 팩터/);
-assert.match(html, /브라우저 프록시 시나리오 입력/);
+assert.match(html, /결과 · 성과 기간 · 비교 팩터/);
+assert.match(html, /Python 분석 조건/);
 assert.match(html, /팩터 수익률 막대 차트/);
-assert.match(html, /선택 팩터와 기간 최고 팩터 누적 성과 비교/);
+assert.match(html, /Python 선택 팩터와 기간 수익률 1위 비교/);
 assert.match(html, /기간별 최고 팩터 비교/);
 assert.match(html, /최근 30거래일 리더 추이/);
-assert.match(html, /상위 N개 모형 비중 시각화/);
-assert.match(html, /상위 10개 팩터 동일비중 합산/);
+assert.match(html, /선택 종목 비중/);
+assert.doesNotMatch(html, /현재 canonical 목표|브라우저 프록시 시나리오 입력|상위 10개 팩터 동일비중 합산/);
 assert.match(html, /모든 팩터×정책 조합을 하나의 랭킹으로 비교/);
 assert.match(html, /합성 점수 구성/);
 
 const originalPrefix = css.split("\n").slice(0, 589).join("\n") + "\n";
 assert.equal(
   createHash("sha256").update(originalPrefix).digest("hex"),
-  "28e9f65b0825ad442c92df2f38a34eba683332915e262d67c7fbf44b7e276f64",
-  "the first 589 CSS lines must remain the exact 2026-07-10 design root",
+  "0e110db899b264ec4775f04fcd6a00b18d4618f857ada8a0c929a61ef6c29979",
+  "the first 589 CSS lines must remain the reviewed Python-first design root",
 );
 assert.match(css, /\.bar-track,\s*\n\.bar-fill\s*\{\s*display:\s*block;/s);
 assert.match(css, /--chart-focal:\s*var\(--accent\)/);
@@ -184,4 +180,4 @@ assert.match(js, /현재 연구 목표/);
 assert.match(js, /dateTickMarks\(allDates\)/);
 assert.match(js, /niceReturnTicks/);
 
-console.log("PASS exact 2026-07-10 UI inventory plus additive schema-v4 design contract");
+console.log("PASS Python-first dynamic research UI inventory and schema-v4 design contract");

@@ -271,6 +271,10 @@ main {
   background: var(--panel);
   box-shadow: var(--shadow-soft);
 }
+.control-group-run {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
 .control-group-backtest { background: color-mix(in srgb, var(--accent-soft), var(--panel) 65%); }
 .control-group-heading { grid-column: 1 / -1; }
 .control-group-heading h2 { margin: 0; color: var(--ink-strong); font-size: 1.08rem; letter-spacing: 0; }
@@ -784,6 +788,7 @@ footer {
 .input-status[data-tone="pending"] { border-color: color-mix(in srgb, var(--warn), var(--line) 62%); color: var(--warn); background: var(--warn-soft); }
 .input-status[data-tone="error"] { border-color: color-mix(in srgb, var(--danger), var(--line) 62%); color: var(--danger); background: var(--danger-soft); }
 .local-api-note { margin: .7rem 0 0; color: var(--muted); font-size: .76rem; line-height: 1.5; }
+.local-api-note code { overflow-wrap: anywhere; }
 
 details[class^="advanced-"],
 details[class*=" advanced-"] {
@@ -824,7 +829,14 @@ details[class*=" advanced-"] .research-input-form { padding: 14px; }
 #research-controls > .input-status,
 #research-controls > .local-api-note { grid-column: 1 / -1; }
 
-.canonical-input-details { overflow: hidden; }
+.canonical-input-details {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow-soft);
+}
 .canonical-input-shell { padding: 14px; }
 .canonical-input-heading {
   display: flex;

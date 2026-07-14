@@ -23,15 +23,10 @@ const requiredHosts = [
   "window-comparison-chart",
   "leader-trend-chart",
   "weight-chart",
-  "ensemble-weight-chart",
-  "topn-hint",
-  "current-output-table",
   "factor-table",
   "holdings-table",
   "daily-weights-table",
   "period-ranking-table",
-  "canonical-allocation-chart",
-  "canonical-allocation-table",
   "joint-ranking-chart",
   "joint-ranking-table",
   "joint-ranking-scope",
@@ -54,7 +49,7 @@ assert.deepEqual(missingSelectors, [], "every literal id selector must resolve i
 
 assert.match(js, /renderAll\(\)[\s\S]*renderFactorReturnChart\(\);[\s\S]*renderBacktestChart\(\);/);
 assert.match(js, /renderAll\(\)[\s\S]*renderWindowComparisonChart\(\);[\s\S]*renderLeaderTrendChart\(\);/);
-assert.match(js, /renderAll\(\)[\s\S]*renderWeightChart\(\);[\s\S]*renderEnsembleWeightChart\(\);/);
+assert.match(js, /renderAll\(\)[\s\S]*renderWeightChart\(\);[\s\S]*renderFactorTable\(\);/);
 assert.match(js, /renderAll\(\)[\s\S]*renderCanonicalResearch\(\);/);
 assert.match(js, /benchmarkSeriesList\.forEach/);
 assert.match(js, /renderPythonPerformanceMetricsTable/);
@@ -70,9 +65,12 @@ assert.match(js, /CHART_PALETTE_CLASS_MAP\.bars\.focal/);
 assert.match(js, /benchmarkPaletteClass\(series\.symbol\)/);
 assert.match(
   js,
-  /const best = commonPeriod\s*\? periodBestStats\(run, date, windowKey\)\s*:\s*scenarioBestStats/,
-  "the canonical FULL chart's best factor must not depend on browser proxy inputs",
+  /const best = periodBestStats\(run, date, windowKey\);/,
+  "the Python chart's best factor must come directly from the Python period matrix",
 );
+const renderBacktestChartSource = js.match(/function renderBacktestChart\(\) \{[\s\S]*?\n\}\n\nfunction pythonPerformanceSource/)?.[0] || "";
+assert.doesNotMatch(renderBacktestChartSource, /scenarioBestStats|scenarioAdjusted|inputScenarioParameters/);
+assert.match(renderBacktestChartSource, /브라우저 추정값으로 대체하지 않습니다/);
 assert.doesNotMatch(js, /fresh_price_ratio:\s*1/);
 assert.match(js, /freshCandidateRows\.length \/ candidateQualityRows\.length/);
 assert.match(js, /score_scope: 'schema_v4_current_python_portfolio_top_constituents'/);
@@ -100,14 +98,16 @@ assert.match(
 
 assert.match(
   html,
-  /Python 전체 공통 평가기간 성과 그래프와 표, canonical 결과에는 적용되지 않습니다/,
+  /아래 값이 공식 결과의 입력입니다/,
 );
 assert.match(
   html,
-  /그래프는 전체 공통 평가기간을 유지하고, 선택한 최근 기간은 비교 팩터를 정하는 데만 사용합니다/,
+  /성과 탐색 기간은 비교선만 정하며, 공식 선택은 입력 폼의 평가기간/,
 );
-assert.match(html, /id="topn-input"[^>]*max="20"/);
-assert.match(html, /data-topn-preset="30"[^>]*disabled[^>]*aria-disabled="true"/);
+assert.doesNotMatch(html, /id="(?:topn-input|max-weight-input|lookback-months-select)"/);
+assert.doesNotMatch(html, /현재 canonical 목표/);
+assert.match(html, /id="input-top-n"[^>]*max="50"/);
+assert.match(html, /이 조건으로 Python 분석/);
 assert.match(html, /데이터 품질 · 최종 편입 적격 · 매매 가능성 게이트/);
 assert.doesNotMatch(html, /유동성 적격 종목/);
 assert.match(html, /동일 표본 상대 점수/);
@@ -145,10 +145,10 @@ assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.canonical-bar-row/);
 assert.match(css, /\.performance-table\s*\{[\s\S]*min-width:\s*560px/);
 assert.match(css, /\.performance-table-wrap\s*\{[\s\S]*overflow-x:\s*auto/);
 assert.match(css, /\.daily-weights-scroll\s*\{[\s\S]*max-height:\s*560px;[\s\S]*overflow:\s*auto/);
-assert.match(html, /종목별 백테스트 보유 \/ 현재 연구 목표/);
+assert.match(html, /종목별 백테스트 보유 \/ 현재 Python 포트폴리오/);
 assert.match(
   html,
-  /class="table-wrap daily-weights-scroll"[\s\S]*role="region"[\s\S]*tabindex="0"[\s\S]*aria-label="선택 팩터 실제 백테스트 보유와 현재 연구 목표 비교표"[\s\S]*aria-describedby="daily-weight-analysis-note"/,
+  /class="table-wrap daily-weights-scroll"[\s\S]*role="region"[\s\S]*tabindex="0"[\s\S]*aria-label="비교 팩터 실제 백테스트 보유와 현재 Python 포트폴리오 비교표"[\s\S]*aria-describedby="daily-weight-analysis-note"/,
 );
 assert.match(
   html,

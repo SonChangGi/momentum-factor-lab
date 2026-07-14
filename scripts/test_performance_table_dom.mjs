@@ -298,13 +298,6 @@ assert.match(sidecarFailureStatus.textContent, /canonical 이외 팩터 이력�
 
 const dateSelect = new FakeElement("select");
 dateSelect.value = "2026-07-10";
-const topNInput = new FakeElement("input");
-topNInput.value = "20";
-const topNHint = new FakeElement("span");
-const topFiveButton = new FakeElement("button");
-topFiveButton.setAttribute("data-topn-preset", "5");
-const topTenButton = new FakeElement("button");
-topTenButton.setAttribute("data-topn-preset", "10");
 const factorControlRun = {
   factor_leaders: [
     { date: "2026-07-10" },
@@ -323,15 +316,11 @@ const factorControlRun = {
 };
 const controls = new Map([
   ["#date-select", dateSelect],
-  ["#topn-input", topNInput],
-  ["#topn-hint", topNHint],
 ]);
 context.document = {
   createElement: (tagName) => new FakeElement(tagName),
   querySelector: (selector) => controls.get(selector) || null,
-  querySelectorAll: (selector) => (
-    selector === "[data-topn-preset]" ? [topFiveButton, topTenButton] : []
-  ),
+  querySelectorAll: () => [],
 };
 api.syncFactorDependentControls(
   factorControlRun,
@@ -344,11 +333,5 @@ assert.deepEqual(
   "joint-ranking factor selection must refresh date availability labels for the clicked factor",
 );
 assert.equal(dateSelect.value, "2026-07-10", "factor synchronization must preserve a valid preferred date");
-assert.equal(topNInput.max, "7");
-assert.equal(topNInput.value, "7");
-assert.equal(topFiveButton.disabled, false);
-assert.equal(topTenButton.disabled, true);
-assert.equal(topTenButton.attributes.get("aria-disabled"), "true");
-assert.match(topNHint.textContent, /구성종목 7개/);
 
-console.log("PASS period DOM, 21-session holdings, and factor-click dependent controls");
+console.log("PASS period DOM, 21-session holdings, and comparison-factor date controls");

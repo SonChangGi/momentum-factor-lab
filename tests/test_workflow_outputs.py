@@ -456,9 +456,7 @@ def test_performance_curve_includes_the_first_evaluation_return(
     assert curve[0] == pytest.approx(float(equity.loc[dates[0]]) / base)
     assert curve[-1] == pytest.approx(float(equity.loc[dates[-1]]) / base)
     ranking = next(row for row in payload["factorPolicyRanking"] if row["selected"] is True)
-    implied_total_return = (1.0 + ranking["cagr"]) ** (
-        ranking["calendar_observations"] / 252.0
-    )
+    implied_total_return = (1.0 + ranking["cagr"]) ** (ranking["calendar_observations"] / 252.0)
     assert curve[-1] == pytest.approx(implied_total_return)
 
 
