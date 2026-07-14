@@ -34,7 +34,9 @@ const fixtureSiteRoot = process.env.MFL_TEST_SITE_ROOT
   || "docs";
 
 assert.match(html, /id="research-controls" class="advanced-canonical-inputs canonical-input-details"/);
-assert.match(html, /로컬 Python API에서 전체 팩터×비중 정책을 다시 계산합니다/);
+assert.match(html, /class="core-research-inputs"/);
+assert.match(html, /id="advanced-research-inputs" class="advanced-research-inputs"/);
+assert.match(html, /공개 preset에 없는 조건은 로컬 Python API가 필요합니다/);
 assert.match(html, /id="result-source"/);
 assert.match(html, /id="result-key"/);
 assert.match(css, /span\[data-source="static_grid"\]/);
@@ -66,6 +68,29 @@ const defaultEntry = manifest.entries.find(
   (entry) => entry.resultKey === manifest.defaultResultKey,
 );
 assert(defaultEntry, "manifest default entry is required");
+for (const field of api.INPUT_FIELDS.filter((item) => item.kind !== "string")) {
+  const tag = html.match(new RegExp(`<input[^>]*id="${field.id}"[^>]*>`))?.[0];
+  assert(tag, `missing numeric input element: ${field.id}`);
+  const value = Number(api.serializeInputValue(field, defaultEntry.normalizedInputs[field.key]));
+  const min = Number(tag.match(/\bmin="([^"]+)"/)?.[1] ?? 0);
+  const maxText = tag.match(/\bmax="([^"]+)"/)?.[1];
+  const stepText = tag.match(/\bstep="([^"]+)"/)?.[1];
+  assert(Number.isFinite(value), `${field.id} default must serialize to a finite number`);
+  assert(value >= min, `${field.id} default must satisfy min`);
+  if (maxText !== undefined) assert(value <= Number(maxText), `${field.id} default must satisfy max`);
+  if (stepText && stepText !== "any") {
+    const step = Number(stepText);
+    const offset = (value - min) / step;
+    assert(
+      Math.abs(offset - Math.round(offset)) < 1e-7,
+      `${field.id} default ${value} must satisfy native step ${stepText} from min ${min}`,
+    );
+  }
+}
+assert.equal(api.serializeInputValue(
+  api.INPUT_FIELDS.find((field) => field.key === "max_extreme_daily_return"),
+  0.8,
+), "80");
 const unsupportedInputs = structuredClone(defaultEntry.normalizedInputs);
 unsupportedInputs.top_n = 21;
 assert.equal(api.resolveExactEntry(manifest, unsupportedInputs), null);
@@ -165,6 +190,23 @@ await assert.rejects(
 
 const payloadPath = explicitPayloadPath || join(fixtureSiteRoot, "data/dashboard.json");
 const actualPayload = JSON.parse(readFileSync(payloadPath, "utf8"));
+const comparisonFactor = Object.keys(actualPayload.factorPortfolios).find((factor) => (
+  factor !== actualPayload.selectedFactor
+  && actualPayload.factorPortfolios[factor]?.status === "available"
+  && actualPayload.factorPortfolios[factor]?.weights?.length > 0
+));
+assert(comparisonFactor, "fixture needs a non-selected Python factor portfolio");
+const comparisonPortfolio = api.portfolioHoldingsFromPayload(actualPayload, comparisonFactor);
+assert.equal(
+  comparisonPortfolio.weighted.length,
+  actualPayload.factorPortfolios[comparisonFactor].weights.length,
+);
+assert.equal(
+  comparisonPortfolio.weighted[0].display_weight,
+  actualPayload.factorPortfolios[comparisonFactor].weights[0].weight,
+  "comparison chart must render Python factorPortfolios weights without browser recomputation",
+);
+assert.equal(comparisonPortfolio.weightingPolicyId, actualPayload.selectedWeightingPolicy);
 const localEntry = {
   resultKey: actualPayload.resultKey,
   normalizedInputs: actualPayload.resultIdentity.keyParts.normalizedInputs,

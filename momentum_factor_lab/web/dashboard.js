@@ -836,7 +836,10 @@ function parseInputValue(field, raw) {
 }
 
 function serializeInputValue(field, value) {
-  if (field.kind === 'percent') return String(Number(value) * 100);
+  if (field.kind === 'percent') {
+    const scaled = Number(value) * 100;
+    return Number.isFinite(scaled) ? String(Number(scaled.toFixed(10))) : String(value);
+  }
   return String(value);
 }
 
@@ -3800,9 +3803,10 @@ function scenarioAllocationForFactor(run, date, windowKey, factor, topN, maxWeig
   return { allocation, snapshot, fallbackSource, latestOutputRowsFactor };
 }
 
-function currentWeightedHoldings() {
-  const payload = state.v4Payload || {};
-  const target = payload.currentResearchTarget || {};
+function portfolioHoldingsFromPayload(payload, factor) {
+  const target = payload.factorPortfolios?.[factor]
+    || (factor === payload.selectedFactor ? payload.currentResearchTarget : null)
+    || {};
   const rows = Array.isArray(target.weights) ? target.weights : [];
   const weighted = rows.map((row, index) => ({
     ...row,
@@ -3821,13 +3825,22 @@ function currentWeightedHoldings() {
     topN: Number(payload.config?.top_n) || weighted.length,
     maxWeight: Number(payload.config?.max_weight) || 0,
     availableCount: Number(target.eligibleSecurityCount) || weighted.length,
-    selectedFactor: payload.selectedFactor || target.factor || '-',
+    selectedFactor: factor || target.factor || '-',
     weightingPolicyId: payload.selectedWeightingPolicy || target.weightingPolicyId || '-',
     scoreDate: target.signalDate || target.asOf || payload.data?.asOf || null,
     missingReason: target.status === 'available' && weighted.length
       ? null
       : (target.reasons || []).join(', ') || 'Python 선택 포트폴리오를 사용할 수 없습니다.',
   };
+}
+
+function weightedHoldingsForFactor(factor) {
+  return portfolioHoldingsFromPayload(state.v4Payload || {}, factor);
+}
+
+function currentWeightedHoldings() {
+  const payload = state.v4Payload || {};
+  return weightedHoldingsForFactor(payload.selectedFactor || payload.currentResearchTarget?.factor);
 }
 
 function appendBarRow(target, label, valueLabel, value, maxAbs, options = {}) {
@@ -4560,13 +4573,28 @@ function renderLeaderTrendChart() {
   target.appendChild(bars);
 }
 
-function renderWeightChart() {
-  const { weighted, cashTotal, topN, maxWeight, selectedFactor: factor, weightingPolicyId } = currentWeightedHoldings();
-  const target = document.querySelector('#weight-chart');
+function renderPortfolioWeightChart({
+  selector,
+  metaSelector,
+  portfolio,
+  className,
+  emptyMessage,
+}) {
+  const {
+    weighted,
+    cashTotal,
+    selectedFactor: factor,
+    weightingPolicyId,
+  } = portfolio;
+  const target = document.querySelector(selector);
+  if (!target) return;
   target.replaceChildren();
-  setText('#weight-chart-meta', `Python 선택 · ${factor} × ${canonicalPolicyLabel(state.v4Payload || {}, weightingPolicyId)} · Top ${topN} · 상한 ${formatPercent(maxWeight)}`);
+  setText(
+    metaSelector,
+    `${factor} · ${canonicalPolicyLabel(state.v4Payload || {}, weightingPolicyId)} · ${formatInteger(weighted.length)}종목`,
+  );
   if (!weighted.length) {
-    appendEmpty('#weight-chart', 'Python 선택 포트폴리오가 없습니다.');
+    appendEmpty(selector, emptyMessage);
     return;
   }
   const maxWeightValue = Math.max(
@@ -4580,7 +4608,7 @@ function renderWeightChart() {
     formatPercent(row.display_weight),
     row.display_weight,
     maxWeightValue,
-    { className: CHART_PALETTE_CLASS_MAP.bars.focal },
+    { className },
   ));
   if (cashTotal > 0.000001) {
     appendBarRow(
@@ -4592,6 +4620,24 @@ function renderWeightChart() {
       { className: CHART_PALETTE_CLASS_MAP.bars.neutralOpen },
     );
   }
+}
+
+function renderWeightChart() {
+  const comparisonFactor = selectedFactor();
+  renderPortfolioWeightChart({
+    selector: '#comparison-weight-chart',
+    metaSelector: '#comparison-weight-chart-meta',
+    portfolio: weightedHoldingsForFactor(comparisonFactor),
+    className: CHART_PALETTE_CLASS_MAP.bars.focal,
+    emptyMessage: '비교 팩터의 Python 포트폴리오가 없습니다.',
+  });
+  renderPortfolioWeightChart({
+    selector: '#weight-chart',
+    metaSelector: '#weight-chart-meta',
+    portfolio: currentWeightedHoldings(),
+    className: CHART_PALETTE_CLASS_MAP.bars.best,
+    emptyMessage: 'Python 최고 팩터 포트폴리오가 없습니다.',
+  });
 }
 
 function factorBacktestSeries(run, factor) {
@@ -5183,9 +5229,6 @@ function renderBacktestComparisonSummary(run, {
   windowKey,
   factor,
   best,
-  commonPeriod,
-  selectedModel,
-  bestModel,
 }) {
   const target = document.querySelector('#backtest-comparison-summary');
   if (!target) return;
@@ -5200,38 +5243,19 @@ function renderBacktestComparisonSummary(run, {
       : '순위 자료 없음';
   appendComparisonSummaryItem(
     target,
-    official ? 'Python 선택 팩터' : '비교 팩터',
+    official ? '비교 팩터 · Python 최고와 동일' : '비교 팩터',
     factor || '-',
     `${windowLabel} ${formatPercent(selectedStats?.period_return)} · ${selectedRankDetail}`,
     'selected',
   );
   appendComparisonSummaryItem(
     target,
-    `${windowLabel} 사후 최고`,
+    `${windowLabel} 기간 수익률 1위`,
     best?.factor || '-',
     best?.factor
-      ? `${formatPercent(best.period_return)} · 선정 적격 ${formatInteger(best.factor_count)}개 중 1위 · 판정일 ${date || '-'}`
+      ? `${formatPercent(best.period_return)} · ${formatInteger(best.factor_count)}개 중 1위`
       : '같은 기간의 비교 팩터 자료 없음',
     'best',
-  );
-  const difference = optionalNumber(selectedStats?.period_return) !== null
-    && optionalNumber(best?.period_return) !== null
-    ? Number(selectedStats.period_return) - Number(best.period_return)
-    : null;
-  appendComparisonSummaryItem(
-    target,
-    '선택 − 기간 최고',
-    difference === null ? '-' : `${difference >= 0 ? '+' : ''}${(difference * 100).toFixed(2)}%p`,
-    factor === best?.factor ? '선택 팩터와 기간 최고가 동일합니다.' : '같은 판정일·같은 기간 누적 수익률 차이',
-  );
-  const gapParts = [];
-  if (selectedModel?.missingCount) gapParts.push(`선택 내부 평가불가 ${formatInteger(selectedModel.missingCount)}일`);
-  if (bestModel?.missingCount && best?.factor !== factor) gapParts.push(`기간 최고 내부 평가불가 ${formatInteger(bestModel.missingCount)}일`);
-  appendComparisonSummaryItem(
-    target,
-    '그래프 평가범위',
-    commonPeriod ? `${commonPeriod.startDate} → ${commonPeriod.endDate}` : 'Python 원자료 없음',
-    `${commonPeriod ? `전체 공통 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률` : '브라우저 재계산 안 함'}${gapParts.length ? ` · ${gapParts.join(' · ')}` : ' · 내부 결측 없음'}${commonPeriod && date !== commonPeriod.endDate ? ' · 과거 리더의 이후 성과까지 보는 사후 탐색' : ''}`,
   );
 }
 
@@ -5265,14 +5289,13 @@ function renderBacktestChart() {
       ? commonEvaluationSeriesSegments(series, commonPeriod)
       : chartSeriesModel([]),
   })).map((series) => ({ ...series, points: series.model.points }));
-  const benchmarkLabels = benchmarkSeriesList.map((series) => series.label).join(' · ');
   const target = document.querySelector('#backtest-chart');
   target.replaceChildren();
   setText(
     '#backtest-chart-meta',
     commonPeriod
-      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · Python 전체 공통 평가기간 ${formatInteger(commonPeriod.returnObservationCount)}개 수익률 · 기간 최고 판정 ${date || '-'} ${windowKey} · 기준 1.0 · 브라우저 재계산 안 함 · 선택 ${factor || '-'}${best?.factor ? ` · 원자료 기간 최고 ${best.factor}` : ''}${benchmarkLabels ? ` · 비교 ${benchmarkLabels}` : ''}${date !== commonPeriod.endDate ? ' · 과거 판정 리더의 이후 성과를 포함한 사후 탐색' : ''}`
-      : 'Python 공통 평가기간 원자료가 없어 그래프를 표시하지 않습니다. 브라우저 추정값으로 대체하지 않습니다.'
+      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · 판정 ${date || '-'} · ${windowKey}`
+      : '공통 평가기간 없음'
   );
   renderBacktestComparisonSummary(run, {
     date,
@@ -5399,37 +5422,34 @@ function renderBacktestChart() {
     ?? (selectedSeries.length ? selectedSeries.at(-1)?.normalized - 1 : null);
   const bestReturn = pythonPerformanceMetric(bestFull, 'cumulativeReturn')
     ?? (bestMetricSeries.length ? bestMetricSeries.at(-1)?.normalized - 1 : null);
-  const selectedDrawdown = pythonPerformanceMetric(selectedFull, 'maxDrawdown');
-  const bestDrawdown = pythonPerformanceMetric(bestFull, 'maxDrawdown');
   const selectedLegend = document.createElement('span');
   const selectedDot = document.createElement('span');
   selectedDot.className = 'legend-dot selected';
   selectedLegend.appendChild(selectedDot);
-  selectedLegend.append(`선택 팩터 ${factor}: 누적 ${formatPercent(selectedReturn)} · MDD ${formatPercent(selectedDrawdown)}${selectedModel.missingCount ? ` · 내부 평가불가 ${formatInteger(selectedModel.missingCount)}일` : ''}${!selectedModel.available ? ' · 그래프 선 없음' : ''}`);
+  selectedLegend.append(`비교 ${factor} · 누적 ${formatPercent(selectedReturn)}`);
   legend.appendChild(selectedLegend);
   if (best?.factor && best.factor !== factor) {
     const bestLegend = document.createElement('span');
     const bestDot = document.createElement('span');
     bestDot.className = 'legend-dot best';
     bestLegend.appendChild(bestDot);
-    bestLegend.append(`${best?.window_label || windowKey} 최고 ${best.factor}: 누적 ${formatPercent(bestReturn)} · MDD ${formatPercent(bestDrawdown)}${bestModel.missingCount ? ` · 내부 평가불가 ${formatInteger(bestModel.missingCount)}일` : ''}${!bestModel.available ? ' · 그래프 선 없음' : ''}`);
+    bestLegend.append(`${best?.window_label || windowKey} 1위 ${best.factor} · 누적 ${formatPercent(bestReturn)}`);
     legend.appendChild(bestLegend);
   } else if (best?.factor === factor) {
     const sameLegend = document.createElement('span');
     sameLegend.className = 'same-series-note';
-    sameLegend.textContent = `선택 팩터 = ${best?.window_label || windowKey} 기간 최고 · 동일 선 1개`;
+    sameLegend.textContent = `비교 팩터 = ${best?.window_label || windowKey} 1위`;
     legend.appendChild(sameLegend);
   }
   benchmarkSeriesList.forEach((series) => {
     const source = pythonFull?.benchmarks?.[series.symbol];
     const benchmarkReturn = pythonPerformanceMetric(source, 'cumulativeReturn')
       ?? (series.points.length ? series.points.at(-1)?.normalized - 1 : null);
-    const benchmarkDrawdown = pythonPerformanceMetric(source, 'maxDrawdown');
     const benchmarkLegend = document.createElement('span');
     const benchmarkDot = document.createElement('span');
     benchmarkDot.className = `legend-dot ${benchmarkPaletteClass(series.symbol)}`;
     benchmarkLegend.appendChild(benchmarkDot);
-    benchmarkLegend.append(`${series.label}: 누적 ${formatPercent(benchmarkReturn)} · MDD ${formatPercent(benchmarkDrawdown)}${series.model.missingCount ? ` · 내부 평가불가 ${formatInteger(series.model.missingCount)}일` : ''}${!series.model.available ? ' · 그래프 선 없음' : ''}`);
+    benchmarkLegend.append(`${series.label} · 누적 ${formatPercent(benchmarkReturn)}`);
     legend.appendChild(benchmarkLegend);
   });
   target.appendChild(legend);
@@ -5464,7 +5484,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
   title.textContent = '기간별 Python 성과 지표 비교';
   const note = document.createElement('p');
   note.id = 'python-performance-metrics-note';
-  note.textContent = '1주·1개월·3개월·6개월·1년·YTD·전체 공통 평가기간의 Python 원자료입니다. 누적 수익률은 표시된 시작·종료 NAV endpoint 기준이며, 내부 가격 공백이 있는 경우 일간 위험지표의 실제 관측 수와 exact 여부를 카드에 따로 표시합니다. 선택 팩터는 현재 선택 정책의 비용 차감 전략, SPY·QQQ는 조정가격 보유 성과입니다. 브라우저는 숫자를 재계산하거나 프록시 입력을 적용하지 않습니다.';
+  note.textContent = '기간별 누적 수익률과 위험지표를 비교합니다.';
   headingText.append(title, note);
   heading.appendChild(headingText);
   target.appendChild(heading);
@@ -7804,7 +7824,12 @@ function bindBrowserContractControls() {
       );
     }
   });
-  document.querySelector('#research-input-form').addEventListener('submit', (event) => {
+  const researchForm = document.querySelector('#research-input-form');
+  researchForm.addEventListener('invalid', (event) => {
+    const details = event.target?.closest?.('details');
+    if (details) details.open = true;
+  }, true);
+  researchForm.addEventListener('submit', (event) => {
     event.preventDefault();
     try {
       const request = readCanonicalFormRequest();
@@ -7899,6 +7924,7 @@ if (typeof globalThis !== 'undefined') {
     LOCAL_API_REQUIRED,
     LOCAL_API_BASE_URL,
     canonicalString,
+    serializeInputValue,
     validateIdentity,
     validateManifest,
     resolveExactEntry,
@@ -7924,6 +7950,7 @@ if (typeof globalThis !== 'undefined') {
     loadStaticEntryData,
     attachFactorHoldingHistorySidecar,
     resultSourceLabel,
+    portfolioHoldingsFromPayload,
     rowReasonCodes,
     adaptSchemaV4Payload,
     v4BenchmarkCurves,

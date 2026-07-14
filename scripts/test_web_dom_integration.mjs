@@ -22,6 +22,8 @@ const requiredHosts = [
   "performance-metrics-table",
   "window-comparison-chart",
   "leader-trend-chart",
+  "comparison-weight-chart",
+  "comparison-weight-chart-meta",
   "weight-chart",
   "factor-table",
   "holdings-table",
@@ -98,12 +100,16 @@ assert.match(
 
 assert.match(
   html,
-  /아래 값이 공식 결과의 입력입니다/,
+  /핵심 조건을 설정하세요/,
 );
 assert.match(
   html,
-  /성과 탐색 기간은 비교선만 정하며, 공식 선택은 입력 폼의 평가기간/,
+  /고급 입력 <small>데이터 품질·유동성·선택 가드레일<\/small>/,
 );
+assert.match(html, /비교 팩터 선택 종목 비중/);
+assert.match(html, /최고 팩터 선택 종목 비중/);
+assert.doesNotMatch(html, /그래프와 성과표는 현재 입력으로 Python이 계산한 원자료/);
+assert.doesNotMatch(js, /내부 평가불가 .*그래프 선 없음/);
 assert.doesNotMatch(html, /id="(?:topn-input|max-weight-input|lookback-months-select)"/);
 assert.doesNotMatch(html, /현재 canonical 목표/);
 assert.match(html, /id="input-top-n"[^>]*max="50"/);

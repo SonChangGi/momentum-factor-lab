@@ -243,9 +243,13 @@ assert.equal(adapted.schema_version, 1);
 assert.equal(adapted.runs.length, 1);
 const run = adapted.runs[0];
 assert.equal(Object.keys(api.validateFactorPortfolios(payload)).length, 64);
+const alternatePolicy = Object.keys(payload.weightingPolicyRegistry.policies).find(
+  (policy) => policy !== payload.selectedWeightingPolicy,
+);
+assert(alternatePolicy, "fixture needs an alternate weighting policy for mutation testing");
 for (const mutate of [
   (copy) => { delete copy.factorPortfolios.mom_12m; },
-  (copy) => { copy.factorPortfolios.mom_12m.weightingPolicyId = "equal_weight"; },
+  (copy) => { copy.factorPortfolios.mom_12m.weightingPolicyId = alternatePolicy; },
   (copy) => { copy.factorPortfolios.mom_12m.weights[0].weight += 0.01; },
 ]) {
   const copy = JSON.parse(JSON.stringify(payload));
@@ -470,8 +474,8 @@ for (const symbol of ["SPY", "^IXIC", "QQQ"]) {
   );
 }
 assert(
-  fullPeriod.benchmarks.QQQ.cumulativeReturn > 1,
-  "the actual-payload regression must retain QQQ's greater-than-100% FULL return",
+  api.niceReturnTicks(-0.25, 1.35).at(-1) >= 1.35,
+  "the return axis must support cumulative gains greater than 100% independently of fixture drift",
 );
 const shiftedCommonPeriod = {
   startDate: "2026-01-05",

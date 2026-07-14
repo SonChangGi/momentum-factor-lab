@@ -5,6 +5,15 @@ import { readFileSync } from "node:fs";
 const html = readFileSync("momentum_factor_lab/web/index.html", "utf8");
 const css = readFileSync("momentum_factor_lab/web/styles.css", "utf8");
 const js = readFileSync("momentum_factor_lab/web/dashboard.js", "utf8");
+const publishedHtml = readFileSync("docs/index.html", "utf8");
+const assetVersion = createHash("sha256").update(css).update(js).digest("hex").slice(0, 12);
+assert.equal(
+  publishedHtml,
+  html
+    .replace("__TITLE__", "모멘텀 팩터 데일리 대시보드")
+    .replaceAll("__ASSET_VERSION__", assetVersion),
+  "published HTML must be the exact rendered template with the current asset version",
+);
 
 const baselineIds = [
   "run-status",
@@ -29,6 +38,8 @@ const baselineIds = [
   "performance-metrics-table",
   "window-comparison-chart",
   "leader-trend-chart",
+  "comparison-weight-chart",
+  "comparison-weight-chart-meta",
   "weight-chart",
   "factor-table",
   "holdings-table",
@@ -78,10 +89,15 @@ for (const path of requiredProjectLinks) {
 assert.match(html, /결과 · 성과 기간 · 비교 팩터/);
 assert.match(html, /Python 분석 조건/);
 assert.match(html, /팩터 수익률 막대 차트/);
-assert.match(html, /Python 선택 팩터와 기간 수익률 1위 비교/);
+assert.match(html, /비교 팩터와 기간 수익률 1위/);
 assert.match(html, /기간별 최고 팩터 비교/);
 assert.match(html, /최근 30거래일 리더 추이/);
-assert.match(html, /선택 종목 비중/);
+assert.match(html, /비교 팩터 선택 종목 비중/);
+assert.match(html, /최고 팩터 선택 종목 비중/);
+assert.match(html, /id="advanced-research-inputs" class="advanced-research-inputs"/);
+assert.match(html, /class="core-research-inputs"/);
+assert.match(html, /id="input-extreme-return"[^>]*step="0\.01"/);
+assert.doesNotMatch(html, /그래프와 성과표는 현재 입력으로 Python이 계산한 원자료/);
 assert.doesNotMatch(html, /현재 canonical 목표|브라우저 프록시 시나리오 입력|상위 10개 팩터 동일비중 합산/);
 assert.match(html, /모든 팩터×정책 조합을 하나의 랭킹으로 비교/);
 assert.match(html, /합성 점수 구성/);
@@ -174,6 +190,9 @@ assert.match(js, /benchmark-spy/);
 assert.match(js, /benchmark-ixic/);
 assert.match(js, /benchmark-qqq/);
 assert.match(js, /renderPythonPerformanceMetricsTable/);
+assert.match(js, /portfolioHoldingsFromPayload/);
+assert.match(js, /payload\.factorPortfolios\?\.\[factor\]/);
+assert.doesNotMatch(js, /내부 평가불가 .*그래프 선 없음/);
 assert.match(js, /state\.v4Payload\?\.performance\?\.periods/);
 assert.match(js, /실제 백테스트 보유 이력/);
 assert.match(js, /현재 연구 목표/);

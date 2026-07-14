@@ -82,8 +82,7 @@
               <p class="eyebrow">공식 연구 입력</p>
               <h2 id="research-input-title">Python 분석 조건</h2>
               <p>
-                아래 값이 공식 결과의 입력입니다. 정확히 일치하는 공개 preset은 즉시 열고, 그 밖의 조합은
-                로컬 Python API에서 전체 팩터×비중 정책을 다시 계산합니다. 브라우저가 비중이나 성과를 대신 계산하지 않습니다.
+                핵심 조건을 설정하세요. 세부 필터와 선택 가드레일은 고급 입력에서 조정할 수 있습니다.
               </p>
             </div>
             <div class="result-identity" aria-live="polite">
@@ -92,108 +91,115 @@
             </div>
           </div>
           <form id="research-input-form" class="research-input-form" autocomplete="off">
-            <label>리밸런싱
-              <select id="input-rebalance-frequency" name="rebalance_frequency">
-                <option value="W">주간(W)</option>
-                <option value="ME">월말(ME)</option>
-                <option value="QE">분기말(QE)</option>
-              </select>
-            </label>
-            <label>평가 기간(년)
-              <input id="input-evaluation-years" type="number" min="1" max="10" step="1" inputmode="numeric" />
-            </label>
-            <label>평가 창(거래일)
-              <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="252" inputmode="numeric" />
-            </label>
-            <label>Top-N
-              <input id="input-top-n" name="top_n" type="number" min="1" max="50" step="1" inputmode="numeric" />
-            </label>
-            <label>종목당 최대 비중
-              <input id="input-max-weight" name="max_weight" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>거래 비용
-              <input id="input-transaction-cost" name="transaction_cost_bps" type="number" min="0" max="200" step="0.1" inputmode="decimal" />
-              <span class="unit">bps</span>
-            </label>
-            <label>슬리피지
-              <input id="input-slippage" name="slippage_bps" type="number" min="0" max="200" step="0.1" inputmode="decimal" />
-              <span class="unit">bps</span>
-            </label>
-            <label>최저 가격(USD)
-              <input id="input-min-price" name="min_price" type="number" min="0" step="0.01" inputmode="decimal" />
-            </label>
-            <label>최소 가격 이력(거래일)
-              <input id="input-min-history" name="min_history_days" type="number" min="21" step="1" inputmode="numeric" />
-            </label>
-            <label>최소 평균 거래대금(USD)
-              <input id="input-min-dollar-volume" name="min_avg_dollar_volume" type="number" min="0" step="1000" inputmode="decimal" />
-            </label>
-            <label>최소 평균 거래량
-              <input id="input-min-volume" name="min_avg_volume" type="number" min="0" step="100" inputmode="decimal" />
-            </label>
-            <label>유동성 lookback(거래일)
-              <input id="input-liquidity-lookback" name="liquidity_lookback_days" type="number" min="1" step="1" inputmode="numeric" />
-            </label>
-            <label>최소 유동성 관측일
-              <input id="input-liquidity-observations" name="min_liquidity_observations" type="number" min="1" step="1" inputmode="numeric" />
-            </label>
-            <label>최대 가격 결측률
-              <input id="input-price-missing" name="max_price_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>최대 거래량 결측률
-              <input id="input-volume-missing" name="max_volume_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>최대 일간 절대 수익률
-              <input id="input-extreme-return" name="max_extreme_daily_return" type="number" min="0.01" max="10000" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>선택 최소 Sharpe
-              <input id="input-selection-min-sharpe" name="selection_min_sharpe" type="number" min="-10" max="10" step="0.01" inputmode="decimal" />
-            </label>
-            <label>선택 최대 MDD magnitude
-              <input id="input-selection-max-drawdown" name="selection_max_drawdown" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>선택 최대 연율 비용 drag
-              <input id="input-selection-max-cost-drag" name="selection_max_annualized_cost_drag" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>선택 최소 유효 종목 수
-              <input id="input-selection-min-effective-names" name="selection_min_effective_names" type="number" min="0.01" max="50" step="0.1" inputmode="decimal" />
-            </label>
-            <label>선택 최대 target HHI
-              <input id="input-selection-max-target-hhi" name="selection_max_target_hhi" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>선택 최대 target 종목 비중
-              <input id="input-selection-max-target-weight" name="selection_max_target_weight" type="number" min="0.01" max="100" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>최대 종목·단일 세션 기여도
-              <input id="input-selection-max-day-contribution" name="selection_max_abs_security_day_contribution" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>최대 종목 절대기여 점유율
-              <input id="input-selection-max-contribution-share" name="selection_max_security_absolute_contribution_share" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>최대 leave-one CAGR 변화
-              <input id="input-selection-max-leave-one-delta" name="selection_max_leave_one_security_cagr_delta" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
-              <span class="unit">%</span>
-            </label>
-            <label>극단사건 조치
-              <select id="input-selection-extreme-action" name="selection_extreme_event_action">
-                <option value="exclude">제외</option>
-                <option value="penalize">감점</option>
-                <option value="warn">경고</option>
-              </select>
-            </label>
-            <label>극단사건 최대 감점(points)
-              <input id="input-selection-penalty-points" name="selection_extreme_event_penalty_points" type="number" min="0" step="0.1" inputmode="decimal" />
-            </label>
+            <div class="core-research-inputs" aria-label="주요 Python 분석 입력">
+              <label>리밸런싱
+                <select id="input-rebalance-frequency" name="rebalance_frequency">
+                  <option value="W">주간(W)</option>
+                  <option value="ME">월말(ME)</option>
+                  <option value="QE">분기말(QE)</option>
+                </select>
+              </label>
+              <label>평가 기간(년)
+                <input id="input-evaluation-years" type="number" min="1" max="10" step="1" inputmode="numeric" />
+              </label>
+              <label>Top-N
+                <input id="input-top-n" name="top_n" type="number" min="1" max="50" step="1" inputmode="numeric" />
+              </label>
+              <label>종목당 최대 비중
+                <input id="input-max-weight" name="max_weight" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
+                <span class="unit">%</span>
+              </label>
+              <label>거래 비용
+                <input id="input-transaction-cost" name="transaction_cost_bps" type="number" min="0" max="200" step="0.1" inputmode="decimal" />
+                <span class="unit">bps</span>
+              </label>
+              <label>슬리피지
+                <input id="input-slippage" name="slippage_bps" type="number" min="0" max="200" step="0.1" inputmode="decimal" />
+                <span class="unit">bps</span>
+              </label>
+              <label>최저 가격(USD)
+                <input id="input-min-price" name="min_price" type="number" min="0" step="0.01" inputmode="decimal" />
+              </label>
+              <label>최소 평균 거래대금(USD)
+                <input id="input-min-dollar-volume" name="min_avg_dollar_volume" type="number" min="0" step="1000" inputmode="decimal" />
+              </label>
+            </div>
+            <details id="advanced-research-inputs" class="advanced-research-inputs">
+              <summary>고급 입력 <small>데이터 품질·유동성·선택 가드레일</small></summary>
+              <div class="advanced-research-input-grid">
+                <label>평가 창(거래일)
+                  <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="252" inputmode="numeric" />
+                </label>
+                <label>최소 가격 이력(거래일)
+                  <input id="input-min-history" name="min_history_days" type="number" min="21" step="1" inputmode="numeric" />
+                </label>
+                <label>최소 평균 거래량
+                  <input id="input-min-volume" name="min_avg_volume" type="number" min="0" step="100" inputmode="decimal" />
+                </label>
+                <label>유동성 lookback(거래일)
+                  <input id="input-liquidity-lookback" name="liquidity_lookback_days" type="number" min="1" step="1" inputmode="numeric" />
+                </label>
+                <label>최소 유동성 관측일
+                  <input id="input-liquidity-observations" name="min_liquidity_observations" type="number" min="1" step="1" inputmode="numeric" />
+                </label>
+                <label>최대 가격 결측률
+                  <input id="input-price-missing" name="max_price_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>최대 거래량 결측률
+                  <input id="input-volume-missing" name="max_volume_missing_ratio" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>최대 일간 절대 수익률
+                  <input id="input-extreme-return" name="max_extreme_daily_return" type="number" min="0.01" max="10000" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>선택 최소 Sharpe
+                  <input id="input-selection-min-sharpe" name="selection_min_sharpe" type="number" min="-10" max="10" step="0.01" inputmode="decimal" />
+                </label>
+                <label>선택 최대 MDD magnitude
+                  <input id="input-selection-max-drawdown" name="selection_max_drawdown" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>선택 최대 연율 비용 drag
+                  <input id="input-selection-max-cost-drag" name="selection_max_annualized_cost_drag" type="number" min="0" max="100" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>선택 최소 유효 종목 수
+                  <input id="input-selection-min-effective-names" name="selection_min_effective_names" type="number" min="0.01" max="50" step="0.01" inputmode="decimal" />
+                </label>
+                <label>선택 최대 target HHI
+                  <input id="input-selection-max-target-hhi" name="selection_max_target_hhi" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>선택 최대 target 종목 비중
+                  <input id="input-selection-max-target-weight" name="selection_max_target_weight" type="number" min="0.01" max="100" step="0.01" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>최대 종목·단일 세션 기여도
+                  <input id="input-selection-max-day-contribution" name="selection_max_abs_security_day_contribution" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>최대 종목 절대기여 점유율
+                  <input id="input-selection-max-contribution-share" name="selection_max_security_absolute_contribution_share" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>최대 leave-one CAGR 변화
+                  <input id="input-selection-max-leave-one-delta" name="selection_max_leave_one_security_cagr_delta" type="number" min="0" max="100" step="0.1" inputmode="decimal" />
+                  <span class="unit">%</span>
+                </label>
+                <label>극단사건 조치
+                  <select id="input-selection-extreme-action" name="selection_extreme_event_action">
+                    <option value="exclude">제외</option>
+                    <option value="penalize">감점</option>
+                    <option value="warn">경고</option>
+                  </select>
+                </label>
+                <label>극단사건 최대 감점(points)
+                  <input id="input-selection-penalty-points" name="selection_extreme_event_penalty_points" type="number" min="0" step="0.1" inputmode="decimal" />
+                </label>
+              </div>
+            </details>
             <div class="input-actions">
               <button class="primary-button" type="submit">이 조건으로 Python 분석</button>
               <button id="reset-default-inputs" class="secondary-button" type="button">공개 기본값으로 복원</button>
@@ -202,11 +208,13 @@
           <div id="input-status" class="input-status" role="status" aria-live="polite">
             정적 grid manifest를 불러오는 중입니다.
           </div>
-          <p class="local-api-note">
-            공개 GitHub Pages는 Python을 실행할 수 없는 정적 호스팅입니다. 임의 입력을 계산하려면 이 저장소에서
-            <code>uv run python -m momentum_factor_lab.cli serve-local-api --live --start-date 2016-01-01 --min-avg-dollar-volume 5000000 --host 127.0.0.1 --port 8765</code>를 먼저 실행하세요.
-            결과는 실제시장 전체 유니버스·identity·공동 grid 계약을 검증한 뒤에만 표시됩니다.
-          </p>
+          <details class="advanced-local-api-note">
+            <summary>임의 입력 계산 안내</summary>
+            <p class="local-api-note">
+              공개 preset에 없는 조건은 로컬 Python API가 필요합니다.
+              <code>uv run python -m momentum_factor_lab.cli serve-local-api --live --start-date 2016-01-01 --min-avg-dollar-volume 5000000 --host 127.0.0.1 --port 8765</code>
+            </p>
+          </details>
         </div>
       </section>
     </section>
@@ -389,9 +397,6 @@
           <p class="eyebrow">시각화 대시보드</p>
           <h2>팩터별 성과 비교 · 백테스트 추이 · 선택 포트폴리오</h2>
         </div>
-        <p>
-          모든 수치와 비중은 현재 Python 결과에서 읽습니다. 성과 기간·비교 팩터·기준일은 사후 탐색용이며 공식 선택 결과를 바꾸지 않습니다.
-        </p>
       </div>
       <div class="viz-grid">
         <article class="viz-card wide">
@@ -407,12 +412,11 @@
         <article class="viz-card wide">
           <div class="viz-card-heading">
             <div>
-              <p class="eyebrow">Python 원자료 · 전체 공통 평가기간</p>
-              <h3>Python 선택 팩터와 기간 수익률 1위 비교</h3>
+              <p class="eyebrow">전체 공통 평가기간</p>
+              <h3>비교 팩터와 기간 수익률 1위</h3>
             </div>
             <span id="backtest-chart-meta" class="chart-meta">-</span>
           </div>
-          <p class="scenario-note">그래프와 성과표는 현재 입력으로 Python이 계산한 원자료입니다. 성과 탐색 기간은 비교선만 정하며, 공식 선택은 입력 폼의 평가기간과 합성 점수·가드레일을 사용합니다.</p>
           <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
           <div id="backtest-chart" class="line-chart" aria-live="polite"></div>
           <div id="performance-metrics-table" class="performance-metrics" aria-live="polite"></div>
@@ -438,8 +442,18 @@
         <article class="viz-card">
           <div class="viz-card-heading">
             <div>
-              <p class="eyebrow">Python 선택 포트폴리오</p>
-              <h3>선택 종목 비중</h3>
+              <p class="eyebrow">비교 팩터 포트폴리오</p>
+              <h3>비교 팩터 선택 종목 비중</h3>
+            </div>
+            <span id="comparison-weight-chart-meta" class="chart-meta">-</span>
+          </div>
+          <div id="comparison-weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
+        </article>
+        <article class="viz-card">
+          <div class="viz-card-heading">
+            <div>
+              <p class="eyebrow">Python 최고 팩터 포트폴리오</p>
+              <h3>최고 팩터 선택 종목 비중</h3>
             </div>
             <span id="weight-chart-meta" class="chart-meta">-</span>
           </div>
