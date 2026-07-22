@@ -130,7 +130,13 @@ const RESEARCH_INPUT_PARITY = Object.freeze({
   selectionExtremeEventPenaltyPoints: 'selection_extreme_event_penalty_points',
 });
 
-const THEME_STORAGE_KEY = 'momentum-factor-theme';
+const THEME_STORAGE_KEY = 'quant-research-theme';
+const LEGACY_THEME_STORAGE_KEYS = Object.freeze([
+  'momentum-factor-theme',
+  'quant-dashboard-theme',
+  'quant-calm-theme',
+  'dram-price-theme',
+]);
 
 /*
  * Chart semantics map to CSS palette tokens instead of inline colors so the
@@ -166,7 +172,17 @@ const CHART_PALETTE_CLASS_MAP = Object.freeze({
 
 function storedTheme() {
   try {
-    return window.localStorage?.getItem(THEME_STORAGE_KEY);
+    const canonical = window.localStorage?.getItem(THEME_STORAGE_KEY);
+    if (canonical === 'light' || canonical === 'dark') {
+      LEGACY_THEME_STORAGE_KEYS.forEach((key) => window.localStorage?.removeItem(key));
+      return canonical;
+    }
+    const migrated = LEGACY_THEME_STORAGE_KEYS
+      .map((key) => window.localStorage?.getItem(key))
+      .find((value) => value === 'light' || value === 'dark') || null;
+    if (migrated) window.localStorage?.setItem(THEME_STORAGE_KEY, migrated);
+    LEGACY_THEME_STORAGE_KEYS.forEach((key) => window.localStorage?.removeItem(key));
+    return migrated;
   } catch (error) {
     return null;
   }
@@ -197,6 +213,7 @@ function applyTheme(theme) {
   } else if (root?.setAttribute) {
     root.setAttribute('data-theme', normalized);
   }
+  if (root?.style) root.style.colorScheme = normalized;
   const button = document.querySelector('#theme-toggle');
   if (!button) return;
   const isDark = normalized === 'dark';
@@ -207,7 +224,8 @@ function applyTheme(theme) {
 }
 
 function bindThemeToggle() {
-  applyTheme(storedTheme() || 'light');
+  storedTheme();
+  applyTheme(currentTheme());
   const button = document.querySelector('#theme-toggle');
   if (!button || typeof button.addEventListener !== 'function') return;
   button.addEventListener('click', () => {
@@ -616,6 +634,13 @@ const state = {
   browserControlsBound: false,
   dashboardControlsBound: false,
   resultSource: null,
+  backtestChart: {
+    pinnedSeriesKey: null,
+    previewSeriesKey: null,
+    pinnedDate: null,
+    previewDate: null,
+    signature: null,
+  },
 };
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -1654,7 +1679,7 @@ function humanProvider(value) {
 function humanOutputLabel(value) {
   const text = textValue(value);
   const labels = {
-    'Research signals (not tradable)': '연구용 신호(매매 권고 아님)',
+    'Research signals (not tradable)': '연구용 신호',
     'Practical recommendations': '실행 가능성 검토를 통과한 추천 후보',
     'No current recommendation': '현재 추천 후보 없음',
   };
@@ -1671,13 +1696,13 @@ function humanStatus(status, outputLabel) {
     return '최신 데이터 · 실행 가능성 점검 통과';
   }
   if (text.includes('subset')) {
-    return '일부 종목 실행 · 연구용 신호';
+    return '일부 종목 실행 · 연구용';
   }
   if (text.includes('with_limitations')) {
-    return '최신 데이터 · 제한 조건 때문에 연구용 신호';
+    return '최신 데이터 · 연구용 신호';
   }
   if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
-    return '현재 데이터 사용 · 연구용 신호 · 매매 권고 아님';
+    return '현재 데이터 · 연구용 신호';
   }
   if (text.includes('pass')) {
     return '현재 데이터 사용 · 품질 점검 통과';
@@ -1686,7 +1711,7 @@ function humanStatus(status, outputLabel) {
     return '데이터가 최신이 아닐 수 있음';
   }
   if (text.includes('fail') || text.includes('blocked')) {
-    return '제한 조건 때문에 추천 보류';
+    return '추천 보류';
   }
   return text;
 }
@@ -2723,10 +2748,13 @@ function renderSummary() {
   setText('#selected-factor', comparisonFactor || '-');
   setText(
     '#selected-factor-detail',
-    `${factorDescription(comparisonFactor, run)} · 전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(comparisonFull, 'cumulativeReturn'))}`,
+    `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(comparisonFull, 'cumulativeReturn'))} · Python 원자료`,
   );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
-  setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${humanProvider(summary.provider)}`);
+  const providerSummary = payload.data?.mode === 'live_market' && payload.data?.synthetic === false
+    ? '실제시장 공개 데이터'
+    : humanProvider(summary.provider);
+  setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${providerSummary}`);
   setText('#latest-run-at', latestRunAt);
   setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
   const portfolio = currentWeightedHoldings();
@@ -2736,10 +2764,9 @@ function renderSummary() {
   statusCard.replaceChildren();
   statusCard.removeAttribute('aria-busy');
   statusCard.classList.remove('is-updating');
+  appendStatusLine(statusCard, '공개 상태', resultSourceLabel(state.resultSource));
   appendStatusLine(statusCard, '데이터 기준일', summary.data_as_of || '-');
-  appendStatusLine(statusCard, '최근 실행', latestRunAt);
-  appendStatusLine(statusCard, '실행 결과 생성', runPayloadGeneratedAtText);
-  appendStatusLine(statusCard, '데이터 제공자', humanProvider(summary.provider));
+  appendStatusLine(statusCard, '평가 종료일', run.common_evaluation_period?.endDate || summary.data_as_of || '-');
   appendStatusLine(statusCard, '신호 상태', humanOutputLabel(summary.recommendation_output_label));
   appendFactorHoldingHistoryLoadStatus(statusCard, state.payload);
 
@@ -3865,21 +3892,44 @@ function renderBacktestComparisonSummary(run, {
     `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(selectedMetrics, 'cumulativeReturn'))}`,
     'selected',
   );
-  appendComparisonSummaryItem(
-    target,
-    '동일 입력 Python 최고 팩터',
-    best?.factor || '-',
-    best?.factor
-      ? `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(bestMetrics, 'cumulativeReturn'))} · 선택 점수 ${formatNumber(best.selectionScore)} / 100`
-      : 'Python 최고 팩터 자료 없음',
-    'best',
-  );
+  if (!official) {
+    appendComparisonSummaryItem(
+      target,
+      '동일 입력 Python 최고 팩터',
+      best?.factor || '-',
+      best?.factor
+        ? `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(bestMetrics, 'cumulativeReturn'))} · 선택 점수 ${formatNumber(best.selectionScore)} / 100`
+        : 'Python 최고 팩터 자료 없음',
+      'best',
+    );
+  }
+}
+
+function nearestChartDate(dates = [], requested = null) {
+  const validDates = dates.filter(Boolean);
+  if (!validDates.length) return null;
+  if (requested && validDates.includes(requested)) return requested;
+  const targetTime = parseDateString(requested)?.getTime();
+  if (!Number.isFinite(targetTime)) return validDates.at(-1);
+  return validDates.reduce((nearest, date) => {
+    const distance = Math.abs((parseDateString(date)?.getTime() ?? targetTime) - targetTime);
+    const nearestDistance = Math.abs((parseDateString(nearest)?.getTime() ?? targetTime) - targetTime);
+    return distance < nearestDistance ? date : nearest;
+  }, validDates[0]);
+}
+
+function chartPointAtDate(points = [], date = null) {
+  return points.find((point) => point.date === date) || null;
+}
+
+function formatChartReturn(value) {
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return '관측 없음';
+  const percent = Number(value) * 100;
+  return `${percent > 0 ? '+' : ''}${percent.toFixed(2)}%`;
 }
 
 function renderBacktestChart() {
   const run = currentRun();
-  const date = selectedDate();
-  const windowKey = selectedWindow();
   const factor = selectedFactor();
   const benchmark = benchmarkBacktestSeries(run);
   const benchmarks = Array.isArray(run.comparison_benchmark_series) && run.comparison_benchmark_series.length
@@ -3894,53 +3944,55 @@ function renderBacktestChart() {
   const selectedModel = commonPeriod
     ? commonEvaluationSeriesSegments(factorBacktestSeries(run, factor), commonPeriod)
     : chartSeriesModel([]);
-  const selectedSeries = selectedModel.points;
   const bestModel = best?.factor
     ? (commonPeriod
       ? commonEvaluationSeriesSegments(factorBacktestSeries(run, best.factor), commonPeriod)
       : chartSeriesModel([]))
     : chartSeriesModel([]);
-  const bestMetricSeries = bestModel.points;
-  const bestSeries = best?.factor && best.factor !== factor ? bestMetricSeries : [];
   const benchmarkSeriesList = benchmarks.map((series) => ({
     key: `benchmark-${series.symbol}`,
     symbol: series.symbol,
     label: series.label_ko || BENCHMARK_LABELS[series.symbol] || series.symbol,
+    className: benchmarkPaletteClass(series.symbol),
     model: commonPeriod
       ? commonEvaluationSeriesSegments(series, commonPeriod)
       : chartSeriesModel([]),
-  })).map((series) => ({ ...series, points: series.model.points }));
+  }));
+  const seriesModels = [
+    {
+      key: 'selected',
+      factor,
+      label: best?.factor === factor ? `선택 · Python 최고 ${factor || '-'}` : `선택 ${factor || '-'}`,
+      className: 'selected',
+      model: selectedModel,
+    },
+    ...(best?.factor && best.factor !== factor ? [{
+      key: 'best',
+      factor: best.factor,
+      label: `Python 최고 ${best.factor}`,
+      className: 'best',
+      model: bestModel,
+    }] : []),
+    ...benchmarkSeriesList,
+  ].filter((series) => series.model.points.length);
+  const performanceSeries = seriesModels.map((series) => ({
+    key: series.key,
+    factor: series.factor,
+    symbol: series.symbol,
+    label: series.label,
+    points: series.model.points,
+  }));
   const target = document.querySelector('#backtest-chart');
+  if (!target) return;
   target.replaceChildren();
   setText(
     '#backtest-chart-meta',
     commonPeriod
-      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · 동일 입력 Python 원자료`
-      : '공통 평가기간 없음'
+      ? `${commonPeriod.startDate} → ${commonPeriod.endDate} · 누적 수익률`
+      : '공통 평가기간 없음',
   );
-  renderBacktestComparisonSummary(run, {
-    factor,
-    best,
-    commonPeriod,
-    selectedModel,
-    bestModel,
-  });
-  const performanceSeries = [
-    { key: 'selected', factor, label: `선택 팩터 ${factor || '-'}`, points: selectedSeries },
-    {
-      key: 'best',
-      factor: best?.factor,
-      label: `Python 최고 팩터 ${best?.factor || '-'}`,
-      points: bestMetricSeries,
-    },
-    ...benchmarkSeriesList.map((series) => ({
-      key: series.key,
-      symbol: series.symbol,
-      label: series.label,
-      points: series.points,
-    })),
-  ];
-  const allPoints = [...selectedSeries, ...bestSeries, ...benchmarkSeriesList.flatMap((series) => series.points)];
+  renderBacktestComparisonSummary(run, { factor, best });
+  const allPoints = seriesModels.flatMap((series) => series.model.points);
   if (!allPoints.length) {
     appendEmpty(
       '#backtest-chart',
@@ -3949,6 +4001,7 @@ function renderBacktestChart() {
     renderPerformanceMetricsTable(performanceSeries);
     return;
   }
+
   const allValues = allPoints.map((point) => point.normalized).filter((value) => Number.isFinite(value));
   const returnValues = allValues.map((value) => value - 1);
   const tickReturns = niceReturnTicks(Math.min(...returnValues, 0), Math.max(...returnValues, 0));
@@ -3956,23 +4009,41 @@ function renderBacktestChart() {
   const maxValue = Math.max(...tickReturns) + 1;
   const allDates = [...new Set(allPoints.map((point) => point.date).filter(Boolean))].sort();
   const dateToIndex = new Map(allDates.map((pointDate, index) => [pointDate, index]));
+  const seriesKeys = seriesModels.map((series) => series.key);
+  const chartState = state.backtestChart;
+  const signature = [
+    state.payload?.resultKey,
+    factor,
+    best?.factor,
+    commonPeriod?.startDate,
+    commonPeriod?.endDate,
+  ].join('|');
+  if (chartState.signature !== signature) {
+    chartState.signature = signature;
+    chartState.previewSeriesKey = null;
+    chartState.previewDate = null;
+  }
+  if (!seriesKeys.includes(chartState.pinnedSeriesKey)) chartState.pinnedSeriesKey = seriesKeys[0];
+  chartState.pinnedDate = nearestChartDate(
+    allDates,
+    chartState.pinnedDate || commonPeriod?.endDate || allDates.at(-1),
+  );
+
   const width = 760;
-  const height = 260;
-  const plot = { left: 68, right: 18, top: 18, bottom: 50 };
+  const height = 300;
+  const plot = { left: 70, right: 22, top: 20, bottom: 54 };
   const plotWidth = width - plot.left - plot.right;
   const plotHeight = height - plot.top - plot.bottom;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.setAttribute('role', 'img');
-  svg.setAttribute(
-    'aria-label',
-    `선택 팩터, Python 최고 팩터, ${benchmarkSeriesList.map((series) => series.symbol).join(', ')} 비교지수의 ${commonPeriod ? '전체 공통 평가기간' : '최근 백테스트'} 누적 성과 비교`,
-  );
+  svg.setAttribute('aria-label', `${commonPeriod?.startDate || '-'}부터 ${commonPeriod?.endDate || '-'}까지 누적 성과 비교`);
   const yFor = (value) => height - plot.bottom - ((value - minValue) / Math.max(0.000001, maxValue - minValue)) * plotHeight;
-  const xFor = (point) => {
-    const index = dateToIndex.get(point.date) ?? 0;
+  const xForDate = (date) => {
+    const index = dateToIndex.get(date) ?? 0;
     return plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
   };
+  const xFor = (point) => xForDate(point.date);
   tickReturns.forEach((tickReturn) => {
     const y = yFor(tickReturn + 1);
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
@@ -3999,8 +4070,7 @@ function renderBacktestChart() {
   xAxis.setAttribute('class', 'axis-line');
   svg.appendChild(xAxis);
   dateTickMarks(allDates).forEach((tickMark) => {
-    const { index } = tickMark;
-    const x = plot.left + (allDates.length <= 1 ? 0 : index / (allDates.length - 1) * plotWidth);
+    const x = xForDate(tickMark.date);
     const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     tick.setAttribute('x1', String(x));
     tick.setAttribute('x2', String(x));
@@ -4008,70 +4078,186 @@ function renderBacktestChart() {
     tick.setAttribute('y2', String(height - plot.bottom + 5));
     tick.setAttribute('class', 'axis-line');
     svg.appendChild(tick);
-    appendSvgText(svg, tickMark.label, x, height - plot.bottom + 19, 'axis-label');
+    appendSvgText(svg, tickMark.label, x, height - plot.bottom + 20, 'axis-label');
   });
-  appendSvgText(svg, 'X축: 날짜', plot.left + plotWidth / 2, height - 5, 'axis-title');
-  const yTitle = appendSvgText(svg, 'Y축: 누적 성과', 13, plot.top + plotHeight / 2, 'axis-title');
-  yTitle.setAttribute('transform', `rotate(-90 13 ${plot.top + plotHeight / 2})`);
-  const toPolyline = (points) => points.map((point) => {
-    const x = xFor(point);
-    const y = yFor(point.normalized);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
-  const appendLine = (points, className) => {
-    if (!points.length) return;
-    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-    polyline.setAttribute('points', toPolyline(points));
-    polyline.setAttribute('class', `line-path ${className}`);
-    svg.appendChild(polyline);
-  };
-  selectedModel.segments.forEach((segment) => appendLine(segment, 'selected'));
-  if (best?.factor !== factor) bestModel.segments.forEach((segment) => appendLine(segment, 'best'));
-  benchmarkSeriesList.forEach((series) => {
-    series.model.segments.forEach((segment) => appendLine(segment, benchmarkPaletteClass(series.symbol)));
+  appendSvgText(svg, '날짜', plot.left + plotWidth / 2, height - 6, 'axis-title');
+  const yTitle = appendSvgText(svg, '평가 시작 대비 누적 수익률', 14, plot.top + plotHeight / 2, 'axis-title');
+  yTitle.setAttribute('transform', `rotate(-90 14 ${plot.top + plotHeight / 2})`);
+  const toPolyline = (points) => points.map((point) => (
+    `${xFor(point).toFixed(1)},${yFor(point.normalized).toFixed(1)}`
+  )).join(' ');
+  seriesModels.forEach((series) => {
+    series.model.segments.forEach((segment) => {
+      if (!segment.length) return;
+      const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+      polyline.setAttribute('points', toPolyline(segment));
+      polyline.setAttribute('class', `line-path ${series.className}`);
+      polyline.setAttribute('data-series-key', series.key);
+      svg.appendChild(polyline);
+    });
   });
+  const dateGuide = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  dateGuide.setAttribute('y1', String(plot.top));
+  dateGuide.setAttribute('y2', String(height - plot.bottom));
+  dateGuide.setAttribute('class', 'chart-date-guide');
+  svg.appendChild(dateGuide);
+  const activePoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  activePoint.setAttribute('r', '5.5');
+  activePoint.setAttribute('class', 'chart-active-point');
+  svg.appendChild(activePoint);
+  const hitTarget = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  hitTarget.setAttribute('x', String(plot.left));
+  hitTarget.setAttribute('y', String(plot.top));
+  hitTarget.setAttribute('width', String(plotWidth));
+  hitTarget.setAttribute('height', String(plotHeight));
+  hitTarget.setAttribute('class', 'chart-hit-target');
+  svg.appendChild(hitTarget);
   target.appendChild(svg);
 
-  const legend = document.createElement('div');
-  legend.className = 'line-legend';
-  const pythonFull = fullPythonPeriod();
-  const selectedFull = pythonFull?.factors?.[factor];
-  const bestFull = best?.factor ? pythonFull?.factors?.[best.factor] : null;
-  const selectedReturn = pythonPerformanceMetric(selectedFull, 'cumulativeReturn')
-    ?? (selectedSeries.length ? selectedSeries.at(-1)?.normalized - 1 : null);
-  const bestReturn = pythonPerformanceMetric(bestFull, 'cumulativeReturn')
-    ?? (bestMetricSeries.length ? bestMetricSeries.at(-1)?.normalized - 1 : null);
-  const selectedLegend = document.createElement('span');
-  const selectedDot = document.createElement('span');
-  selectedDot.className = 'legend-dot selected';
-  selectedLegend.appendChild(selectedDot);
-  selectedLegend.append(`비교 ${factor} · 누적 ${formatPercent(selectedReturn)}`);
-  legend.appendChild(selectedLegend);
-  if (best?.factor && best.factor !== factor) {
-    const bestLegend = document.createElement('span');
-    const bestDot = document.createElement('span');
-    bestDot.className = 'legend-dot best';
-    bestLegend.appendChild(bestDot);
-    bestLegend.append(`Python 최고 ${best.factor} · 누적 ${formatPercent(bestReturn)}`);
-    legend.appendChild(bestLegend);
-  } else if (best?.factor === factor) {
-    const sameLegend = document.createElement('span');
-    sameLegend.className = 'same-series-note';
-    sameLegend.textContent = '사용자 선택 팩터 = Python 최고 팩터';
-    legend.appendChild(sameLegend);
+  const seriesControls = document.querySelector('#backtest-series-controls');
+  if (seriesControls) {
+    seriesControls.replaceChildren();
+    seriesModels.forEach((series) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `chart-series-button ${series.className}`;
+      button.dataset.seriesKey = series.key;
+      button.textContent = series.label;
+      button.addEventListener('pointerenter', () => {
+        chartState.previewSeriesKey = series.key;
+        updatePresentation();
+      });
+      button.addEventListener('pointerleave', () => {
+        chartState.previewSeriesKey = null;
+        updatePresentation();
+      });
+      button.addEventListener('focus', () => {
+        chartState.previewSeriesKey = series.key;
+        updatePresentation();
+      });
+      button.addEventListener('blur', () => {
+        chartState.previewSeriesKey = null;
+        updatePresentation();
+      });
+      button.addEventListener('click', () => {
+        chartState.pinnedSeriesKey = series.key;
+        chartState.previewSeriesKey = null;
+        updatePresentation();
+      });
+      seriesControls.appendChild(button);
+    });
   }
-  benchmarkSeriesList.forEach((series) => {
-    const source = pythonFull?.benchmarks?.[series.symbol];
-    const benchmarkReturn = pythonPerformanceMetric(source, 'cumulativeReturn')
-      ?? (series.points.length ? series.points.at(-1)?.normalized - 1 : null);
-    const benchmarkLegend = document.createElement('span');
-    const benchmarkDot = document.createElement('span');
-    benchmarkDot.className = `legend-dot ${benchmarkPaletteClass(series.symbol)}`;
-    benchmarkLegend.appendChild(benchmarkDot);
-    benchmarkLegend.append(`${series.label} · 누적 ${formatPercent(benchmarkReturn)}`);
-    legend.appendChild(benchmarkLegend);
+
+  const dateInput = document.querySelector('#backtest-date-input');
+  if (dateInput) {
+    dateInput.min = allDates[0];
+    dateInput.max = allDates.at(-1);
+    dateInput.value = chartState.pinnedDate;
+    dateInput.oninput = () => {
+      chartState.previewDate = nearestChartDate(allDates, dateInput.value);
+      updatePresentation();
+    };
+    dateInput.onchange = () => {
+      chartState.pinnedDate = nearestChartDate(allDates, dateInput.value);
+      chartState.previewDate = null;
+      dateInput.value = chartState.pinnedDate;
+      updatePresentation();
+    };
+    dateInput.onblur = () => {
+      chartState.previewDate = null;
+      dateInput.value = chartState.pinnedDate;
+      updatePresentation();
+    };
+  }
+  const resetButton = document.querySelector('#backtest-date-reset');
+  if (resetButton) {
+    resetButton.onclick = () => {
+      chartState.pinnedDate = nearestChartDate(allDates, commonPeriod?.endDate || allDates.at(-1));
+      chartState.previewDate = null;
+      if (dateInput) dateInput.value = chartState.pinnedDate;
+      updatePresentation();
+      target.focus({ preventScroll: true });
+    };
+  }
+
+  function updatePresentation() {
+    const activeSeriesKey = seriesKeys.includes(chartState.previewSeriesKey)
+      ? chartState.previewSeriesKey
+      : chartState.pinnedSeriesKey;
+    const activeDate = chartState.previewDate || chartState.pinnedDate;
+    const activeSeries = seriesModels.find((series) => series.key === activeSeriesKey) || seriesModels[0];
+    svg.querySelectorAll('[data-series-key]').forEach((path) => {
+      const active = path.getAttribute('data-series-key') === activeSeries.key;
+      path.classList.toggle('is-active', active);
+      path.classList.toggle('is-muted', !active);
+    });
+    seriesControls?.querySelectorAll('button').forEach((button) => {
+      const key = button.dataset.seriesKey;
+      button.setAttribute('aria-pressed', String(key === chartState.pinnedSeriesKey));
+      button.classList.toggle('is-preview', key === chartState.previewSeriesKey);
+    });
+    const guideX = xForDate(activeDate);
+    dateGuide.setAttribute('x1', String(guideX));
+    dateGuide.setAttribute('x2', String(guideX));
+    const point = chartPointAtDate(activeSeries.model.points, activeDate);
+    if (point) {
+      activePoint.removeAttribute('hidden');
+      activePoint.setAttribute('cx', String(guideX));
+      activePoint.setAttribute('cy', String(yFor(point.normalized)));
+    } else {
+      activePoint.setAttribute('hidden', '');
+    }
+    setText('#backtest-active-date', activeDate || '-');
+    setText('#backtest-active-series', activeSeries.label);
+    setText('#backtest-active-value', point ? formatChartReturn(point.normalized - 1) : '관측 없음');
+    setText(
+      '#backtest-active-context',
+      point
+        ? `평가 시작 대비 누적 수익률 · 원본 관측 ${allDates.indexOf(activeDate) + 1}/${allDates.length}`
+        : '선택일에 해당 계열 관측이 없어 임의 보간하지 않습니다.',
+    );
+    const valueNode = document.querySelector('#backtest-active-value');
+    valueNode?.classList.toggle('positive', Boolean(point && point.normalized > 1));
+    valueNode?.classList.toggle('negative', Boolean(point && point.normalized < 1));
+    target.setAttribute('aria-label', `${activeDate} ${activeSeries.label} ${point ? formatChartReturn(point.normalized - 1) : '관측 없음'}`);
+  }
+
+  const dateForClientX = (clientX) => {
+    const bounds = svg.getBoundingClientRect();
+    const viewX = (clientX - bounds.left) / Math.max(bounds.width, 1) * width;
+    const ratio = Math.max(0, Math.min(1, (viewX - plot.left) / plotWidth));
+    return allDates[Math.round(ratio * (allDates.length - 1))];
+  };
+  hitTarget.addEventListener('pointermove', (event) => {
+    chartState.previewDate = dateForClientX(event.clientX);
+    updatePresentation();
   });
-  target.appendChild(legend);
+  hitTarget.addEventListener('pointerleave', () => {
+    chartState.previewDate = null;
+    updatePresentation();
+  });
+  hitTarget.addEventListener('click', (event) => {
+    chartState.pinnedDate = dateForClientX(event.clientX);
+    chartState.previewDate = null;
+    if (dateInput) dateInput.value = chartState.pinnedDate;
+    updatePresentation();
+    target.focus({ preventScroll: true });
+  });
+  target.onkeydown = (event) => {
+    const currentIndex = Math.max(0, allDates.indexOf(chartState.pinnedDate));
+    let nextIndex = null;
+    if (event.key === 'ArrowLeft') nextIndex = Math.max(0, currentIndex - 1);
+    if (event.key === 'ArrowRight') nextIndex = Math.min(allDates.length - 1, currentIndex + 1);
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = allDates.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    chartState.pinnedDate = allDates[nextIndex];
+    chartState.previewDate = null;
+    if (dateInput) dateInput.value = chartState.pinnedDate;
+    updatePresentation();
+  };
+  updatePresentation();
   renderPerformanceMetricsTable(performanceSeries);
 }
 
@@ -5683,7 +5869,7 @@ function bestFactorRow(payload) {
 
 function appendFactorRankingBar(target, options) {
   const row = document.createElement(options.interactive ? 'button' : 'div');
-  row.className = `factor-ranking-bar-row ${options.className || ''} ${options.selected ? 'is-selected' : ''}`.trim();
+  row.className = `factor-ranking-bar-row ${options.className || ''} ${options.selected ? 'is-selected' : ''} ${options.best ? 'is-best' : ''}`.trim();
   if (options.interactive) {
     row.type = 'button';
     row.setAttribute('aria-pressed', String(Boolean(options.selected)));
@@ -5717,7 +5903,8 @@ function selectFactorFromRanking(factor) {
   state.hasUserSelectedFactor = true;
   syncFactorDependentControls(currentRun(), factor, preferredDate);
   renderAll();
-  document.querySelector('#visual-dashboard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  document.querySelector('#visual-dashboard')?.scrollIntoView({ behavior: reducedMotion ? 'auto' : 'smooth', block: 'start' });
 }
 
 function populateFixedPolicyView(payload) {
@@ -5757,21 +5944,25 @@ function renderFactorRanking(payload) {
   );
   const chartRows = rows.filter((row) => finite(row.selection_score)).slice(0, 12);
   const maxScore = Math.max(...chartRows.map((row) => Number(row.selection_score) || 0), 1);
+  const comparisonFactor = selectedFactor();
   chartRows.forEach((row) => {
+    const comparisonSelected = row.factor === comparisonFactor;
     appendFactorRankingBar(chart, {
       label: row.factor,
-      detail: `${factorRankingStatusText(row)} · 동일 표본 상대 합성 점수`,
+      detail: `${row.selected === true ? 'Python 최고' : factorRankingStatusText(row)}${comparisonSelected ? ' · 비교 중' : ''} · 동일 표본 상대 합성 점수`,
       width: Number(row.selection_score) / maxScore * 100,
       valueLabel: `${formatNumber(row.selection_score)} / 100`,
       className: factorSelectionStatusClass(row.selection_status),
-      selected: row.selected === true,
+      selected: comparisonSelected,
+      best: row.selected === true,
       interactive: true,
       onClick: () => selectFactorFromRanking(row.factor),
     });
   });
   rows.forEach((row) => {
     const tr = document.createElement('tr');
-    if (row.selected === true) tr.className = 'is-selected';
+    if (row.factor === comparisonFactor) tr.classList.add('is-selected');
+    if (row.selected === true) tr.classList.add('is-best');
     appendCell(tr, row.rank ?? '-');
     appendCell(tr, row.factor, { strong: row.selected === true });
     appendCell(tr, humanFactorCategory(row.category));
@@ -6013,15 +6204,11 @@ function renderAll() {
   renderFactorAnalysis();
 }
 
-function renderWithBusy(message = '선택값을 반영하는 중입니다...') {
+function renderExploration() {
   if (!state.data) {
-    setStatusMessage('데이터를 불러오는 중입니다. 입력값은 데이터 로딩 후 반영됩니다.');
     return;
   }
-  setStatusMessage(message);
-  window.setTimeout(() => {
-    renderAll();
-  }, 160);
+  renderAll();
 }
 
 function presetDisplayName(presetId) {
@@ -6354,16 +6541,16 @@ function bindDashboardControls() {
   document.querySelector('#factor-select').addEventListener('change', () => {
     state.hasUserSelectedFactor = true;
     syncFactorDependentControls(currentRun(), selectedFactor(), selectedDate());
-    renderWithBusy('선택 팩터를 반영하는 중입니다...');
+    renderExploration();
   });
   ['#date-select'].forEach((selector) => {
     document.querySelector(selector)?.addEventListener('input', () => {
       syncDefaultFactorToCurrentBasis();
-      renderWithBusy('선택한 성과 탐색 기간을 반영하는 중입니다...');
+      renderExploration();
     });
     document.querySelector(selector)?.addEventListener('change', () => {
       syncDefaultFactorToCurrentBasis();
-      renderWithBusy('선택한 성과 탐색 기간을 반영하는 중입니다...');
+      renderExploration();
     });
   });
 }
@@ -6447,6 +6634,9 @@ if (typeof globalThis !== 'undefined') {
     commonEvaluationSeriesSegments,
     dateTickMarks,
     niceReturnTicks,
+    nearestChartDate,
+    chartPointAtDate,
+    formatChartReturn,
     pythonPerformanceMetric,
     renderPythonPerformanceMetricsTable,
     renderBacktestComparisonSummary,
@@ -6481,6 +6671,8 @@ if (typeof globalThis !== 'undefined') {
     analysisCountDefinitions,
     universeScopeEvidence,
     CHART_PALETTE_CLASS_MAP,
+    THEME_STORAGE_KEY,
+    LEGACY_THEME_STORAGE_KEYS,
     EXPLORATION_PERIODS,
     BENCHMARK_LABELS,
   };
