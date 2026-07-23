@@ -28,6 +28,7 @@ def web_payload_path(demo_result, tmp_path_factory: pytest.TempPathFactory) -> P
         "scripts/test_performance_table_dom.mjs",
         "scripts/test_chart_palette_dom.mjs",
         "scripts/test_original_design_contract.mjs",
+        "scripts/test_common_design_v1_dom.mjs",
         "scripts/test_static_web_loader_contract.mjs",
         "scripts/test_web_local_api_dom_integration.mjs",
     ],

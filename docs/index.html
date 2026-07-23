@@ -5,8 +5,31 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
   <title>모멘텀 팩터 데일리 대시보드</title>
+  <script>
+    (() => {
+      const canonicalKey = 'quant-research-theme';
+      const legacyKeys = ['momentum-factor-theme', 'quant-dashboard-theme', 'quant-calm-theme', 'dram-price-theme'];
+      const validTheme = (value) => value === 'light' || value === 'dark';
+      let stored = null;
+      try {
+        stored = window.localStorage.getItem(canonicalKey);
+        if (!validTheme(stored)) {
+          stored = legacyKeys.map((key) => window.localStorage.getItem(key)).find(validTheme) || null;
+          if (stored) window.localStorage.setItem(canonicalKey, stored);
+        }
+        legacyKeys.forEach((key) => window.localStorage.removeItem(key));
+      } catch (_error) {
+        stored = null;
+      }
+      const requested = new URLSearchParams(window.location.search).get('theme');
+      const system = window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      const theme = validTheme(requested) ? requested : (validTheme(stored) ? stored : system);
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+    })();
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%233182f6'/%3E%3Cpath d='M14 43 27 29l9 8 14-18' fill='none' stroke='white' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="assets/styles.css?v=3617e074cac8" />
+  <link rel="stylesheet" href="assets/styles.css?v=d8fa605af302" />
 </head>
 <body id="top">
   <a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
@@ -23,6 +46,7 @@
       <a href="https://sonchanggi.github.io/quant-dashboard/risk-score/">Risk Score</a>
       <a href="https://sonchanggi.github.io/port/">Port</a>
       <a href="https://sonchanggi.github.io/valuation/">Valuation</a>
+      <a href="https://sonchanggi.github.io/kelly/">Kelly</a>
     </div>
     <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="다크 모드로 전환">
       <span class="theme-toggle-icon" aria-hidden="true"></span>
@@ -32,15 +56,14 @@
 
   <header class="hero">
     <div class="hero-content">
-      <p class="eyebrow">모멘텀 팩터 랩</p>
-      <h1>모멘텀 팩터 데일리 대시보드</h1>
+      <p class="eyebrow">검증된 정적 결과 · 모멘텀 팩터 랩</p>
+      <h1>모멘텀 팩터 랩</h1>
       <p class="hero-copy">
-        입력한 조건으로 모멘텀 팩터 전체를 Python에서 다시 계산하고, 사용자가 고른 팩터와 같은 입력의 Python 최고 팩터를 나란히 보여줍니다.
-        비중은 팩터 점수 70%·후행 거래대금 30%의 고정 방법으로 산출합니다.
+        현재 입력에서 64개 모멘텀 팩터를 비교해 최고 팩터와 포트폴리오를 보여줍니다.
       </p>
       <div class="hero-actions">
-        <a class="button hero-link" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="투자 리서치 프로젝트 통합 대시보드로 돌아가기">통합 대시보드</a>
-        <a class="button secondary hero-link" href="#visual-dashboard">시각화 보기</a>
+        <a class="button hero-link" href="#visual-dashboard">핵심 성과 보기</a>
+        <a class="button secondary hero-link" href="#analysis-settings">분석 조건</a>
       </div>
     </div>
     <div class="status-card" id="run-status">데이터를 불러오는 중...</div>
@@ -53,26 +76,142 @@
   </noscript>
 
   <main id="main-content" tabindex="-1">
+    <section class="cards result-cards" aria-label="핵심 결과">
+      <article class="card result-card-primary">
+        <span>Python 최고 팩터</span>
+        <strong id="best-factor">-</strong>
+        <small id="best-factor-detail">-</small>
+      </article>
+      <article class="card">
+        <span>데이터 · 신호 상태</span>
+        <strong id="recommendation-status">-</strong>
+        <small id="data-provider">-</small>
+      </article>
+      <article class="card">
+        <span>비교 중인 팩터</span>
+        <strong id="selected-factor">-</strong>
+        <small id="selected-factor-detail">-</small>
+      </article>
+      <article class="card">
+        <span>선택 포트폴리오</span>
+        <strong id="weight-summary">-</strong>
+        <small>팩터 점수 70% · 후행 거래대금 30%</small>
+      </article>
+    </section>
 
+    <section class="panel visual-panel primary-visual-panel" id="visual-dashboard" aria-labelledby="visual-dashboard-title">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">핵심 성과 차트</p>
+          <h2 id="visual-dashboard-title">선택 팩터 · Python 최고 팩터 · 시장 비교</h2>
+        </div>
+        <p>계열과 날짜를 탐색해도 공식 결과와 분석 입력은 바뀌지 않습니다.</p>
+      </div>
+      <article class="viz-card primary-chart-card">
+        <div class="viz-card-heading">
+          <div>
+            <p class="eyebrow">전체 공통 평가기간</p>
+            <h3>사용자 선택 팩터와 Python 최고 팩터</h3>
+          </div>
+          <span id="backtest-chart-meta" class="chart-meta">-</span>
+        </div>
+        <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
+        <div class="chart-inspector">
+          <div>
+            <span class="chart-inspector-label">강조 계열</span>
+            <div id="backtest-series-controls" class="chart-series-controls" role="group" aria-label="강조할 성과 계열"></div>
+          </div>
+          <div class="chart-date-controls">
+            <label for="backtest-date-input">차트 선택일
+              <input id="backtest-date-input" type="date" />
+            </label>
+            <button id="backtest-date-reset" class="secondary-button" type="button">평가 종료일로</button>
+          </div>
+        </div>
+        <div id="backtest-value-card" class="chart-value-card" aria-live="polite">
+          <span id="backtest-active-date">-</span>
+          <strong id="backtest-active-series">-</strong>
+          <b id="backtest-active-value">-</b>
+          <small id="backtest-active-context">데이터를 불러오는 중입니다.</small>
+        </div>
+        <p id="backtest-chart-help" class="chart-help">차트에서 마우스를 움직이거나 클릭하세요. 키보드는 좌우 화살표·Home·End를 지원합니다.</p>
+        <div
+          id="backtest-chart"
+          class="line-chart interactive-line-chart"
+          role="group"
+          tabindex="0"
+          aria-label="누적 성과 비교 차트"
+          aria-describedby="backtest-chart-help"
+        ></div>
+        <details class="inline-disclosure performance-disclosure">
+          <summary>기간별 성과 지표 보기</summary>
+          <div id="performance-metrics-table" class="performance-metrics" aria-live="polite"></div>
+        </details>
+      </article>
+
+      <details class="dashboard-disclosure auxiliary-viz-disclosure">
+        <summary>
+          <span>팩터 랭킹 · 종목 비중 차트</span>
+          <small>비교와 포트폴리오 구성 상세</small>
+        </summary>
+        <div class="viz-grid auxiliary-viz-grid">
+          <article class="viz-card wide">
+            <div class="viz-card-heading">
+              <div>
+                <p class="eyebrow">팩터 선택 점수</p>
+                <h3>현재 입력의 Python 팩터 랭킹</h3>
+              </div>
+              <span id="factor-chart-meta" class="chart-meta">-</span>
+            </div>
+            <div id="factor-return-chart" class="bar-chart" aria-live="polite"></div>
+          </article>
+          <article class="viz-card">
+            <div class="viz-card-heading">
+              <div>
+                <p class="eyebrow">사용자 선택 팩터</p>
+                <h3>선택 종목 비중</h3>
+              </div>
+              <span id="comparison-weight-chart-meta" class="chart-meta">-</span>
+            </div>
+            <div id="comparison-weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
+          </article>
+          <article class="viz-card">
+            <div class="viz-card-heading">
+              <div>
+                <p class="eyebrow">동일 입력 Python 최고 팩터</p>
+                <h3>최고 팩터 선택 종목 비중</h3>
+              </div>
+              <span id="weight-chart-meta" class="chart-meta">-</span>
+            </div>
+            <div id="weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
+          </article>
+        </div>
+      </details>
+    </section>
 
     <section class="controls controls-enhanced" aria-label="대시보드 입력값">
       <div class="control-group control-group-run">
         <div class="control-group-heading">
-          <p class="eyebrow">분석 기준</p>
-          <h2>결과 · 성과 기간 · 선택 팩터</h2>
+          <p class="eyebrow">빠른 비교</p>
+          <h2>공개 결과 · 보유 기준일 · 비교 팩터</h2>
         </div>
-        <label>실행 결과
+        <label>공개 결과
           <select id="run-select"></select>
         </label>
-        <label>기준일
+        <label>보유 이력 기준일
           <select id="date-select"></select>
         </label>
         <label>비교할 팩터
           <select id="factor-select"></select>
-          <span class="control-hint">선택한 팩터의 성과와 포트폴리오를 봅니다. Python 최고 팩터는 입력 조건을 제출할 때 다시 계산됩니다.</span>
+          <span class="control-hint">비교 팩터만 바뀌며 Python 최고 팩터는 유지됩니다.</span>
         </label>
       </div>
-      <section id="research-controls" class="research-inputs research-input-details" aria-labelledby="research-input-title">
+      <details id="analysis-settings" class="dashboard-disclosure analysis-settings-disclosure">
+        <summary>
+          <span>Python 분석 조건</span>
+          <small>리밸런싱 · Top-N · 비용 · 고급 가드레일</small>
+        </summary>
+        <section id="research-controls" class="research-inputs research-input-details" aria-labelledby="research-input-title">
         <div class="research-input-shell">
           <div class="research-input-heading">
             <div>
@@ -213,38 +352,16 @@
             </p>
           </details>
         </div>
-      </section>
+        </section>
+      </details>
     </section>
 
-    <section class="cards" aria-label="요약 카드">
-      <article class="card">
-        <span>동일 입력 Python 최고 팩터</span>
-        <strong id="best-factor">-</strong>
-        <small id="best-factor-detail">-</small>
-      </article>
-      <article class="card">
-        <span>사용자 선택 팩터</span>
-        <strong id="selected-factor">-</strong>
-        <small id="selected-factor-detail">-</small>
-      </article>
-      <article class="card">
-        <span>추천/신호 상태</span>
-        <strong id="recommendation-status">-</strong>
-        <small id="data-provider">-</small>
-      </article>
-      <article class="card">
-        <span>최근 실행 시각</span>
-        <strong id="latest-run-at">-</strong>
-        <small id="latest-run-detail">-</small>
-      </article>
-      <article class="card">
-        <span>사용자 선택 팩터 포트폴리오</span>
-        <strong id="weight-summary">-</strong>
-        <small>현재 선택한 팩터에 고정 비중 방법을 적용한 Python 결과입니다.</small>
-      </article>
-    </section>
-
-    <section class="panel factor-analysis-panel" id="factor-analysis" aria-labelledby="factor-analysis-title">
+    <details class="dashboard-disclosure data-dependent-details">
+      <summary>
+        <span>최고 팩터 선정 근거</span>
+        <small>전체 랭킹 · 합성 점수 · 고정 비중 방법</small>
+      </summary>
+      <section class="panel factor-analysis-panel" id="factor-analysis" aria-labelledby="factor-analysis-title">
       <div class="panel-heading">
         <div>
           <p class="eyebrow">동일 입력 Python 분석</p>
@@ -341,9 +458,15 @@
         </article>
 
       </div>
-    </section>
+      </section>
+    </details>
 
-    <section class="panel diagnostics-panel">
+    <details class="dashboard-disclosure data-dependent-details">
+      <summary>
+        <span>팩터 방법론 · 진단</span>
+        <small>경제적 의미 · 중복도 · Forward Rank-IC</small>
+      </summary>
+      <section class="panel diagnostics-panel">
       <div class="panel-heading">
         <div>
           <p class="eyebrow">팩터 해석</p>
@@ -381,61 +504,15 @@
           <div id="factor-redundancy-summary" class="diagnostic-evidence" aria-live="polite"></div>
         </article>
       </div>
-    </section>
+      </section>
+    </details>
 
-    <section class="panel visual-panel" id="visual-dashboard">
-      <div class="panel-heading">
-        <div>
-          <p class="eyebrow">시각화 대시보드</p>
-          <h2>팩터별 성과 비교 · 백테스트 추이 · 선택 포트폴리오</h2>
-        </div>
-      </div>
-      <div class="viz-grid">
-        <article class="viz-card wide">
-          <div class="viz-card-heading">
-            <div>
-              <p class="eyebrow">팩터 선택 점수</p>
-              <h3>현재 입력의 Python 팩터 랭킹</h3>
-            </div>
-            <span id="factor-chart-meta" class="chart-meta">-</span>
-          </div>
-          <div id="factor-return-chart" class="bar-chart" aria-live="polite"></div>
-        </article>
-        <article class="viz-card wide">
-          <div class="viz-card-heading">
-            <div>
-              <p class="eyebrow">전체 공통 평가기간</p>
-              <h3>사용자 선택 팩터와 Python 최고 팩터</h3>
-            </div>
-            <span id="backtest-chart-meta" class="chart-meta">-</span>
-          </div>
-          <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
-          <div id="backtest-chart" class="line-chart" aria-live="polite"></div>
-          <div id="performance-metrics-table" class="performance-metrics" aria-live="polite"></div>
-        </article>
-        <article class="viz-card">
-          <div class="viz-card-heading">
-            <div>
-              <p class="eyebrow">사용자 선택 팩터</p>
-              <h3>선택 종목 비중</h3>
-            </div>
-            <span id="comparison-weight-chart-meta" class="chart-meta">-</span>
-          </div>
-          <div id="comparison-weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
-        </article>
-        <article class="viz-card">
-          <div class="viz-card-heading">
-            <div>
-              <p class="eyebrow">동일 입력 Python 최고 팩터</p>
-              <h3>최고 팩터 선택 종목 비중</h3>
-            </div>
-            <span id="weight-chart-meta" class="chart-meta">-</span>
-          </div>
-          <div id="weight-chart" class="bar-chart compact-bars" aria-live="polite"></div>
-        </article>
-      </div>
-    </section>
-
+    <details class="dashboard-disclosure data-dependent-details supporting-details">
+      <summary>
+        <span>종목 · 보유 이력 · 데이터 운영 상세</span>
+        <small>정확값 표 · 실행 내역 · 가드레일 · 품질 게이트</small>
+      </summary>
+      <div class="supporting-detail-stack">
     <section class="panel">
       <div class="panel-heading">
         <div>
@@ -491,12 +568,16 @@
       </div>
     </section>
 
-    <section class="manual-update" aria-label="수동 최신 데이터 업데이트">
+    <section class="manual-update" aria-label="데이터 업데이트 운영 정보">
       <div>
-        <p class="eyebrow">수동 업데이트</p>
-        <h2>검토 후 그 시점의 최신 데이터로 수동 실행</h2>
+        <p class="eyebrow">데이터 운영</p>
+        <h2>예약 갱신과 검토 후 수동 실행</h2>
         <p>
-          자동 예약 실행은 현재 중지되어 있습니다. 버튼을 누르면 GitHub Actions 수동 실행 화면으로 이동합니다. <code>workflow_dispatch</code> 실행이며, 저장소 쓰기 권한이 있는 GitHub 계정으로 <strong>Run workflow</strong>를 누릅니다.
+          평일 미국장 종료 후 예약 실행하며 watchdog이 결과를 확인합니다. 필요할 때만 GitHub Actions에서 수동 실행할 수 있습니다.
+        </p>
+        <p class="operation-timestamp">
+          최근 실행 <strong id="latest-run-at">-</strong>
+          <small id="latest-run-detail">-</small>
         </p>
         <p class="manual-update-note">
           공개 페이지에는 GitHub 토큰을 저장하지 않습니다. 실행 후 Actions 상태와 대시보드 기준일을 확인하세요.
@@ -559,16 +640,14 @@
       </div>
     </section>
 
-    <section class="notice moved-notice">
-      <strong>운영 고지:</strong> 성과 기간·선택 팩터·기준일은 화면 탐색만 바꿉니다.
-      공식 연구 입력은 위 Python 분석 조건이며, 공개 preset이 아닌 조합은 로컬 API가 실행 중일 때만 계산됩니다. 자동 예약 실행과 watchdog 예약은 중지되어 있으며, 공개 데이터 반영은 GitHub Actions 수동 실행 후 publication safety gate를 통과해야 합니다.
-    </section>
+      </div>
+    </details>
 
     <section class="disclaimer">
       <h2>주의 및 한계</h2>
       <p>
-        본 대시보드는 연구/의사결정 보조용이며 개인화된 투자, 세무, 법률 또는 매매 조언이 아닙니다.
-        무료/공개 데이터의 누락, 조정가격 차이, 생존편향, 유동성/용량 한계가 있을 수 있습니다.
+        화면의 비교·날짜 탐색은 Python 결과를 다시 계산하지 않습니다. 이 페이지는 연구 보조용이며 개인화된 투자 조언이 아닙니다.
+        데이터 품질과 유니버스 한계는 위 상세 영역에서 확인할 수 있습니다.
       </p>
     </section>
   </main>
@@ -577,7 +656,7 @@
     <span>모멘텀 팩터 랩에서 생성</span>
     <span id="generated-at"></span>
   </footer>
-  <script src="assets/dashboard.js?v=3617e074cac8"></script>
+  <script src="assets/dashboard.js?v=d8fa605af302"></script>
   <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
     <a href="#top" aria-label="맨 위로 이동" title="맨 위로">↑</a>
     <a href="#page-bottom" aria-label="맨 아래로 이동" title="맨 아래로">↓</a>
