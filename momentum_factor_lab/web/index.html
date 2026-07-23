@@ -56,7 +56,7 @@
 
   <header class="hero">
     <div class="hero-content">
-      <p class="eyebrow">검증된 정적 결과 · 모멘텀 팩터 랩</p>
+      <p class="eyebrow">Quant Research · Momentum</p>
       <h1>모멘텀 팩터 랩</h1>
       <p class="hero-copy">
         현재 입력에서 64개 모멘텀 팩터를 비교해 최고 팩터와 포트폴리오를 보여줍니다.
@@ -78,7 +78,7 @@
   <main id="main-content" tabindex="-1">
     <section class="cards result-cards" aria-label="핵심 결과">
       <article class="card result-card-primary">
-        <span>Python 최고 팩터</span>
+        <span>최고 팩터</span>
         <strong id="best-factor">-</strong>
         <small id="best-factor-detail">-</small>
       </article>
@@ -103,16 +103,12 @@
       <div class="panel-heading">
         <div>
           <p class="eyebrow">핵심 성과 차트</p>
-          <h2 id="visual-dashboard-title">선택 팩터 · Python 최고 팩터 · 시장 비교</h2>
+          <h2 id="visual-dashboard-title">누적 성과 비교</h2>
         </div>
-        <p>계열과 날짜를 탐색해도 공식 결과와 분석 입력은 바뀌지 않습니다.</p>
       </div>
       <article class="viz-card primary-chart-card">
-        <div class="viz-card-heading">
-          <div>
-            <p class="eyebrow">전체 공통 평가기간</p>
-            <h3>사용자 선택 팩터와 Python 최고 팩터</h3>
-          </div>
+        <div class="viz-card-heading primary-chart-heading">
+          <span class="chart-scope-label">선택 팩터 · 최고 팩터 · 시장</span>
           <span id="backtest-chart-meta" class="chart-meta">-</span>
         </div>
         <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
@@ -125,7 +121,7 @@
             <label for="backtest-date-input">차트 선택일
               <input id="backtest-date-input" type="date" />
             </label>
-            <button id="backtest-date-reset" class="secondary-button" type="button">평가 종료일로</button>
+            <button id="backtest-date-reset" class="secondary-button" type="button" aria-label="평가 종료일로 차트 선택일 복원">종료일</button>
           </div>
         </div>
         <div id="backtest-value-card" class="chart-value-card" aria-live="polite">
@@ -134,7 +130,7 @@
           <b id="backtest-active-value">-</b>
           <small id="backtest-active-context">데이터를 불러오는 중입니다.</small>
         </div>
-        <p id="backtest-chart-help" class="chart-help">차트에서 마우스를 움직이거나 클릭하세요. 키보드는 좌우 화살표·Home·End를 지원합니다.</p>
+        <p id="backtest-chart-help" class="visually-hidden">차트는 마우스, 클릭, 좌우 화살표, Home, End 키로 탐색할 수 있습니다.</p>
         <div
           id="backtest-chart"
           class="line-chart interactive-line-chart"
@@ -178,7 +174,7 @@
           <article class="viz-card">
             <div class="viz-card-heading">
               <div>
-                <p class="eyebrow">동일 입력 Python 최고 팩터</p>
+                <p class="eyebrow">동일 입력 최고 팩터</p>
                 <h3>최고 팩터 선택 종목 비중</h3>
               </div>
               <span id="weight-chart-meta" class="chart-meta">-</span>
@@ -203,22 +199,21 @@
         </label>
         <label>비교할 팩터
           <select id="factor-select"></select>
-          <span class="control-hint">비교 팩터만 바뀌며 Python 최고 팩터는 유지됩니다.</span>
         </label>
       </div>
       <details id="analysis-settings" class="dashboard-disclosure analysis-settings-disclosure">
         <summary>
-          <span>Python 분석 조건</span>
-          <small>리밸런싱 · Top-N · 비용 · 고급 가드레일</small>
+          <span>분석 조건</span>
+          <small>리밸런싱 · Top-N · 비용 · 가드레일</small>
         </summary>
         <section id="research-controls" class="research-inputs research-input-details" aria-labelledby="research-input-title">
         <div class="research-input-shell">
           <div class="research-input-heading">
             <div>
-              <p class="eyebrow">공식 연구 입력</p>
-              <h2 id="research-input-title">Python 분석 조건</h2>
+              <p class="eyebrow">분석 입력</p>
+              <h2 id="research-input-title">상세 입력</h2>
               <p>
-                핵심 조건을 설정하세요. 세부 필터와 선택 가드레일은 고급 입력에서 조정할 수 있습니다.
+                핵심 조건과 고급 가드레일을 설정합니다.
               </p>
             </div>
             <div class="result-identity" aria-live="polite">
@@ -337,7 +332,7 @@
               </div>
             </details>
             <div class="input-actions">
-              <button class="primary-button" type="submit">이 조건으로 Python 분석</button>
+              <button class="primary-button" type="submit">이 조건으로 분석</button>
               <button id="reset-default-inputs" class="secondary-button" type="button">공개 기본값으로 복원</button>
             </div>
           </form>
@@ -345,7 +340,7 @@
             정적 grid manifest를 불러오는 중입니다.
           </div>
           <details class="advanced-local-api-note">
-            <summary>임의 입력 계산 안내</summary>
+            <summary>임의 입력</summary>
             <p class="local-api-note">
               공개 preset에 없는 조건은 로컬 Python API가 필요합니다.
               <code>uv run python -m momentum_factor_lab.cli serve-local-api --live --start-date 2016-01-01 --min-avg-dollar-volume 5000000 --host 127.0.0.1 --port 8765</code>
@@ -368,8 +363,7 @@
           <h2 id="factor-analysis-title">최고 팩터 선정과 고정 비중 방법</h2>
         </div>
         <p>
-          입력한 유니버스·기간·리밸런싱·Top-N·비중 상한·비용으로 모든 팩터를 비교합니다.
-          정책을 다시 고르지 않으며, 모든 팩터에 같은 고정 비중 방법을 적용합니다.
+          같은 입력과 70/30 고정 비중으로 비교한 전체 랭킹입니다.
         </p>
       </div>
 
@@ -385,7 +379,7 @@
           <small id="analysis-funnel">-</small>
         </article>
         <article class="card">
-          <span>Python 최고 팩터</span>
+          <span>최고 팩터</span>
           <strong id="analysis-factor">-</strong>
           <small id="analysis-factor-score">-</small>
         </article>
@@ -400,7 +394,7 @@
           <small id="analysis-cash">-</small>
         </article>
         <article class="card">
-          <span>유니버스 시점성 · 생존편향 한계</span>
+          <span>유니버스 범위</span>
           <strong id="analysis-universe-scope">-</strong>
           <small id="analysis-universe-evidence">-</small>
         </article>
@@ -484,7 +478,7 @@
             <p class="eyebrow">선택 팩터 계산법</p>
             <h3 id="selected-factor-method-title">-</h3>
           </div>
-          <span id="selected-factor-method-badge" class="badge">브라우저 시나리오 설명</span>
+          <span id="selected-factor-method-badge" class="badge">팩터 정의</span>
         </div>
         <p id="selected-factor-method-summary" class="method-summary">선택한 팩터의 산식과 현재 입력값 적용 방식을 표시합니다.</p>
         <div id="selected-factor-method-steps" class="method-grid" aria-live="polite"></div>
@@ -509,8 +503,8 @@
 
     <details class="dashboard-disclosure data-dependent-details supporting-details">
       <summary>
-        <span>종목 · 보유 이력 · 데이터 운영 상세</span>
-        <small>정확값 표 · 실행 내역 · 가드레일 · 품질 게이트</small>
+        <span>데이터 · 출처 · 운영 상세</span>
+        <small>종목 · 보유 이력 · 품질 게이트</small>
       </summary>
       <div class="supporting-detail-stack">
     <section class="panel">
@@ -519,7 +513,7 @@
           <p class="eyebrow">사용자 선택 팩터</p>
           <h2>현재 선택 종목 · 점수 · 가격 · 비중</h2>
         </div>
-        <p id="holdings-availability">현재 입력과 고정 비중 방법으로 Python이 계산한 선택 팩터 포트폴리오입니다.</p>
+        <p id="holdings-availability">선택 팩터 포트폴리오를 불러오는 중입니다.</p>
       </div>
       <div class="table-wrap">
         <table id="holdings-table">
@@ -571,23 +565,20 @@
     <section class="manual-update" aria-label="데이터 업데이트 운영 정보">
       <div>
         <p class="eyebrow">데이터 운영</p>
-        <h2>예약 갱신과 검토 후 수동 실행</h2>
+        <h2>데이터 갱신</h2>
         <p>
-          평일 미국장 종료 후 예약 실행하며 watchdog이 결과를 확인합니다. 필요할 때만 GitHub Actions에서 수동 실행할 수 있습니다.
+          평일 미국장 종료 후 예약 갱신하며, 필요할 때 GitHub Actions에서 수동 실행할 수 있습니다.
         </p>
         <p class="operation-timestamp">
           최근 실행 <strong id="latest-run-at">-</strong>
           <small id="latest-run-detail">-</small>
         </p>
-        <p class="manual-update-note">
-          공개 페이지에는 GitHub 토큰을 저장하지 않습니다. 실행 후 Actions 상태와 대시보드 기준일을 확인하세요.
-        </p>
       </div>
       <div class="manual-update-actions">
-        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions에서 최신 데이터 업데이트 실행</a>
+        <a id="manual-update-button" class="button primary" href="https://github.com/SonChangGi/momentum-factor-lab/actions/workflows/daily-dashboard.yml" target="_blank" rel="noopener">GitHub Actions 열기</a>
         <button id="copy-update-command" class="button secondary" type="button">CLI 실행 명령 복사</button>
         <code id="manual-update-command" class="code-pill">gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main</code>
-        <small id="manual-update-status" role="status" aria-live="polite">실행 후 변경사항이 있으면 새 JSON이 커밋되고 Pages가 갱신됩니다. Actions 상태와 대시보드 기준일을 확인하세요.</small>
+        <small id="manual-update-status" role="status" aria-live="polite">실행 결과와 공개 기준일을 확인하세요.</small>
       </div>
     </section>
 
@@ -623,10 +614,6 @@
           <p class="eyebrow">현실성 점검</p>
           <h2>데이터 품질 · 최종 편입 적격 · 매매 가능성 게이트</h2>
         </div>
-        <p>
-          현재 출력이 실제 매매 권고인지, 연구용 신호인지 판단하는 핵심 제한 조건을 한글로 풀어 표시합니다.
-          후보 종목, 가격 분석 가능 종목, 모든 필터를 통과한 최종 편입 적격 종목 수를 함께 확인하세요.
-        </p>
       </div>
       <div class="diagnostic-grid">
         <article class="diagnostic-card">
@@ -640,21 +627,17 @@
       </div>
     </section>
 
+    <div class="operations-note">
+      <p>연구 보조용이며 개인화된 투자 조언이 아닙니다.</p>
+      <span id="generated-at"></span>
+    </div>
+
       </div>
     </details>
-
-    <section class="disclaimer">
-      <h2>주의 및 한계</h2>
-      <p>
-        화면의 비교·날짜 탐색은 Python 결과를 다시 계산하지 않습니다. 이 페이지는 연구 보조용이며 개인화된 투자 조언이 아닙니다.
-        데이터 품질과 유니버스 한계는 위 상세 영역에서 확인할 수 있습니다.
-      </p>
-    </section>
   </main>
 
   <footer>
-    <span>모멘텀 팩터 랩에서 생성</span>
-    <span id="generated-at"></span>
+    <span>Quant Research · Momentum Factor Lab</span>
   </footer>
   <script src="assets/dashboard.js?v=__ASSET_VERSION__"></script>
   <nav class="page-jump-nav" aria-label="페이지 빠른 이동">

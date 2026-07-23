@@ -40,7 +40,7 @@ assert.deepEqual(missing, [], "literal selectors must resolve to live HTML hosts
 assert.match(html, /<form id="research-input-form"[^>]*novalidate>/);
 assert.match(html, /<details id="advanced-research-inputs"/);
 assert.match(html, /사용자 선택 팩터[\s\S]*선택 종목 비중/);
-assert.match(html, /동일 입력 Python 최고 팩터[\s\S]*최고 팩터 선택 종목 비중/);
+assert.match(html, /동일 입력 최고 팩터[\s\S]*최고 팩터 선택 종목 비중/);
 assert.doesNotMatch(html, /현재 canonical 목표|기간 수익률 1위/);
 assert.doesNotMatch(html, /그래프와 성과표는 현재 입력으로 Python이 계산한 원자료/);
 assert.match(js, /factorPortfolios\?\.\[factor\]/);

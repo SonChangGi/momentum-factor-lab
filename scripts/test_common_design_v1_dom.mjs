@@ -52,6 +52,14 @@ assert.match(html, /id="backtest-chart"[\s\S]*tabindex="0"/);
 assert.match(html, /id="analysis-settings" class="dashboard-disclosure/);
 assert.doesNotMatch(html, /id="analysis-settings"[^>]*\bopen\b/);
 assert.doesNotMatch(html, /자동 예약 실행(?:과 watchdog 예약)?은 현재 중지/);
+assert.match(html, /데이터 · 출처 · 운영 상세/);
+assert.doesNotMatch(html, /계열과 날짜를 탐색해도 공식 결과와 분석 입력은 바뀌지 않습니다/);
+assert.doesNotMatch(html, /비교 팩터만 바뀌며 Python 최고 팩터는 유지됩니다/);
+assert.doesNotMatch(html, /<section class="disclaimer">/);
+assert(
+  html.indexOf('class="operations-note"') > html.indexOf('class="supporting-detail-stack"'),
+  "the single research-use note belongs inside the closed operations detail",
+);
 
 assert.equal(api.nearestChartDate(["2026-07-17", "2026-07-20", "2026-07-21"], "2026-07-19"), "2026-07-20");
 assert.equal(api.nearestChartDate(["2026-07-17", "2026-07-20"], null), "2026-07-20");
@@ -78,5 +86,11 @@ assert.match(css, /\.chart-active-point/);
 assert.match(css, /min-height:\s*44px/);
 assert.match(css, /font-size:\s*max\(\.75rem,\s*12px\)/);
 assert.match(css, /@media \(max-width: 640px\)/);
+assert.match(css, /Quant Research common design v1\.2/);
+assert.match(css, /body\s*\{[\s\S]*?font-size:\s*15px;[\s\S]*?line-height:\s*1\.55;/);
+assert.match(css, /\.site-nav\s*\{[\s\S]*?min-height:\s*58px;/);
+assert.match(css, /\.site-nav-links a,[\s\S]*?font-size:\s*12px;[\s\S]*?font-weight:\s*650;/);
+assert.match(css, /\.result-cards\s*\{[\s\S]*?grid-auto-flow:\s*column;[\s\S]*?overflow-x:\s*auto;/);
+assert.match(css, /\.chart-series-controls\s*\{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow-x:\s*auto;/);
 
-console.log("PASS Quant Research common design v1 Momentum contract");
+console.log("PASS Quant Research common design v1.2 Momentum contract");
