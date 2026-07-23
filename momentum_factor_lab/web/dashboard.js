@@ -2743,12 +2743,12 @@ function renderSummary() {
   setText('#best-factor', officialFactor || '-');
   setText(
     '#best-factor-detail',
-    `${fixedPolicyLabel(payload, payload.weightingPolicy)} · 합성 점수 ${formatNumber(selectedRow?.selection_score)} / 100`,
+    `합성 점수 ${formatNumber(selectedRow?.selection_score)} / 100`,
   );
   setText('#selected-factor', comparisonFactor || '-');
   setText(
     '#selected-factor-detail',
-    `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(comparisonFull, 'cumulativeReturn'))} · Python 원자료`,
+    `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(comparisonFull, 'cumulativeReturn'))}`,
   );
   setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
   const providerSummary = payload.data?.mode === 'live_market' && payload.data?.synthetic === false
@@ -3151,7 +3151,7 @@ function renderHoldingsTable() {
   } = currentWeightedHoldings();
   setText(
     '#holdings-availability',
-    missingReason || `${scoreDate || '-'} 신호 · ${factor} × ${fixedPolicyLabel(state.payload || {}, weightingPolicyId)} · Top ${formatInteger(topN)} · 상한 ${formatPercent(maxWeight)} · 투자 ${formatPercent(investedTotal)} · 현금 ${formatPercent(cashTotal)}. 모든 값은 Python 결과입니다.`,
+    missingReason || `${scoreDate || '-'} 신호 · ${factor} × ${fixedPolicyLabel(state.payload || {}, weightingPolicyId)} · Top ${formatInteger(topN)} · 상한 ${formatPercent(maxWeight)} · 투자 ${formatPercent(investedTotal)} · 현금 ${formatPercent(cashTotal)}`,
   );
   const tbody = document.querySelector('#holdings-table tbody');
   tbody.replaceChildren();
@@ -3190,7 +3190,7 @@ function renderFactorReturnChart() {
   target.replaceChildren();
   setText(
     '#factor-chart-meta',
-    `현재 입력 · 고정 비중 방법 · 선택 ${factor || '-'} · Python 최고 ${bestFactor || '-'}`,
+    `선택 ${factor || '-'} · 최고 ${bestFactor || '-'}`,
   );
   if (!rows.length) {
     appendEmpty('#factor-return-chart', '현재 입력에서 비교 가능한 팩터 점수가 없습니다.');
@@ -3885,24 +3885,24 @@ function renderBacktestComparisonSummary(run, {
   const selectedMetrics = full?.factors?.[factor];
   const bestMetrics = full?.factors?.[best?.factor];
   const official = factor === state.payload?.bestFactor;
+  target.hidden = official;
+  if (official) return;
   appendComparisonSummaryItem(
     target,
-    official ? '사용자 선택 팩터 · Python 최고와 동일' : '사용자 선택 팩터',
+    '선택 팩터',
     factor || '-',
     `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(selectedMetrics, 'cumulativeReturn'))}`,
     'selected',
   );
-  if (!official) {
-    appendComparisonSummaryItem(
-      target,
-      '동일 입력 Python 최고 팩터',
-      best?.factor || '-',
-      best?.factor
-        ? `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(bestMetrics, 'cumulativeReturn'))} · 선택 점수 ${formatNumber(best.selectionScore)} / 100`
-        : 'Python 최고 팩터 자료 없음',
-      'best',
-    );
-  }
+  appendComparisonSummaryItem(
+    target,
+    '동일 입력 최고 팩터',
+    best?.factor || '-',
+    best?.factor
+      ? `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(bestMetrics, 'cumulativeReturn'))} · 선택 점수 ${formatNumber(best.selectionScore)} / 100`
+      : '최고 팩터 자료 없음',
+    'best',
+  );
 }
 
 function nearestChartDate(dates = [], requested = null) {
@@ -3962,14 +3962,14 @@ function renderBacktestChart() {
     {
       key: 'selected',
       factor,
-      label: best?.factor === factor ? `선택 · Python 최고 ${factor || '-'}` : `선택 ${factor || '-'}`,
+      label: best?.factor === factor ? `선택 · 최고 ${factor || '-'}` : `선택 ${factor || '-'}`,
       className: 'selected',
       model: selectedModel,
     },
     ...(best?.factor && best.factor !== factor ? [{
       key: 'best',
       factor: best.factor,
-      label: `Python 최고 ${best.factor}`,
+      label: `최고 ${best.factor}`,
       className: 'best',
       model: bestModel,
     }] : []),
@@ -4335,7 +4335,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
     wrap.setAttribute('aria-describedby', 'python-performance-metrics-note');
     const table = document.createElement('table');
     table.className = 'performance-table';
-    table.setAttribute('aria-label', `${period.label || period.key} 선택 팩터, Python 최고 팩터, SPY, QQQ 성과 비교`);
+    table.setAttribute('aria-label', `${period.label || period.key} 선택 팩터, 최고 팩터, SPY, QQQ 성과 비교`);
     const thead = document.createElement('thead');
     const header = document.createElement('tr');
     appendHeader(header, '지표');
@@ -4348,7 +4348,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
         : (series.symbol === 'QQQ' ? 'benchmark-qqq' : series.key);
       label.className = `series-name ${seriesClass}`;
       const role = document.createElement('strong');
-      role.textContent = series.symbol || (series.key === 'selected' ? '선택 팩터' : 'Python 최고 팩터');
+      role.textContent = series.symbol || (series.key === 'selected' ? '선택 팩터' : '최고 팩터');
       const identity = document.createElement('small');
       identity.textContent = series.factor || (series.label && series.label !== series.symbol ? series.label : '조정가격 보유');
       label.title = series.label || `${role.textContent} ${identity.textContent}`;
@@ -4903,10 +4903,10 @@ function renderSelectedFactorMethod() {
   const option = factorOptions(run).find((item) => item.factor === factor) || {};
   const method = parseSelectedFactorMethod(factor, option);
   setText('#selected-factor-method-title', factor || '-');
-  setText('#selected-factor-method-badge', `${method.category} · Python 팩터 정의`);
+  setText('#selected-factor-method-badge', `${method.category} · 팩터 정의`);
   setText(
     '#selected-factor-method-summary',
-    `${factor || '-'}: ${method.score} 이 팩터의 성과와 현재 포트폴리오는 현재 실행의 Python 계산 결과에서 읽습니다.`,
+    `${factor || '-'}: ${method.score}`,
   );
   const steps = document.querySelector('#selected-factor-method-steps');
   if (steps) {
@@ -4921,7 +4921,7 @@ function renderSelectedFactorMethod() {
   }
   setText(
     '#selected-factor-method-note',
-    `${method.caveat} 선택 팩터는 화면 비교 대상을 바꾸며, 입력 조건 제출은 Python 전체 분석과 최고 팩터를 다시 계산합니다.`,
+    method.caveat,
   );
 }
 
@@ -6008,7 +6008,7 @@ function renderFactorScoreComponents(payload, selected) {
   });
   setText(
     '#factor-selection-reason',
-    `${factorScoreMethodDescription(payload)} 현재 입력에서 가드레일을 통과한 팩터 중 상대 합성 점수가 가장 높은 ${payload.bestFactor || '-'}가 Python 최고 팩터입니다. 점수 ${formatNumber(selected?.selection_score)} / 100은 같은 실행 안의 상대값이며 미래 성공 확률이 아닙니다.`,
+    `${factorScoreMethodDescription(payload)} 가드레일을 통과한 팩터 중 상대 합성 점수가 가장 높은 ${payload.bestFactor || '-'}가 최고 팩터입니다. 점수 ${formatNumber(selected?.selection_score)} / 100은 같은 실행 안의 상대값입니다.`,
   );
 }
 
