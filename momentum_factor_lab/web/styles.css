@@ -772,9 +772,15 @@ footer {
 .core-research-settings { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .input-actions {
   display: flex;
-  align-items: end;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+.input-actions .analysis-mode-badge { margin-right: auto; }
+.research-input-form input[readonly] {
+  color: var(--muted-strong);
+  background: var(--surface);
+  cursor: default;
 }
 .primary-button,
 .secondary-button {
@@ -802,6 +808,33 @@ footer {
 }
 .input-status[data-tone="pending"] { border-color: color-mix(in srgb, var(--warn), var(--line) 62%); color: var(--warn); background: var(--warn-soft); }
 .input-status[data-tone="error"] { border-color: color-mix(in srgb, var(--danger), var(--line) 62%); color: var(--danger); background: var(--danger-soft); }
+.remote-control-connection {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 13px;
+  border: 1px solid var(--accent-soft-strong);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+.remote-control-connection[hidden] { display: none; }
+.analysis-mode-badge {
+  justify-self: start;
+  align-self: center;
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: var(--accent-strong);
+  background: var(--panel);
+  font-size: .72rem;
+  font-weight: 850;
+}
+.analysis-mode-badge[data-state="draft"],
+.analysis-mode-badge[data-state="invalid"] {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
 .local-api-note { margin: .7rem 0 0; color: var(--muted); font-size: .76rem; line-height: 1.5; }
 .local-api-note code { overflow-wrap: anywhere; }
 
@@ -877,6 +910,7 @@ details[class*=" advanced-"] .research-input-form { padding: 14px; }
 .research-input-details .result-identity { min-width: 210px; }
 .result-identity span[data-source="static_grid"] { color: var(--accent-strong); }
 .result-identity span[data-source="local_api"] { color: var(--violet); }
+.result-identity span[data-source="remote_api"] { color: var(--good); }
 .result-identity span[data-source="none"] { color: var(--danger); }
 .research-input-details .research-input-form { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
@@ -2456,4 +2490,5 @@ footer {
     border: 0;
   }
   .operations-note { align-items: flex-start; flex-direction: column; }
+  .remote-control-connection { grid-template-columns: 1fr; }
 }

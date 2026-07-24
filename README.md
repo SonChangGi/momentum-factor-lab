@@ -1,6 +1,6 @@
 # Momentum Factor Lab
 
-미국 개별주 2,700개 이상을 대상으로 64개 모멘텀 팩터를 같은 조건과 같은 고정 비중 방법으로 비교하는 연구 도구입니다. 계산의 canonical source는 Python이며, 정적 웹은 사전 계산된 결과를 선택하고 표시합니다. 공개 preset에 없는 입력은 사용자가 실행한 loopback Python API로 같은 엔진을 다시 실행합니다.
+미국 개별주 2,700개 이상을 대상으로 64개 모멘텀 팩터를 같은 조건과 같은 고정 비중 방법으로 비교하는 연구 도구입니다. 계산의 canonical source는 Python이며, 정적 웹은 사전 계산된 결과를 선택하고 표시합니다. 공개 preset에 없는 입력은 loopback Python API 또는 명시적으로 설정된 공통 control API가 같은 엔진으로 다시 실행합니다.
 
 이 프로젝트가 내놓는 비중은 마지막 실제 입력일 신호로 만든 **다음 세션 종가용 연구 목표**입니다. 실제 체결 또는 개인화된 투자 권고가 아닙니다.
 
@@ -157,6 +157,38 @@ cache hit은 canonical schema-v5 결과를 반환하고, 새 장기 실행은 `2
 각 정적 entry의 안정적인 `presetId`도 URL에 기록하므로 일일 갱신으로 content-addressed
 result key가 교체·정리된 뒤에도 같은 rolling preset과 공개 입력을 새 manifest에서 복원합니다.
 
+## 공통 원격 control API
+
+정적 grid와 loopback API는 그대로 유지합니다. 배포 시
+`quant-run-api-base` meta가 비어 있지 않은 경우에만 브라우저가 공통 control API를
+사용합니다.
+
+```text
+GET  /v1/projects/momentum/capabilities
+POST /v1/projects/momentum/runs
+GET  /v1/runs/<runId>
+GET  /v1/runs/<runId>/result
+```
+
+원격 요청은 `momentum/v1`의 26개 입력을 전부 보내며 부분 입력, 알 수 없는 입력,
+fallback을 거절합니다. API가 만든 `configHash`와 worker가 같은 RFC 8785 입력으로
+계산한 hash가 다르면 Python을 실행하지 않습니다.
+
+API 프로세스는 장기 분석을 직접 실행하지 않습니다.
+`.github/workflows/controlled-analysis.yml`이 기존 `ResearchInputs.apply()`와
+기존 Python 계산 경로를 사용하고, 공개 기본 alias를 덮어쓰지 않는 immutable
+artifact를 게시합니다. 브라우저는 run/schema/config/data/code/artifact identity와
+정확한 byte SHA-256을 모두 확인한 뒤에만 화면 결과를 바꿉니다. 대기·실패·취소·불일치
+상태에서는 기존 검증 결과를 계속 표시합니다.
+
+worker callback에는 다음 저장소 secret이 필요합니다.
+
+- `QUANT_CONTROL_API_BASE_URL`
+- `QUANT_CONTROL_WORKER_CALLBACK_TOKEN`
+
+세션 액세스 토큰은 브라우저 탭 메모리에서만 사용하며 Web Storage나 URL에 저장하지
+않습니다. meta가 비어 있으면 기존 정적 preset/loopback 동작만 사용합니다.
+
 ## 캐시와 result identity
 
 시장 수집 캐시와 분석 결과 캐시를 분리합니다.
@@ -228,7 +260,8 @@ uv run python -m momentum_factor_lab.cli run \
 uv run pytest -q
 uv run ruff check momentum_factor_lab tests scripts
 uv run python -m compileall -q momentum_factor_lab tests
-node scripts/test_web_contract.mjs
+MFL_TEST_PAYLOAD=docs/data/grid/v1/latest.json node scripts/test_web_contract.mjs
+node scripts/test_web_control_api_contract.mjs
 git diff --check
 ```
 
