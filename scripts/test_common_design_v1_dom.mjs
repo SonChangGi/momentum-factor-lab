@@ -49,10 +49,16 @@ for (const id of [
   assert.match(html, new RegExp(`id="${id}"`));
 }
 assert.match(html, /id="backtest-chart"[\s\S]*tabindex="0"/);
+assert.match(html, /id="backtest-chart"[\s\S]*aria-describedby="backtest-chart-help"/);
+assert.match(html, /id="backtest-chart"[\s\S]*aria-keyshortcuts="ArrowLeft ArrowRight Home End"/);
 assert.match(html, /id="analysis-settings" class="dashboard-disclosure/);
 assert.doesNotMatch(html, /id="analysis-settings"[^>]*\bopen\b/);
 assert.doesNotMatch(html, /자동 예약 실행(?:과 watchdog 예약)?은 현재 중지/);
 assert.match(html, /데이터 · 출처 · 운영 상세/);
+assert.doesNotMatch(html, /현재 입력에서 64개 모멘텀 팩터를 비교해/);
+assert.doesNotMatch(html, /현재 입력의 Python 팩터 랭킹/);
+assert.doesNotMatch(html, /핵심 조건과 고급 가드레일을 설정합니다/);
+assert.doesNotMatch(html, /같은 입력과 70\/30 고정 비중으로 비교한 전체 랭킹/);
 assert.doesNotMatch(html, /계열과 날짜를 탐색해도 공식 결과와 분석 입력은 바뀌지 않습니다/);
 assert.doesNotMatch(html, /비교 팩터만 바뀌며 Python 최고 팩터는 유지됩니다/);
 assert.doesNotMatch(html, /<section class="disclaimer">/);
@@ -78,7 +84,63 @@ assert.match(source, /event\.key === 'ArrowLeft'/);
 assert.match(source, /event\.key === 'ArrowRight'/);
 assert.match(source, /event\.key === 'Home'/);
 assert.match(source, /event\.key === 'End'/);
+assert.match(html, /id="input-evaluation-window-days"[^>]*readonly[^>]*aria-readonly="true"/);
+assert.match(html, /id="research-draft-status"[^>]*data-state="applied"/);
+assert.doesNotMatch(source, /input-evaluation-window-days'\)\.addEventListener\('change'/);
 assert.doesNotMatch(source, /function renderWithBusy/);
+
+const fakeSvg = {
+  createSVGPoint() {
+    return {
+      x: 0,
+      y: 0,
+      matrixTransform(matrix) {
+        return matrix.map(this.x, this.y);
+      },
+    };
+  },
+  getScreenCTM() {
+    return {
+      map(x, y) {
+        return { x: 240 + x * 0.82, y: 30 + y * 0.82 };
+      },
+      inverse() {
+        return {
+          map(x, y) {
+            return { x: (x - 240) / 0.82, y: (y - 30) / 0.82 };
+          },
+        };
+      },
+    };
+  },
+};
+for (const svgX of [70, 404, 738]) {
+  const client = api.svgPointToClient(fakeSvg, svgX, 110);
+  const restored = api.clientPointToSvg(fakeSvg, client.x, client.y);
+  assert.ok(Math.abs(restored.x - svgX) < 1e-9);
+}
+assert.equal(api.scrollLeftToReveal({
+  scrollLeft: 0,
+  clientWidth: 390,
+  scrollWidth: 720,
+  targetX: 70,
+}), 0);
+assert.equal(api.scrollLeftToReveal({
+  scrollLeft: 0,
+  clientWidth: 390,
+  scrollWidth: 720,
+  targetX: 690,
+}), 330);
+const pointerBase = {
+  plotLeft: 70,
+  plotWidth: 668,
+  count: 757,
+  hitLeft: 570,
+  hitRight: 1184,
+};
+assert.equal(api.chartIndexForPointer({ ...pointerBase, clientX: 572, svgX: 72 }), 0);
+assert.equal(api.chartIndexForPointer({ ...pointerBase, clientX: 877, svgX: 404 }), 378);
+assert.equal(api.chartIndexForPointer({ ...pointerBase, clientX: 1182, svgX: 736 }), 756);
 
 assert.match(css, /\.chart-series-button/);
 assert.match(css, /\.chart-date-guide/);

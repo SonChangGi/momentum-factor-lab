@@ -12,6 +12,23 @@ const RESEARCH_INPUTS_VERSION = 'research-inputs-v1';
 const ABSOLUTE_GUARDRAIL_VERSION = 'absolute-factor-v2';
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:8765';
 const LOCAL_API_POLL_INTERVAL_MS = 1000;
+const CONTROL_PROJECT_ID = 'momentum';
+const CONTROL_INPUT_SCHEMA_VERSION = 'momentum/v1';
+const CONTROL_CONFIG_HASH_ALGORITHM = 'momentum-research-inputs-rfc8785-v1';
+const CONTROL_ARTIFACT_CONTRACT_VERSION = 'momentum/schema-v5-control-result-v1';
+const CONTROL_API_POLL_INTERVAL_MS = 5000;
+// Four hours covers a 180-minute analysis plus queue, setup, publication,
+// Pages propagation, callback, and status-read latency.
+const CONTROL_API_MAX_POLLS = 2880;
+const CONTROL_RUN_STATUSES = Object.freeze([
+  'queued',
+  'dispatched',
+  'running',
+  'validating',
+  'published',
+  'failed',
+  'cancelled',
+]);
 const EXPECTED_INDEPENDENT_FACTOR_COUNT = 61;
 const EXPECTED_POLICY_COUNT = 1;
 const EXPECTED_ALIAS_FACTOR_COUNT = 3;
@@ -129,6 +146,10 @@ const RESEARCH_INPUT_PARITY = Object.freeze({
   selectionExtremeEventAction: 'selection_extreme_event_action',
   selectionExtremeEventPenaltyPoints: 'selection_extreme_event_penalty_points',
 });
+const CONTROL_INPUT_KEYS = Object.freeze([
+  ...Object.keys(RESEARCH_INPUT_PARITY).filter((key) => key !== 'evaluationWindowDays'),
+  'evaluationYears',
+].sort());
 
 const THEME_STORAGE_KEY = 'quant-research-theme';
 const LEGACY_THEME_STORAGE_KEYS = Object.freeze([
@@ -634,6 +655,9 @@ const state = {
   browserControlsBound: false,
   dashboardControlsBound: false,
   resultSource: null,
+  controlApiBase: null,
+  controlCapabilities: null,
+  pendingControlRun: null,
   backtestChart: {
     pinnedSeriesKey: null,
     previewSeriesKey: null,
@@ -894,6 +918,17 @@ function researchInputsFromNormalizedInputs(normalizedInputs) {
   result.evaluationYears = Number(normalizedInputs.evaluation_window_days) / 252;
   result.evaluationWindowDays = Number(normalizedInputs.evaluation_window_days);
   return result;
+}
+
+function controlRunInputsFromNormalizedInputs(normalizedInputs) {
+  const researchInputs = researchInputsFromNormalizedInputs(normalizedInputs);
+  delete researchInputs.version;
+  delete researchInputs.evaluationWindowDays;
+  requireCondition(
+    Object.keys(researchInputs).length === 26,
+    '원격 분석 요청은 정확히 26개 ResearchInputs여야 합니다.',
+  );
+  return researchInputs;
 }
 
 function localApiRequestFromStaticState(manifest, requestedInputs) {
@@ -1352,7 +1387,7 @@ function validateFactorHoldingHistorySidecarManifest(payload) {
 
 
 async function validateResult(entry, payload, summary = null, options = {}) {
-  const apiResult = options.source === 'local_api';
+  const apiResult = options.source === 'local_api' || options.source === 'remote_api';
   requireCondition(
     isRecord(payload) && payload.schemaVersion === RESULT_SCHEMA_VERSION,
     `detail schemaVersion ${RESULT_SCHEMA_VERSION}가 아닙니다.`,
@@ -1409,7 +1444,7 @@ async function validateResult(entry, payload, summary = null, options = {}) {
   requireCondition(
     sameJson(payload.resultIdentity, entry.identity),
     apiResult
-      ? 'detail resultIdentity가 로컬 API 응답 identity와 다릅니다.'
+      ? 'detail resultIdentity가 API 응답 identity와 다릅니다.'
       : 'detail resultIdentity가 manifest와 다릅니다.',
   );
   requireCondition(payload.resultKey === entry.resultKey, 'detail resultKey가 다릅니다.');
@@ -1447,7 +1482,7 @@ async function validateResult(entry, payload, summary = null, options = {}) {
   if (apiResult) {
     requireCondition(
       sameJson(payload.researchInputs, options.expectedResearchInputs),
-      '로컬 API 결과 researchInputs가 요청과 다릅니다.',
+      'API 결과 researchInputs가 요청과 다릅니다.',
     );
   }
 
@@ -3922,6 +3957,74 @@ function chartPointAtDate(points = [], date = null) {
   return points.find((point) => point.date === date) || null;
 }
 
+function clientPointToSvg(svg, clientX, clientY = 0) {
+  const point = svg?.createSVGPoint?.();
+  const ctm = svg?.getScreenCTM?.();
+  if (!point || !ctm || typeof ctm.inverse !== 'function') return null;
+  try {
+    point.x = Number(clientX);
+    point.y = Number(clientY);
+    const transformed = point.matrixTransform(ctm.inverse());
+    return finite(transformed?.x) && finite(transformed?.y)
+      ? { x: Number(transformed.x), y: Number(transformed.y) }
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function svgPointToClient(svg, svgX, svgY = 0) {
+  const point = svg?.createSVGPoint?.();
+  const ctm = svg?.getScreenCTM?.();
+  if (!point || !ctm) return null;
+  try {
+    point.x = Number(svgX);
+    point.y = Number(svgY);
+    const transformed = point.matrixTransform(ctm);
+    return finite(transformed?.x) && finite(transformed?.y)
+      ? { x: Number(transformed.x), y: Number(transformed.y) }
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function scrollLeftToReveal({
+  scrollLeft,
+  clientWidth,
+  scrollWidth,
+  targetX,
+  padding = 48,
+}) {
+  const current = Math.max(0, Number(scrollLeft) || 0);
+  const viewport = Math.max(0, Number(clientWidth) || 0);
+  const content = Math.max(viewport, Number(scrollWidth) || 0);
+  const target = Number(targetX);
+  if (!Number.isFinite(target) || target >= current + padding && target <= current + viewport - padding) {
+    return current;
+  }
+  return Math.max(0, Math.min(content - viewport, target - viewport / 2));
+}
+
+function chartIndexForPointer({
+  svgX,
+  plotLeft,
+  plotWidth,
+  count,
+  clientX,
+  hitLeft,
+  hitRight,
+}) {
+  const lastIndex = Math.max(0, Number(count) - 1);
+  if (!Number.isInteger(lastIndex) || lastIndex <= 0) return 0;
+  const hitWidth = Math.max(0, Number(hitRight) - Number(hitLeft));
+  const edgeTolerance = Math.min(12, hitWidth / 4);
+  if (Number(clientX) <= Number(hitLeft) + edgeTolerance) return 0;
+  if (Number(clientX) >= Number(hitRight) - edgeTolerance) return lastIndex;
+  const ratio = Math.max(0, Math.min(1, (Number(svgX) - Number(plotLeft)) / Math.max(Number(plotWidth), 1)));
+  return Math.round(ratio * lastIndex);
+}
+
 function formatChartReturn(value) {
   if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return '관측 없음';
   const percent = Number(value) * 100;
@@ -4162,6 +4265,7 @@ function renderBacktestChart() {
       chartState.previewDate = null;
       dateInput.value = chartState.pinnedDate;
       updatePresentation();
+      ensureActiveDateVisible(chartState.pinnedDate);
     };
     dateInput.onblur = () => {
       chartState.previewDate = null;
@@ -4176,6 +4280,7 @@ function renderBacktestChart() {
       chartState.previewDate = null;
       if (dateInput) dateInput.value = chartState.pinnedDate;
       updatePresentation();
+      ensureActiveDateVisible(chartState.pinnedDate);
       target.focus({ preventScroll: true });
     };
   }
@@ -4222,14 +4327,23 @@ function renderBacktestChart() {
     target.setAttribute('aria-label', `${activeDate} ${activeSeries.label} ${point ? formatChartReturn(point.normalized - 1) : '관측 없음'}`);
   }
 
-  const dateForClientX = (clientX) => {
-    const bounds = svg.getBoundingClientRect();
-    const viewX = (clientX - bounds.left) / Math.max(bounds.width, 1) * width;
-    const ratio = Math.max(0, Math.min(1, (viewX - plot.left) / plotWidth));
-    return allDates[Math.round(ratio * (allDates.length - 1))];
+  const dateForClientX = (clientX, clientY) => {
+    const hitBounds = hitTarget.getBoundingClientRect();
+    const point = clientPointToSvg(svg, clientX, clientY);
+    const viewX = point?.x ?? plot.left;
+    const index = chartIndexForPointer({
+      svgX: viewX,
+      plotLeft: plot.left,
+      plotWidth,
+      count: allDates.length,
+      clientX,
+      hitLeft: hitBounds.left,
+      hitRight: hitBounds.right,
+    });
+    return allDates[index];
   };
   hitTarget.addEventListener('pointermove', (event) => {
-    chartState.previewDate = dateForClientX(event.clientX);
+    chartState.previewDate = dateForClientX(event.clientX, event.clientY);
     updatePresentation();
   });
   hitTarget.addEventListener('pointerleave', () => {
@@ -4237,10 +4351,11 @@ function renderBacktestChart() {
     updatePresentation();
   });
   hitTarget.addEventListener('click', (event) => {
-    chartState.pinnedDate = dateForClientX(event.clientX);
+    chartState.pinnedDate = dateForClientX(event.clientX, event.clientY);
     chartState.previewDate = null;
     if (dateInput) dateInput.value = chartState.pinnedDate;
     updatePresentation();
+    ensureActiveDateVisible(chartState.pinnedDate);
     target.focus({ preventScroll: true });
   });
   target.onkeydown = (event) => {
@@ -4256,8 +4371,23 @@ function renderBacktestChart() {
     chartState.previewDate = null;
     if (dateInput) dateInput.value = chartState.pinnedDate;
     updatePresentation();
+    ensureActiveDateVisible(chartState.pinnedDate);
   };
+  function ensureActiveDateVisible(date) {
+    if (!date || target.scrollWidth <= target.clientWidth) return;
+    const screenPoint = svgPointToClient(svg, xForDate(date), height / 2);
+    if (!screenPoint) return;
+    const targetRect = target.getBoundingClientRect();
+    const contentX = target.scrollLeft + screenPoint.x - targetRect.left;
+    target.scrollLeft = scrollLeftToReveal({
+      scrollLeft: target.scrollLeft,
+      clientWidth: target.clientWidth,
+      scrollWidth: target.scrollWidth,
+      targetX: contentX,
+    });
+  }
   updatePresentation();
+  ensureActiveDateVisible(chartState.pinnedDate);
   renderPerformanceMetricsTable(performanceSeries);
 }
 
@@ -4286,11 +4416,8 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
   heading.className = 'performance-metrics-heading';
   const headingText = document.createElement('div');
   const title = document.createElement('h4');
-  title.textContent = '기간별 Python 성과 지표 비교';
-  const note = document.createElement('p');
-  note.id = 'python-performance-metrics-note';
-  note.textContent = '기간별 누적 수익률과 위험지표를 비교합니다.';
-  headingText.append(title, note);
+  title.textContent = '기간별 성과 지표';
+  headingText.append(title);
   heading.appendChild(headingText);
   target.appendChild(heading);
 
@@ -4331,8 +4458,7 @@ function renderPythonPerformanceMetricsTable(target, seriesList, periods) {
     wrap.className = 'performance-table-wrap';
     wrap.setAttribute('role', 'region');
     wrap.setAttribute('tabindex', '0');
-    wrap.setAttribute('aria-label', `${period.label || period.key} Python 성과 지표 표`);
-    wrap.setAttribute('aria-describedby', 'python-performance-metrics-note');
+    wrap.setAttribute('aria-label', `${period.label || period.key} 성과 지표 표`);
     const table = document.createElement('table');
     table.className = 'performance-table';
     table.setAttribute('aria-label', `${period.label || period.key} 선택 팩터, 최고 팩터, SPY, QQQ 성과 비교`);
@@ -5272,6 +5398,317 @@ async function resolveLocalApiResult(submission, token, options = {}) {
   throw new Error('다른 결과 로드가 시작되어 로컬 API 표시를 취소했습니다.');
 }
 
+function normalizeControlApiBase(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch (error) {
+    throw new Error('원격 API 주소가 올바른 URL이 아닙니다.');
+  }
+  requireCondition(!parsed.username && !parsed.password, '원격 API 주소에 인증정보를 넣을 수 없습니다.');
+  requireCondition(!parsed.search && !parsed.hash, '원격 API 주소에 쿼리나 fragment를 넣을 수 없습니다.');
+  const loopback = parsed.hostname === 'localhost'
+    || parsed.hostname === '127.0.0.1'
+    || parsed.hostname === '::1';
+  requireCondition(
+    parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback),
+    '원격 API는 HTTPS여야 합니다.',
+  );
+  return parsed.href.replace(/\/+$/, '');
+}
+
+function configuredControlApiBase() {
+  return normalizeControlApiBase(
+    document.querySelector?.('meta[name="quant-run-api-base"]')?.content || '',
+  );
+}
+
+function normalizeControlCapabilities(value) {
+  requireCondition(isRecord(value), '원격 API capabilities가 객체가 아닙니다.');
+  requireCondition(value.projectId === CONTROL_PROJECT_ID, '원격 API projectId가 다릅니다.');
+  requireCondition(
+    value.inputSchemaVersion === CONTROL_INPUT_SCHEMA_VERSION,
+    '원격 API 입력 schema version이 다릅니다.',
+  );
+  requireCondition(validSha256(value.inputSchemaHash), '원격 API 입력 schema hash가 잘못되었습니다.');
+  requireCondition(
+    value.configHashAlgorithm === CONTROL_CONFIG_HASH_ALGORITHM,
+    '원격 API config hash algorithm이 다릅니다.',
+  );
+  requireCondition(value.acceptsRuns === true, '원격 API가 새 분석 실행을 받지 않습니다.');
+  const inputKeys = Array.isArray(value.inputs) ? value.inputs.map((field) => field?.key) : [];
+  requireCondition(
+    inputKeys.length === 26
+      && new Set(inputKeys).size === 26
+      && sameJson([...inputKeys].sort(), CONTROL_INPUT_KEYS),
+    '원격 API가 26개 ResearchInputs 전체를 선언하지 않았습니다.',
+  );
+  return cloneJson(value);
+}
+
+function buildControlRunSubmission(normalizedInputs) {
+  return {
+    inputSchemaVersion: CONTROL_INPUT_SCHEMA_VERSION,
+    inputs: controlRunInputsFromNormalizedInputs(normalizedInputs),
+    allowFallback: false,
+  };
+}
+
+function normalizeControlRunEnvelope(value, expected, capabilities) {
+  requireCondition(isRecord(value), '원격 실행 응답이 객체가 아닙니다.');
+  requireCondition(value.projectId === CONTROL_PROJECT_ID, '원격 실행 projectId가 다릅니다.');
+  requireCondition(requiredText(value.runId), '원격 실행 runId가 없습니다.');
+  requireCondition(CONTROL_RUN_STATUSES.includes(value.status), '지원하지 않는 원격 실행 상태입니다.');
+  requireCondition(
+    value.inputSchemaVersion === capabilities.inputSchemaVersion,
+    '원격 실행 inputSchemaVersion이 다릅니다.',
+  );
+  requireCondition(
+    value.inputSchemaHash === capabilities.inputSchemaHash,
+    '원격 실행 inputSchemaHash가 다릅니다.',
+  );
+  requireCondition(
+    value.configHashAlgorithm === capabilities.configHashAlgorithm,
+    '원격 실행 configHashAlgorithm이 다릅니다.',
+  );
+  requireCondition(validSha256(value.configHash), '원격 실행 configHash가 잘못되었습니다.');
+  requireCondition(
+    validSha256(value.effectiveConfigHash)
+      && value.effectiveConfigHash === value.configHash,
+    'fallback 없는 원격 실행의 effectiveConfigHash가 다릅니다.',
+  );
+  requireCondition(value.allowFallback === false, '원격 실행이 허용하지 않은 fallback을 요청했습니다.');
+  requireCondition(
+    Array.isArray(value.ignoredInputs) && value.ignoredInputs.length === 0,
+    '원격 실행이 입력을 무시했습니다.',
+  );
+  requireCondition(
+    Array.isArray(value.fallbacks)
+      && value.fallbacks.length === 0
+      && value.fallbackUsed === false
+      && (value.fallbackReason === null || value.fallbackReason === undefined),
+    '원격 실행이 허용하지 않은 fallback을 사용했습니다.',
+  );
+  const expectedInputs = expected.inputs || expected.normalizedInputs;
+  requireCondition(isRecord(expectedInputs), '원격 실행의 기대 입력이 없습니다.');
+  ['requestedInputs', 'normalizedInputs', 'effectiveInputs'].forEach((field) => {
+    requireCondition(
+      isRecord(value[field]) && sameJson(value[field], expectedInputs),
+      `원격 실행 ${field}가 요청한 26개 입력과 다릅니다.`,
+    );
+  });
+  if (expected.runId) {
+    requireCondition(value.runId === expected.runId, '원격 실행 runId가 바뀌었습니다.');
+    ['configHash', 'effectiveConfigHash'].forEach((field) => requireCondition(
+      value[field] === expected[field],
+      `원격 실행 ${field}가 바뀌었습니다.`,
+    ));
+    const progress = ['queued', 'dispatched', 'running', 'validating', 'published'];
+    const previousIndex = progress.indexOf(expected.status);
+    const nextIndex = progress.indexOf(value.status);
+    const validTransition = (
+      (previousIndex >= 0 && nextIndex >= previousIndex)
+      || (previousIndex >= 0 && ['failed', 'cancelled'].includes(value.status))
+      || expected.status === value.status
+    );
+    requireCondition(validTransition, '원격 실행 상태가 이전 단계로 되돌아갔습니다.');
+  }
+  return cloneJson(value);
+}
+
+async function fetchControlApiJson(path, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const base = options.base || state.controlApiBase;
+  requireCondition(base, '원격 API가 설정되지 않았습니다.');
+  const url = new URL(path.replace(/^\//, ''), `${base}/`).href;
+  const headers = { Accept: 'application/json' };
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  Object.entries(options.headers || {}).forEach(([key, value]) => {
+    headers[key] = value;
+  });
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      cache: 'no-store',
+      method: options.method || 'GET',
+      headers,
+      ...(options.body === undefined ? {} : { body: canonicalString(options.body) }),
+    });
+  } catch (error) {
+    throw new Error(`원격 API에 연결할 수 없습니다: ${error.message}`);
+  }
+  let body;
+  try {
+    body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+      new Uint8Array(await response.arrayBuffer()),
+    ));
+  } catch (error) {
+    throw new Error(`원격 API 응답 JSON이 잘못되었습니다: ${error.message}`);
+  }
+  if (!response.ok) {
+    throw new Error(body?.error?.message || `원격 API HTTP ${response.status}`);
+  }
+  return { statusCode: response.status, body };
+}
+
+function controlRunStatusText(status) {
+  const labels = {
+    queued: '대기',
+    dispatched: '작업 전달',
+    running: '분석 중',
+    validating: '결과 검증 중',
+    published: '검증 완료',
+    failed: '실패',
+    cancelled: '취소',
+  };
+  return labels[status] || status;
+}
+
+function controlIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return `momentum-${globalThis.crypto.randomUUID()}`;
+  return `momentum-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function waitForControlPoll() {
+  return new Promise((resolve) => window.setTimeout(resolve, CONTROL_API_POLL_INTERVAL_MS));
+}
+
+async function resolveControlRun(submission, token, loadToken, options = {}) {
+  const capabilities = options.capabilities || state.controlCapabilities;
+  const fetchStatus = options.fetchStatus || ((runId) => (
+    fetchControlApiJson(`/v1/runs/${encodeURIComponent(runId)}`, { token })
+  ));
+  const fetchResult = options.fetchResult || ((runId) => (
+    fetchControlApiJson(`/v1/runs/${encodeURIComponent(runId)}/result`, { token })
+  ));
+  const wait = options.wait || waitForControlPoll;
+  const isCurrent = options.isCurrent || (() => loadToken === state.loadToken);
+  let current = normalizeControlRunEnvelope(submission, {
+    inputs: submission.requestedInputs,
+  }, capabilities);
+  for (let pollCount = 0; pollCount <= CONTROL_API_MAX_POLLS && isCurrent(); pollCount += 1) {
+    state.pendingControlRun = current;
+    setInputStatus(
+      `원격 Python 분석 ${controlRunStatusText(current.status)} · 현재 결과는 유지합니다.`,
+      current.status === 'failed' || current.status === 'cancelled' ? 'error' : 'pending',
+    );
+    if (current.status === 'published') {
+      const resultResponse = await fetchResult(current.runId);
+      return normalizeControlRunEnvelope(resultResponse.body, current, capabilities);
+    }
+    if (current.status === 'failed' || current.status === 'cancelled') {
+      throw new Error(
+        `원격 Python 분석 ${controlRunStatusText(current.status)}: `
+        + `${current.errorMessage || current.errorCode || '원인 미표기'}`,
+      );
+    }
+    if (pollCount === CONTROL_API_MAX_POLLS) {
+      throw new Error('원격 분석 상태 확인 시간이 초과되었습니다.');
+    }
+    await wait();
+    const statusResponse = await fetchStatus(current.runId);
+    current = normalizeControlRunEnvelope(statusResponse.body, current, capabilities);
+  }
+  throw new Error('다른 결과 로드가 시작되어 원격 분석 표시를 취소했습니다.');
+}
+
+async function fetchVerifiedControlArtifact(resultEnvelope, options = {}) {
+  const artifact = resultEnvelope.artifact;
+  requireCondition(
+    /^github:SonChangGi\/momentum-factor-lab@[0-9a-f]{40}$/.test(resultEnvelope.codeVersion || ''),
+    '원격 결과 codeVersion이 허용된 Momentum commit 형식이 아닙니다.',
+  );
+  requireCondition(requiredText(resultEnvelope.calculatedAt), '원격 결과 calculatedAt이 없습니다.');
+  requireCondition(
+    isRecord(artifact)
+      && typeof artifact.url === 'string'
+      && validSha256(artifact.sha256)
+      && nonnegativeInteger(artifact.byteSize)
+      && artifact.contractVersion === CONTROL_ARTIFACT_CONTRACT_VERSION,
+    '원격 결과 artifact identity가 잘못되었습니다.',
+  );
+  const resultKey = resultEnvelope.payload?.resultKey;
+  const runId = resultEnvelope.runId;
+  requireCondition(validSha256(resultKey), '원격 결과 요약 resultKey가 잘못되었습니다.');
+  requireCondition(
+    /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/.test(runId || ''),
+    '원격 결과 runId가 안전한 artifact 경로 형식이 아닙니다.',
+  );
+  const expectedArtifactUrl = (
+    `https://sonchanggi.github.io/momentum-factor-lab/data/control-runs/v1/`
+    + `${runId}/${resultKey}.json`
+  );
+  requireCondition(
+    artifact.url === expectedArtifactUrl,
+    '원격 결과 artifact URL이 동일 runId와 resultKey의 허용된 Pages 경로가 아닙니다.',
+  );
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const response = await fetchImpl(expectedArtifactUrl, {
+    cache: 'no-store',
+    credentials: 'omit',
+    referrerPolicy: 'no-referrer',
+    redirect: 'error',
+  });
+  requireCondition(response?.ok, `원격 결과 artifact HTTP ${response?.status ?? 'unknown'}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  requireCondition(bytes.byteLength === artifact.byteSize, '원격 결과 artifact byte 수가 다릅니다.');
+  requireCondition(await sha256Hex(bytes) === artifact.sha256, '원격 결과 artifact SHA-256이 다릅니다.');
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch (error) {
+    throw new Error(`원격 결과 artifact JSON이 잘못되었습니다: ${error.message}`);
+  }
+  const sourceHash = await sha256Hex(new TextEncoder().encode(
+    canonicalString(payload?.data?.inputSha256),
+  ));
+  requireCondition(
+    isRecord(resultEnvelope.dataIdentity)
+      && requiredText(resultEnvelope.dataIdentity.source)
+      && resultEnvelope.dataIdentity.dataAsOf === payload?.data?.asOf
+      && resultEnvelope.dataAsOf === payload?.data?.asOf
+      && resultEnvelope.dataIdentity.sourceHash === sourceHash,
+    '원격 결과 data identity가 artifact와 다릅니다.',
+  );
+  requireCondition(
+    resultEnvelope.calculatedAt === payload?.generatedAtUtc
+      && resultEnvelope.payload?.schemaVersion === payload?.schemaVersion
+      && resultEnvelope.payload?.resultKey === payload?.resultKey
+      && sameJson(resultEnvelope.payload?.researchInputs, payload?.researchInputs)
+      && sameJson(resultEnvelope.payload?.dataIdentity, resultEnvelope.dataIdentity),
+    '원격 결과 요약과 artifact binding이 다릅니다.',
+  );
+  return payload;
+}
+
+async function initializeControlApi(options = {}) {
+  const base = options.base === undefined ? configuredControlApiBase() : normalizeControlApiBase(options.base);
+  if (!base) return null;
+  state.controlApiBase = base;
+  const connection = document.querySelector('#remote-control-connection');
+  const localNote = document.querySelector('#local-api-note');
+  const mode = document.querySelector('#remote-control-mode');
+  if (connection) connection.hidden = false;
+  if (localNote) localNote.hidden = true;
+  try {
+    const response = await fetchControlApiJson(
+      `/v1/projects/${CONTROL_PROJECT_ID}/capabilities`,
+      { base, fetchImpl: options.fetchImpl },
+    );
+    state.controlCapabilities = normalizeControlCapabilities(response.body);
+    if (mode) mode.textContent = '원격 API 연결';
+    return state.controlCapabilities;
+  } catch (error) {
+    state.controlCapabilities = null;
+    if (mode) mode.textContent = '원격 API 오류';
+    setInputStatus(`원격 API를 사용할 수 없습니다. 현재 정적 결과를 유지합니다. ${error.message}`, 'error');
+    return null;
+  }
+}
+
 async function loadFactorHoldingHistorySidecar(
   payload,
   fetchImpl = globalThis.fetch,
@@ -5940,7 +6377,7 @@ function renderFactorRanking(payload) {
   );
   setText(
     '#joint-ranking-scope-note',
-    `팩터 점수는 현재 Python 입력과 하나의 고정 비중 방법을 사용합니다. 공통 표본에서 비교 가능한 독립 팩터 ${formatInteger(accounting.commonComparableFactorCount)}/${formatInteger(accounting.independentFactorCount)}개만 최고 팩터 후보가 되며, 제외 팩터와 호환 alias는 진단용입니다.`,
+    `최고 후보 ${formatInteger(accounting.commonComparableFactorCount)}/${formatInteger(accounting.independentFactorCount)}개 · 제외 팩터와 호환 alias는 진단용`,
   );
   const chartRows = rows.filter((row) => finite(row.selection_score)).slice(0, 12);
   const maxScore = Math.max(...chartRows.map((row) => Number(row.selection_score) || 0), 1);
@@ -5949,7 +6386,7 @@ function renderFactorRanking(payload) {
     const comparisonSelected = row.factor === comparisonFactor;
     appendFactorRankingBar(chart, {
       label: row.factor,
-      detail: `${row.selected === true ? 'Python 최고' : factorRankingStatusText(row)}${comparisonSelected ? ' · 비교 중' : ''} · 동일 표본 상대 합성 점수`,
+      detail: `${row.selected === true ? '최고 팩터' : factorRankingStatusText(row)}${comparisonSelected ? ' · 비교 중' : ''} · 동일 표본 상대 합성 점수`,
       width: Number(row.selection_score) / maxScore * 100,
       valueLabel: `${formatNumber(row.selection_score)} / 100`,
       className: factorSelectionStatusClass(row.selection_status),
@@ -6008,7 +6445,7 @@ function renderFactorScoreComponents(payload, selected) {
   });
   setText(
     '#factor-selection-reason',
-    `${factorScoreMethodDescription(payload)} 가드레일을 통과한 팩터 중 상대 합성 점수가 가장 높은 ${payload.bestFactor || '-'}가 최고 팩터입니다. 점수 ${formatNumber(selected?.selection_score)} / 100은 같은 실행 안의 상대값입니다.`,
+    `최고 팩터 ${payload.bestFactor || '-'} · 상대 합성 점수 ${formatNumber(selected?.selection_score)} / 100`,
   );
 }
 
@@ -6039,9 +6476,7 @@ function renderFactorGuardrails(payload, selected) {
     item.className = `gate-item ${passed ? 'pass' : 'block'}`;
     const title = document.createElement('strong');
     title.textContent = `${passed ? '통과' : '미통과'} · ${key.replace('guardrail_', '').replaceAll('_', ' ')}`;
-    const detail = document.createElement('small');
-    detail.textContent = passed ? 'Python 절대 가드레일 검증값' : '해당 조합의 위반 또는 제외 사유를 확인하세요.';
-    item.append(title, detail);
+    item.append(title);
     target.appendChild(item);
   });
   if (!statusFields.length) appendEmpty('#factor-guardrail-list', '가드레일 세부 상태가 없습니다.');
@@ -6256,6 +6691,14 @@ function fillResearchForm(entry, normalizedInputs = entry.normalizedInputs, rese
   }
 }
 
+function syncEvaluationWindowFromYears() {
+  const years = Number(document.querySelector('#input-evaluation-years')?.value);
+  const days = document.querySelector('#input-evaluation-window-days');
+  if (days && Number.isInteger(years) && years >= 1 && years <= 10) {
+    days.value = String(years * 252);
+  }
+}
+
 function readResearchFormRequest() {
   const selectedResultKey = document.querySelector('#run-select')?.value;
   const baseEntry = entryByResultKey(state.manifest, selectedResultKey)
@@ -6272,9 +6715,7 @@ function readResearchFormRequest() {
   if (!Number.isInteger(evaluationYears) || evaluationYears < 1 || evaluationYears > 10) {
     throw new Error('평가 기간(년)은 1–10 정수여야 합니다.');
   }
-  if (Number(requestedInputs.evaluation_window_days) !== evaluationYears * 252) {
-    throw new Error('평가 기간(년)과 거래일 창이 다릅니다.');
-  }
+  requestedInputs.evaluation_window_days = evaluationYears * 252;
   if (Number(requestedInputs.top_n) < 1 || Number(requestedInputs.top_n) > 50) {
     throw new Error('Top-N은 1–50 정수여야 합니다.');
   }
@@ -6304,8 +6745,46 @@ function setInputStatus(message, tone = 'ok') {
   status.dataset.tone = tone;
 }
 
+function renderResearchDraftState() {
+  const badge = document.querySelector('#research-draft-status');
+  const submit = document.querySelector('#analysis-submit-button');
+  if (!badge || !submit || !state.entry) return;
+  let request;
+  try {
+    request = readResearchFormRequest();
+  } catch (error) {
+    badge.dataset.state = 'invalid';
+    badge.textContent = '입력 확인 필요';
+    submit.disabled = true;
+    setInputStatus(`입력 확인 필요 · 현재 결과 유지 · ${error.message}`, 'error');
+    return;
+  }
+  const dirty = !sameJson(request.requestedInputs, state.entry.normalizedInputs);
+  badge.dataset.state = dirty ? 'draft' : 'applied';
+  badge.textContent = dirty ? '미적용 변경' : '현재 결과와 동일';
+  submit.disabled = !dirty;
+  if (!dirty) {
+    submit.textContent = '현재 결과';
+    setInputStatus('현재 결과에 적용된 입력과 동일합니다.', 'ok');
+    return;
+  }
+  if (request.entry) {
+    submit.textContent = '저장 결과 열기';
+    setInputStatus('미적용 변경 · 저장 결과를 열기 전까지 현재 결과를 유지합니다.', 'pending');
+    return;
+  }
+  submit.textContent = state.controlCapabilities ? '원격 API로 분석' : '로컬 API로 분석';
+  setInputStatus(
+    state.controlCapabilities
+      ? '미적용 변경 · 원격 API 실행 전까지 현재 결과를 유지합니다.'
+      : '미적용 변경 · 로컬 Python API 실행 필요 · 현재 결과를 유지합니다.',
+    'pending',
+  );
+}
+
 function resultSourceLabel(source) {
   if (source === 'local_api') return '로컬 API 계산 결과';
+  if (source === 'remote_api') return '원격 API 검증 결과';
   if (source === 'static_grid') return '검증된 정적 preset';
   return '결과 없음';
 }
@@ -6379,6 +6858,7 @@ function installValidatedPayload({
   bindFactorAnalysisControls();
   fillResearchForm(baseEntry, entry.normalizedInputs, payload.researchInputs);
   setResultSource(source, entry.resultKey);
+  renderResearchDraftState();
   renderAll();
   showResult();
 }
@@ -6470,7 +6950,125 @@ async function loadLocalApiResult(requestedInputs, baseEntry, options = {}) {
     );
   } catch (error) {
     if (token !== state.loadToken) return;
-    showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`, requestedInputs, baseEntry);
+    if (state.payload) {
+      fillResearchForm(baseEntry, requestedInputs);
+      renderResearchDraftState();
+      setInputStatus(`로컬 분석을 실행하지 못했습니다. 현재 검증 결과 유지 · ${error.message}`, 'error');
+    } else {
+      showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`, requestedInputs, baseEntry);
+    }
+    console.error(error);
+  }
+}
+
+async function loadRemoteControlResult(requestedInputs, baseEntry, options = {}) {
+  const capabilities = state.controlCapabilities;
+  if (!capabilities) {
+    setInputStatus('원격 API 연결이 확인되지 않아 현재 정적 결과를 유지합니다.', 'error');
+    return;
+  }
+  const tokenValue = String(document.querySelector('#remote-control-token')?.value || '').trim();
+  if (!tokenValue) {
+    setInputStatus('세션 액세스 토큰을 입력해야 원격 분석을 요청할 수 있습니다.', 'error');
+    return;
+  }
+  const loadToken = ++state.loadToken;
+  const request = buildControlRunSubmission(requestedInputs);
+  if (options.historyMode) {
+    updateLocation(options.historyMode, baseEntry.resultKey, requestedInputs);
+  }
+  setInputStatus('원격 Python 분석을 요청했습니다. 검증된 현재 결과는 계속 표시합니다.', 'pending');
+  try {
+    const submissionResponse = await fetchControlApiJson(
+      `/v1/projects/${CONTROL_PROJECT_ID}/runs`,
+      {
+        method: 'POST',
+        body: request,
+        token: tokenValue,
+        headers: { 'Idempotency-Key': controlIdempotencyKey() },
+      },
+    );
+    requireCondition(submissionResponse.statusCode === 202, '원격 API가 202 응답을 반환하지 않았습니다.');
+    const submitted = normalizeControlRunEnvelope(
+      submissionResponse.body,
+      { inputs: request.inputs },
+      capabilities,
+    );
+    const resultEnvelope = await resolveControlRun(
+      submitted,
+      tokenValue,
+      loadToken,
+      { capabilities },
+    );
+    if (loadToken !== state.loadToken) return;
+    const payload = await fetchVerifiedControlArtifact(resultEnvelope);
+    if (loadToken !== state.loadToken) return;
+    const identity = payload?.resultIdentity;
+    const normalizedResultInputs = identity?.keyParts?.normalizedInputs;
+    requireCondition(
+      isRecord(identity) && isRecord(normalizedResultInputs),
+      '원격 artifact result identity가 없습니다.',
+    );
+    requireCondition(
+      sameJson(
+        controlRunInputsFromNormalizedInputs(normalizedResultInputs),
+        resultEnvelope.effectiveInputs,
+      ),
+      '원격 artifact의 실제 ResearchInputs가 실행 결과 binding과 다릅니다.',
+    );
+    requireCondition(
+      sameJson(resultEnvelope.payload?.resultIdentity, identity),
+      '원격 결과 요약의 result identity가 artifact와 다릅니다.',
+    );
+    const entry = {
+      resultKey: payload.resultKey,
+      normalizedInputs: normalizedResultInputs,
+      identity,
+    };
+    await validateIdentityDigest(identity, 'remote API detail');
+    await validateResult(entry, payload, null, {
+      source: 'remote_api',
+      expectedResearchInputs: researchInputsFromNormalizedInputs(normalizedResultInputs),
+    });
+    await attachFactorHoldingHistorySidecar(payload, {
+      pageUrl: window.location.href,
+    });
+    if (loadToken !== state.loadToken) return;
+    let preservedDraft = null;
+    try {
+      const currentDraft = readResearchFormRequest().requestedInputs;
+      if (!sameJson(currentDraft, normalizedResultInputs)) preservedDraft = currentDraft;
+    } catch (error) {
+      preservedDraft = null;
+    }
+    installValidatedPayload({
+      entry,
+      baseEntry,
+      payload,
+      source: 'remote_api',
+    });
+    if (preservedDraft) fillResearchForm(baseEntry, preservedDraft);
+    renderResearchDraftState();
+    state.pendingControlRun = null;
+    updateLocation('replace', baseEntry.resultKey, normalizedResultInputs);
+    setInputStatus(
+      preservedDraft
+        ? `원격 Python 결과를 열었고, 실행 중 편집한 초안은 입력칸에 유지했습니다: ${payload.resultKey.slice(0, 12)}…`
+        : `원격 API의 새 Python 결과를 검증해 열었습니다: ${payload.resultKey.slice(0, 12)}…`,
+      preservedDraft ? 'pending' : 'ok',
+    );
+  } catch (error) {
+    if (loadToken !== state.loadToken) return;
+    state.pendingControlRun = {
+      ...(state.pendingControlRun || {}),
+      status: 'failed',
+      errorMessage: error.message,
+    };
+    fillResearchForm(baseEntry, requestedInputs);
+    setInputStatus(
+      `원격 분석 결과를 채택하지 않았습니다. 현재 결과를 유지합니다. ${error.message}`,
+      'error',
+    );
     console.error(error);
   }
 }
@@ -6488,21 +7086,11 @@ function bindBrowserContractControls() {
     fillResearchForm(entry);
     loadEntry(entry, { historyMode: 'push' });
   });
-  document.querySelector('#input-evaluation-years').addEventListener('change', (event) => {
-    if (finite(event.target.value)) {
-      document.querySelector('#input-evaluation-window-days').value = String(
-        Math.round(Number(event.target.value) * 252),
-      );
-    }
-  });
-  document.querySelector('#input-evaluation-window-days').addEventListener('change', (event) => {
-    if (finite(event.target.value)) {
-      document.querySelector('#input-evaluation-years').value = String(
-        Number(event.target.value) / 252,
-      );
-    }
-  });
+  document.querySelector('#input-evaluation-years').addEventListener('input', syncEvaluationWindowFromYears);
+  document.querySelector('#input-evaluation-years').addEventListener('change', syncEvaluationWindowFromYears);
   const researchForm = document.querySelector('#research-input-form');
+  researchForm.addEventListener('input', renderResearchDraftState);
+  researchForm.addEventListener('change', renderResearchDraftState);
   researchForm.addEventListener('invalid', (event) => {
     const details = event.target?.closest?.('details');
     if (details) details.open = true;
@@ -6519,11 +7107,24 @@ function bindBrowserContractControls() {
         state.manifest,
         request.requestedInputs,
       );
-      loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
-        historyMode: 'push',
-      });
+      if (state.controlApiBase) {
+        loadRemoteControlResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
+          historyMode: 'push',
+        });
+      } else {
+        loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
+          historyMode: 'push',
+        });
+      }
     } catch (error) {
-      showUnavailable(`${error.message} ${LOCAL_API_REQUIRED}`);
+      if (state.controlApiBase) {
+        setInputStatus(
+          `원격 분석을 요청하지 않았습니다. 현재 결과를 유지합니다. ${error.message}`,
+          'error',
+        );
+      } else {
+        setInputStatus(`분석을 요청하지 않았습니다. 현재 결과 유지 · ${error.message}`, 'error');
+      }
     }
   });
   document.querySelector('#reset-default-inputs').addEventListener('click', () => {
@@ -6563,6 +7164,15 @@ async function loadFromLocation(options = {}) {
   }
   if (!request.entry) {
     const apiRequest = localApiRequestFromStaticState(state.manifest, request.requestedInputs);
+    if (state.controlApiBase) {
+      await loadEntry(apiRequest.baseEntry, { historyMode: 'replace' });
+      fillResearchForm(apiRequest.baseEntry, apiRequest.requestedInputs);
+      setInputStatus(
+        'URL의 입력값을 초안으로 열었습니다. 원격 분석은 버튼을 눌러야 시작됩니다.',
+        'pending',
+      );
+      return;
+    }
     await loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
       historyMode: 'replace',
     });
@@ -6589,7 +7199,9 @@ async function loadBrowserDashboard() {
     populateResultOptions(state.manifest);
     bindBrowserContractControls();
     bindDashboardControls();
+    const controlApiInitialization = initializeControlApi();
     await loadFromLocation({ replaceHistory: !window.location.search });
+    await controlApiInitialization;
   } catch (error) {
     showUnavailable(`정적 grid를 사용할 수 없습니다: ${error.message}`);
     console.error(error);
@@ -6609,6 +7221,7 @@ if (typeof globalThis !== 'undefined') {
     requestFromSearch,
     searchForRequest,
     researchInputsFromNormalizedInputs,
+    controlRunInputsFromNormalizedInputs,
     localApiRequestFromStaticState,
     validateTargetAllocation,
     validateFactorHoldingHistorySidecarManifest,
@@ -6619,6 +7232,14 @@ if (typeof globalThis !== 'undefined') {
     fetchJson,
     fetchLocalApiJson,
     resolveLocalApiResult,
+    normalizeControlApiBase,
+    normalizeControlCapabilities,
+    buildControlRunSubmission,
+    normalizeControlRunEnvelope,
+    fetchControlApiJson,
+    resolveControlRun,
+    fetchVerifiedControlArtifact,
+    controlRunStatusText,
     loadStaticEntryData,
     attachFactorHoldingHistorySidecar,
     resultSourceLabel,
@@ -6636,6 +7257,10 @@ if (typeof globalThis !== 'undefined') {
     niceReturnTicks,
     nearestChartDate,
     chartPointAtDate,
+    clientPointToSvg,
+    svgPointToClient,
+    scrollLeftToReveal,
+    chartIndexForPointer,
     formatChartReturn,
     pythonPerformanceMetric,
     renderPythonPerformanceMetricsTable,

@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
+  <meta name="quant-run-api-base" content="" />
   <title>모멘텀 팩터 데일리 대시보드</title>
   <script>
     (() => {
@@ -29,7 +30,7 @@
     })();
   </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%233182f6'/%3E%3Cpath d='M14 43 27 29l9 8 14-18' fill='none' stroke='white' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="assets/styles.css?v=f37872f305c9" />
+  <link rel="stylesheet" href="assets/styles.css?v=2cfc232c6a3b" />
 </head>
 <body id="top">
   <a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
@@ -58,9 +59,6 @@
     <div class="hero-content">
       <p class="eyebrow">Quant Research · Momentum</p>
       <h1>모멘텀 팩터 랩</h1>
-      <p class="hero-copy">
-        현재 입력에서 64개 모멘텀 팩터를 비교해 최고 팩터와 포트폴리오를 보여줍니다.
-      </p>
       <div class="hero-actions">
         <a class="button hero-link" href="#visual-dashboard">핵심 성과 보기</a>
         <a class="button secondary hero-link" href="#analysis-settings">분석 조건</a>
@@ -138,6 +136,7 @@
           tabindex="0"
           aria-label="누적 성과 비교 차트"
           aria-describedby="backtest-chart-help"
+          aria-keyshortcuts="ArrowLeft ArrowRight Home End"
         ></div>
         <details class="inline-disclosure performance-disclosure">
           <summary>기간별 성과 지표 보기</summary>
@@ -148,14 +147,13 @@
       <details class="dashboard-disclosure auxiliary-viz-disclosure">
         <summary>
           <span>팩터 랭킹 · 종목 비중 차트</span>
-          <small>비교와 포트폴리오 구성 상세</small>
         </summary>
         <div class="viz-grid auxiliary-viz-grid">
           <article class="viz-card wide">
             <div class="viz-card-heading">
               <div>
                 <p class="eyebrow">팩터 선택 점수</p>
-                <h3>현재 입력의 Python 팩터 랭킹</h3>
+                <h3>현재 입력 팩터 랭킹</h3>
               </div>
               <span id="factor-chart-meta" class="chart-meta">-</span>
             </div>
@@ -212,9 +210,6 @@
             <div>
               <p class="eyebrow">분석 입력</p>
               <h2 id="research-input-title">상세 입력</h2>
-              <p>
-                핵심 조건과 고급 가드레일을 설정합니다.
-              </p>
             </div>
             <div class="result-identity" aria-live="polite">
               <span id="result-source">결과 없음</span>
@@ -259,7 +254,8 @@
               <summary>고급 입력 <small>데이터 품질·유동성·선택 가드레일</small></summary>
               <div class="advanced-research-input-grid">
                 <label>평가 창(거래일)
-                  <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="252" inputmode="numeric" />
+                  <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="252" inputmode="numeric" readonly aria-readonly="true" />
+                  <small>평가 기간(년)에서 자동 계산</small>
                 </label>
                 <label>최소 가격 이력(거래일)
                   <input id="input-min-history" name="min_history_days" type="number" min="21" step="1" inputmode="numeric" />
@@ -332,14 +328,27 @@
               </div>
             </details>
             <div class="input-actions">
-              <button class="primary-button" type="submit">이 조건으로 분석</button>
+              <span id="research-draft-status" class="analysis-mode-badge" data-state="applied">현재 결과와 동일</span>
+              <button id="analysis-submit-button" class="primary-button" type="submit">이 조건으로 분석</button>
               <button id="reset-default-inputs" class="secondary-button" type="button">공개 기본값으로 복원</button>
             </div>
           </form>
+          <div id="remote-control-connection" class="remote-control-connection" hidden>
+            <label for="remote-control-token">세션 액세스 토큰
+              <input
+                id="remote-control-token"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="이 탭에만 유지"
+              />
+            </label>
+            <span id="remote-control-mode" class="analysis-mode-badge">원격 API 확인 중</span>
+          </div>
           <div id="input-status" class="input-status" role="status" aria-live="polite">
             정적 grid manifest를 불러오는 중입니다.
           </div>
-          <details class="advanced-local-api-note">
+          <details id="local-api-note" class="advanced-local-api-note">
             <summary>임의 입력</summary>
             <p class="local-api-note">
               공개 preset에 없는 조건은 로컬 Python API가 필요합니다.
@@ -359,12 +368,9 @@
       <section class="panel factor-analysis-panel" id="factor-analysis" aria-labelledby="factor-analysis-title">
       <div class="panel-heading">
         <div>
-          <p class="eyebrow">동일 입력 Python 분석</p>
+          <p class="eyebrow">동일 입력 분석</p>
           <h2 id="factor-analysis-title">최고 팩터 선정과 고정 비중 방법</h2>
         </div>
-        <p>
-          같은 입력과 70/30 고정 비중으로 비교한 전체 랭킹입니다.
-        </p>
       </div>
 
       <div class="cards factor-summary-cards" aria-label="동일 입력 Python 결과 요약">
@@ -639,7 +645,7 @@
   <footer>
     <span>Quant Research · Momentum Factor Lab</span>
   </footer>
-  <script src="assets/dashboard.js?v=f37872f305c9"></script>
+  <script src="assets/dashboard.js?v=2cfc232c6a3b"></script>
   <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
     <a href="#top" aria-label="맨 위로 이동" title="맨 위로">↑</a>
     <a href="#page-bottom" aria-label="맨 아래로 이동" title="맨 아래로">↓</a>
