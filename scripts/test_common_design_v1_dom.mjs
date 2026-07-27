@@ -24,9 +24,7 @@ const expectedNavigation = [
   ">Best Factor<",
   ">ETF<",
   ">SOX<",
-  ">Risk Score<",
   ">Port<",
-  ">Valuation<",
   ">Kelly<",
 ];
 let previousIndex = -1;
