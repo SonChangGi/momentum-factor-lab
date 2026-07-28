@@ -404,7 +404,10 @@ def test_scheduled_dashboard_reads_run_site_and_title_config(
                     {"id": "default", "inputOverrides": {}, "marketSessionOffset": 0},
                     {
                         "id": "top30",
-                        "inputOverrides": {"topN": 30},
+                        "inputOverrides": {
+                            "evaluationWindowDays": 1_000,
+                            "topN": 30,
+                        },
                         "marketSessionOffset": 0,
                     },
                 ],
@@ -454,6 +457,10 @@ def test_scheduled_dashboard_reads_run_site_and_title_config(
     assert isinstance(presets, list)
     assert [preset.preset_id for preset in presets] == ["default", "top30"]
     assert [preset.research_inputs.top_n for preset in presets] == [20, 30]
+    assert [preset.research_inputs.evaluation_window_days for preset in presets] == [
+        756,
+        1_000,
+    ]
     output = json.loads(capsys.readouterr().out)
     assert output["scheduledDashboard"] == {
         "config": str(path),

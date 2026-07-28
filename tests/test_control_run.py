@@ -48,7 +48,7 @@ def _binding(inputs: dict[str, object], run_id: str = "momentum-run-0001") -> Co
 def test_complete_26_input_object_round_trips_to_run_config(tmp_path: Path) -> None:
     raw = _inputs(
         rebalanceFrequency="QE",
-        evaluationYears=4,
+        evaluationWindowDays=1_000,
         topN=25,
         maxWeight=0.09,
         transactionCostBps=6.0,
@@ -88,9 +88,9 @@ def test_complete_26_input_object_round_trips_to_run_config(tmp_path: Path) -> N
     assert len(normalized) == 26
     expected = {
         "rebalance_frequency": "QE",
-        "evaluation_window_days": 4 * 252,
-        "min_evaluation_observations": 3 * 252,
-        "min_daily_risk_observations": 3 * 252,
+        "evaluation_window_days": 1_000,
+        "min_evaluation_observations": 748,
+        "min_daily_risk_observations": 748,
         "top_n": 25,
         "max_weight": 0.09,
         "transaction_cost_bps": 6.0,
@@ -125,7 +125,7 @@ def test_complete_26_input_object_round_trips_to_run_config(tmp_path: Path) -> N
     # Cross-repository handshake with the common control API Momentum adapter.
     assert (
         CONTROL_INPUT_SCHEMA_HASH
-        == "b80cf941ee1b66dcc64c360bdbabaf0e5ed8026d0ec25fc132c0731f11871766"
+        == "a2240581098f496fc555edac9d4b0e342eee6221a87e046a47f51ee7f6a4e81e"
     )
     assert tuple(field["key"] for field in CONTROL_INPUT_SCHEMA["fields"]) == CONTROL_INPUT_KEYS
 
@@ -135,8 +135,8 @@ def test_complete_26_input_object_round_trips_to_run_config(tmp_path: Path) -> N
     [
         lambda value: value.pop("topN"),
         lambda value: value.update({"nearestPreset": True}),
-        lambda value: value.update({"evaluationWindowDays": 756}),
-        lambda value: value.update({"version": "research-inputs-v1"}),
+        lambda value: value.update({"evaluationYears": 3}),
+        lambda value: value.update({"version": "research-inputs-v2"}),
     ],
 )
 def test_partial_derived_and_unknown_control_inputs_fail_closed(mutate) -> None:
@@ -158,7 +158,7 @@ def test_a_b_inputs_produce_distinct_authoritative_hashes() -> None:
     ("public_field", "changed_value", "run_config_field"),
     [
         ("rebalanceFrequency", "W", "rebalance_frequency"),
-        ("evaluationYears", 4, "evaluation_window_days"),
+        ("evaluationWindowDays", 1_000, "evaluation_window_days"),
         ("topN", 25, "top_n"),
         ("maxWeight", 0.09, "max_weight"),
         ("transactionCostBps", 6.0, "transaction_cost_bps"),
@@ -243,7 +243,7 @@ def test_each_control_input_changes_its_existing_python_run_config_field(
     ("field", "value", "message"),
     [
         ("run_id", "../unsafe", "run id"),
-        ("input_schema_version", "momentum/v2", "schema mismatch"),
+        ("input_schema_version", "momentum/v1", "schema mismatch"),
         ("input_schema_hash", "a" * 64, "schema hash"),
         ("config_hash_algorithm", "json-stringify-v1", "algorithm"),
         ("config_hash", "a" * 64, "reproduce config hash"),

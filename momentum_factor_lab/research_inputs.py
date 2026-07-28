@@ -8,8 +8,11 @@ from .config import MAX_TOP_N, RunConfig
 from .identity import canonical_sha256
 
 
-RESEARCH_INPUTS_VERSION = "research-inputs-v1"
+RESEARCH_INPUTS_VERSION = "research-inputs-v2"
+LEGACY_RESEARCH_INPUTS_VERSION = "research-inputs-v1"
 TRADING_SESSIONS_PER_YEAR = 252
+MIN_EVALUATION_WINDOW_DAYS = 252
+MAX_EVALUATION_WINDOW_DAYS = 2_520
 
 
 class ResearchInputError(ValueError):
@@ -19,7 +22,7 @@ class ResearchInputError(ValueError):
 @dataclass(frozen=True, slots=True)
 class ResearchInputs:
     rebalance_frequency: str = "ME"
-    evaluation_years: int = 3
+    evaluation_window_days: int = 756
     top_n: int = 20
     max_weight: float = 0.10
     transaction_cost_bps: float = 5.0
@@ -46,10 +49,6 @@ class ResearchInputs:
     selection_extreme_event_penalty_points: float = 20.0
 
     @property
-    def evaluation_window_days(self) -> int:
-        return self.evaluation_years * TRADING_SESSIONS_PER_YEAR
-
-    @property
     def minimum_evaluation_observations(self) -> int:
         return max(
             TRADING_SESSIONS_PER_YEAR,
@@ -60,7 +59,6 @@ class ResearchInputs:
         return {
             "version": RESEARCH_INPUTS_VERSION,
             "rebalanceFrequency": self.rebalance_frequency,
-            "evaluationYears": self.evaluation_years,
             "evaluationWindowDays": self.evaluation_window_days,
             "topN": self.top_n,
             "maxWeight": self.max_weight,
@@ -141,13 +139,9 @@ class ResearchInputs:
 
     @classmethod
     def from_config(cls, config: RunConfig) -> ResearchInputs:
-        if config.evaluation_window_days % TRADING_SESSIONS_PER_YEAR:
-            raise ResearchInputError(
-                "evaluation_window_days cannot be represented as whole evaluationYears"
-            )
         return cls(
             rebalance_frequency=config.rebalance_frequency,
-            evaluation_years=config.evaluation_window_days // TRADING_SESSIONS_PER_YEAR,
+            evaluation_window_days=config.evaluation_window_days,
             top_n=config.top_n,
             max_weight=config.max_weight,
             transaction_cost_bps=config.transaction_cost_bps,
@@ -184,10 +178,13 @@ class ResearchInputs:
     def from_mapping(cls, value: Mapping[str, Any]) -> ResearchInputs:
         if not isinstance(value, Mapping):
             raise ResearchInputError("research inputs must be an object")
+        version = value.get("version", RESEARCH_INPUTS_VERSION)
+        if version not in {RESEARCH_INPUTS_VERSION, LEGACY_RESEARCH_INPUTS_VERSION}:
+            raise ResearchInputError("unsupported research-input version")
         aliases = {
             "version": None,
             "rebalanceFrequency": "rebalance_frequency",
-            "evaluationYears": "evaluation_years",
+            "evaluationWindowDays": "evaluation_window_days",
             "topN": "top_n",
             "maxWeight": "max_weight",
             "transactionCostBps": "transaction_cost_bps",
@@ -219,16 +216,29 @@ class ResearchInputs:
             "selectionExtremeEventAction": "selection_extreme_event_action",
             "selectionExtremeEventPenaltyPoints": "selection_extreme_event_penalty_points",
         }
+        if version == LEGACY_RESEARCH_INPUTS_VERSION:
+            aliases["evaluationYears"] = None
         unknown = sorted(set(value).difference(aliases))
         if unknown:
             raise ResearchInputError("unknown research inputs: " + ", ".join(unknown))
-        if "version" in value and value["version"] != RESEARCH_INPUTS_VERSION:
-            raise ResearchInputError("unsupported research-input version")
         kwargs = {
             target: value[source]
             for source, target in aliases.items()
             if target is not None and source in value
         }
+        if version == LEGACY_RESEARCH_INPUTS_VERSION:
+            evaluation_years = value.get("evaluationYears", 3)
+            if not isinstance(evaluation_years, int) or isinstance(evaluation_years, bool):
+                raise ResearchInputError("evaluationYears must be an integer")
+            if not 1 <= evaluation_years <= 10:
+                raise ResearchInputError("evaluationYears must be between 1 and 10")
+            legacy_window_days = evaluation_years * TRADING_SESSIONS_PER_YEAR
+            declared_window_days = value.get("evaluationWindowDays", legacy_window_days)
+            if declared_window_days != legacy_window_days:
+                raise ResearchInputError(
+                    "legacy evaluationWindowDays must equal evaluationYears times 252"
+                )
+            kwargs["evaluation_window_days"] = legacy_window_days
         try:
             inputs = cls(**kwargs)
         except TypeError as exc:
@@ -238,7 +248,7 @@ class ResearchInputs:
 
     def _validate(self) -> None:
         numeric_fields = {
-            "evaluationYears": self.evaluation_years,
+            "evaluationWindowDays": self.evaluation_window_days,
             "topN": self.top_n,
             "maxWeight": self.max_weight,
             "transactionCostBps": self.transaction_cost_bps,
@@ -278,10 +288,15 @@ class ResearchInputs:
                 raise ResearchInputError(f"{field} must be a finite number")
         if self.rebalance_frequency not in {"W", "ME", "QE"}:
             raise ResearchInputError("rebalanceFrequency must be W, ME, or QE")
-        if not isinstance(self.evaluation_years, int) or isinstance(self.evaluation_years, bool):
-            raise ResearchInputError("evaluationYears must be an integer")
-        if not 1 <= self.evaluation_years <= 10:
-            raise ResearchInputError("evaluationYears must be between 1 and 10")
+        if (
+            not isinstance(self.evaluation_window_days, int)
+            or isinstance(self.evaluation_window_days, bool)
+        ):
+            raise ResearchInputError("evaluationWindowDays must be an integer")
+        if not MIN_EVALUATION_WINDOW_DAYS <= self.evaluation_window_days <= MAX_EVALUATION_WINDOW_DAYS:
+            raise ResearchInputError(
+                "evaluationWindowDays must be between 252 and 2520"
+            )
         if (
             not isinstance(self.top_n, int)
             or isinstance(self.top_n, bool)

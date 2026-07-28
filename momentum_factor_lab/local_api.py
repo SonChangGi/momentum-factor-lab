@@ -346,18 +346,10 @@ def _parse_research_inputs(value: object) -> ResearchInputs:
     if not isinstance(value, Mapping):
         raise LocalAPIRequestError(400, "invalid_research_inputs", "request JSON must be an object")
     supplied = dict(value)
-    writable = dict(supplied)
-    declared_window = writable.pop("evaluationWindowDays", None)
     try:
-        inputs = ResearchInputs.from_mapping(writable)
+        inputs = ResearchInputs.from_mapping(supplied)
     except ResearchInputError as error:
         raise LocalAPIRequestError(400, "invalid_research_inputs", str(error)) from error
-    if declared_window != inputs.evaluation_window_days:
-        raise LocalAPIRequestError(
-            400,
-            "invalid_research_inputs",
-            "evaluationWindowDays must equal evaluationYears times 252",
-        )
     canonical = inputs.to_dict()
     if canonical_json_bytes(supplied) != canonical_json_bytes(canonical):
         raise LocalAPIRequestError(

@@ -648,7 +648,6 @@ def _scheduled_grid_presets(
         if not isinstance(overrides, dict):
             raise ValueError(f"static_grid_presets[{index}].inputOverrides must be an object")
         merged = base_inputs.to_dict()
-        merged.pop("evaluationWindowDays", None)
         merged.update(overrides)
         try:
             research_inputs = ResearchInputs.from_mapping(merged)

@@ -29,7 +29,7 @@ from .research_inputs import ResearchInputError, ResearchInputs
 
 
 CONTROL_PROJECT_ID = "momentum"
-CONTROL_INPUT_SCHEMA_VERSION = "momentum/v1"
+CONTROL_INPUT_SCHEMA_VERSION = "momentum/v2"
 CONTROL_CONFIG_HASH_ALGORITHM = "momentum-research-inputs-rfc8785-v1"
 CONTROL_ARTIFACT_CONTRACT_VERSION = "momentum/schema-v5-control-result-v1"
 CONTROL_ARTIFACT_DIRECTORY = PurePosixPath("data/control-runs/v1")
@@ -40,11 +40,11 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CODE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{7,199}$")
 
 # These are the 26 independent public values accepted by ResearchInputs. The
-# version marker and evaluationWindowDays are derived transport metadata and
-# therefore cannot be supplied as a second source of truth.
+# version marker is transport metadata and cannot be supplied as a second source
+# of truth.
 CONTROL_INPUT_KEYS = (
     "rebalanceFrequency",
-    "evaluationYears",
+    "evaluationWindowDays",
     "topN",
     "maxWeight",
     "transactionCostBps",
@@ -73,7 +73,13 @@ CONTROL_INPUT_KEYS = (
 
 CONTROL_INPUT_FIELDS = (
     {"key": "rebalanceFrequency", "type": "enum", "choices": ["W", "ME", "QE"]},
-    {"key": "evaluationYears", "type": "integer", "minimum": 1, "maximum": 10},
+    {
+        "key": "evaluationWindowDays",
+        "type": "integer",
+        "minimum": 252,
+        "maximum": 2_520,
+        "unit": "sessions",
+    },
     {"key": "topN", "type": "integer", "minimum": 1, "maximum": MAX_TOP_N},
     {
         "key": "maxWeight",
@@ -201,10 +207,9 @@ def _control_input_schema() -> dict[str, object]:
             "selectionMinEffectiveNames <= topN",
         ],
         "derivedFields": {
-            "evaluationWindowDays": "evaluationYears * 252",
             "minimumEvaluationObservations": "max(252, evaluationWindowDays - 252)",
         },
-        "authoritativeValidator": "ResearchInputs.from_mapping:research-inputs-v1",
+        "authoritativeValidator": "ResearchInputs.from_mapping:research-inputs-v2",
     }
 
 

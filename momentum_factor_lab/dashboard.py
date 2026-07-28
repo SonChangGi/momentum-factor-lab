@@ -34,7 +34,12 @@ from .identity import (
 )
 from .factors import factor_definitions_frame
 from .portfolio import TIE_BREAK_POLICY, capped_weight_values
-from .research_inputs import ResearchInputError, ResearchInputs
+from .research_inputs import (
+    LEGACY_RESEARCH_INPUTS_VERSION,
+    TRADING_SESSIONS_PER_YEAR,
+    ResearchInputError,
+    ResearchInputs,
+)
 from .workflow import (
     FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT,
     FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION,
@@ -494,8 +499,26 @@ def _reconstruct_run_config(payload: dict[str, Any]) -> RunConfig:
 def _validate_research_inputs(payload: dict[str, Any]) -> None:
     reconstructed = _reconstruct_run_config(payload)
     expected = ResearchInputs.from_config(reconstructed).to_dict()
-    if payload.get("researchInputs") != expected:
-        raise ValueError("dashboard researchInputs differ from the result-affecting config")
+    observed = payload.get("researchInputs")
+    if observed == expected:
+        return
+    evaluation_window_days = expected["evaluationWindowDays"]
+    if (
+        isinstance(observed, dict)
+        and observed.get("version") == LEGACY_RESEARCH_INPUTS_VERSION
+        and isinstance(evaluation_window_days, int)
+        and evaluation_window_days % TRADING_SESSIONS_PER_YEAR == 0
+    ):
+        legacy_expected = {
+            **expected,
+            "version": LEGACY_RESEARCH_INPUTS_VERSION,
+            "evaluationYears": (
+                evaluation_window_days // TRADING_SESSIONS_PER_YEAR
+            ),
+        }
+        if observed == legacy_expected:
+            return
+    raise ValueError("dashboard researchInputs differ from the result-affecting config")
 
 
 def _factor_sets(payload: dict[str, Any]) -> tuple[set[str], set[str]]:

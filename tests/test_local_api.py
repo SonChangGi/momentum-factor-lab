@@ -749,12 +749,39 @@ def test_failed_job_is_visible_and_is_never_written_to_cache(tmp_path: Path) -> 
     assert writes == []
 
 
+def test_post_accepts_nonannual_evaluation_window_as_canonical_v2_input(
+    tmp_path: Path,
+) -> None:
+    tasks = []
+
+    class ManualExecutor:
+        def submit(self, task):
+            tasks.append(task)
+
+        def shutdown(self):
+            return None
+
+    api, _ = _api(tmp_path, executor=ManualExecutor())
+
+    baseline = _post(api, ResearchInputs())
+    changed = _post(api, ResearchInputs(evaluation_window_days=1_000))
+
+    assert baseline.status_code == changed.status_code == 202
+    assert baseline.body["resultKey"] != changed.body["resultKey"]
+    assert len(tasks) == 2
+
+
 @pytest.mark.parametrize(
     "body",
     [
         {**ResearchInputs().to_dict(), "nearestPreset": True},
         {"version": "research-inputs-v1", "topN": 20},
-        {**ResearchInputs().to_dict(), "evaluationWindowDays": 999},
+        {
+            **ResearchInputs().to_dict(),
+            "version": "research-inputs-v1",
+            "evaluationYears": 3,
+        },
+        {**ResearchInputs().to_dict(), "evaluationWindowDays": 251},
         {**ResearchInputs().to_dict(), "topN": 0},
         {**ResearchInputs().to_dict(), "topN": MAX_TOP_N + 1},
     ],

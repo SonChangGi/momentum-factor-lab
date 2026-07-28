@@ -15,7 +15,7 @@ def test_public_inputs_round_trip_and_apply_to_run_config(tmp_path: Path) -> Non
         {
             "version": RESEARCH_INPUTS_VERSION,
             "rebalanceFrequency": "W",
-            "evaluationYears": 5,
+            "evaluationWindowDays": 1_000,
             "topN": 30,
             "maxWeight": 0.08,
             "transactionCostBps": 7.0,
@@ -33,14 +33,15 @@ def test_public_inputs_round_trip_and_apply_to_run_config(tmp_path: Path) -> Non
         )
     )
     assert config.rebalance_frequency == "W"
-    assert config.evaluation_window_days == 5 * 252
-    assert config.min_evaluation_observations == 4 * 252
-    assert config.min_daily_risk_observations == 4 * 252
+    assert config.evaluation_window_days == 1_000
+    assert config.min_evaluation_observations == 748
+    assert config.min_daily_risk_observations == 748
     assert config.top_n == 30
     assert config.selection_extreme_event_action == "exclude"
     assert config.selection_max_abs_security_day_contribution == pytest.approx(0.10)
     assert ResearchInputs.from_config(config) == inputs
-    assert inputs.to_dict()["evaluationWindowDays"] == 1_260
+    assert inputs.to_dict()["evaluationWindowDays"] == 1_000
+    assert "evaluationYears" not in inputs.to_dict()
     assert len(inputs.state_key) == 64
 
 
@@ -49,8 +50,11 @@ def test_public_inputs_round_trip_and_apply_to_run_config(tmp_path: Path) -> Non
     [
         {"nearestPreset": True},
         {"version": "research-inputs-v0"},
-        {"evaluationYears": 0},
-        {"evaluationYears": 2.5},
+        {"evaluationYears": 3},
+        {"evaluationWindowDays": 251},
+        {"evaluationWindowDays": 2_521},
+        {"evaluationWindowDays": 2.5},
+        {"evaluationWindowDays": True},
         {"topN": 0},
         {"topN": MAX_TOP_N + 1},
         {"maxWeight": 0.0},
@@ -68,12 +72,39 @@ def test_invalid_or_unknown_public_inputs_fail_closed(value: dict[str, object]) 
 
 def test_different_public_inputs_have_different_state_keys() -> None:
     baseline = ResearchInputs()
-    changed = ResearchInputs(top_n=25)
+    changed = ResearchInputs(evaluation_window_days=757)
     assert baseline.state_key != changed.state_key
 
 
+def test_explicit_legacy_v1_inputs_can_be_read_but_normalize_to_v2() -> None:
+    legacy = ResearchInputs.from_mapping(
+        {
+            "version": "research-inputs-v1",
+            "evaluationYears": 5,
+            "evaluationWindowDays": 1_260,
+            "topN": 25,
+        }
+    )
+
+    assert legacy.evaluation_window_days == 1_260
+    assert legacy.top_n == 25
+    assert legacy.to_dict()["version"] == RESEARCH_INPUTS_VERSION
+    assert "evaluationYears" not in legacy.to_dict()
+
+
+def test_legacy_v1_rejects_conflicting_year_and_day_values() -> None:
+    with pytest.raises(ResearchInputError, match="must equal"):
+        ResearchInputs.from_mapping(
+            {
+                "version": "research-inputs-v1",
+                "evaluationYears": 3,
+                "evaluationWindowDays": 1_000,
+            }
+        )
+
+
 _NUMERIC_PUBLIC_INPUTS = (
-    "evaluationYears",
+    "evaluationWindowDays",
     "topN",
     "maxWeight",
     "transactionCostBps",

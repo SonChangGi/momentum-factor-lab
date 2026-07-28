@@ -18,6 +18,10 @@ from momentum_factor_lab.dashboard import (
     validate_factor_holding_history_sidecar_bytes,
     write_dashboard_site,
 )
+from momentum_factor_lab.research_inputs import (
+    LEGACY_RESEARCH_INPUTS_VERSION,
+    TRADING_SESSIONS_PER_YEAR,
+)
 from momentum_factor_lab.identity import canonical_json_bytes
 from momentum_factor_lab.workflow import (
     MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES,
@@ -63,6 +67,20 @@ def test_dashboard_accepts_schema_v5_fixed_method_result(
         "policyDiagnostics",
     ):
         assert removed not in loaded
+
+
+def test_dashboard_accepts_complete_legacy_v1_research_inputs(
+    demo_result: AnalysisResult,
+) -> None:
+    payload = result_payload(demo_result)
+    window_days = payload["researchInputs"]["evaluationWindowDays"]
+    payload["researchInputs"] = {
+        **payload["researchInputs"],
+        "version": LEGACY_RESEARCH_INPUTS_VERSION,
+        "evaluationYears": window_days // TRADING_SESSIONS_PER_YEAR,
+    }
+
+    assert _load_payload(payload) is payload
 
 
 def test_dashboard_factor_accounting_is_complete_and_single_method(
