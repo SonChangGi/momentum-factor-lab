@@ -370,8 +370,10 @@ def test_dashboard_path_input_assets_and_size_limits(
     assert "Fixed Method Test" in index
     assert "__TITLE__" not in index
     assert "__ASSET_VERSION__" not in index
+    assert "__SHARED_NAV_VERSION__" not in index
     assert written["schemaVersion"] == 5
     assert Path(paths["css"]).read_bytes() == (WEB_ROOT / "styles.css").read_bytes()
+    assert Path(paths["sharedNav"]).read_bytes() == (WEB_ROOT / "shared-nav.css").read_bytes()
     assert Path(paths["js"]).read_bytes() == (WEB_ROOT / "dashboard.js").read_bytes()
     assert MAX_DASHBOARD_BYTES == 5_500_000
     assert Path(paths["data"]).stat().st_size < MAX_DASHBOARD_BYTES

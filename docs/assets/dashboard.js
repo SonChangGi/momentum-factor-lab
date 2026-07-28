@@ -153,10 +153,12 @@ const CONTROL_INPUT_KEYS = Object.freeze([
 
 const THEME_STORAGE_KEY = 'quant-research-theme';
 const LEGACY_THEME_STORAGE_KEYS = Object.freeze([
-  'momentum-factor-theme',
   'quant-dashboard-theme',
   'quant-calm-theme',
   'dram-price-theme',
+  'etf-tracking-theme',
+  'momentum-factor-theme',
+  'sox-theme',
 ]);
 
 /*

@@ -9,7 +9,14 @@
   <script>
     (() => {
       const canonicalKey = 'quant-research-theme';
-      const legacyKeys = ['momentum-factor-theme', 'quant-dashboard-theme', 'quant-calm-theme', 'dram-price-theme'];
+      const legacyKeys = [
+        'quant-dashboard-theme',
+        'quant-calm-theme',
+        'dram-price-theme',
+        'etf-tracking-theme',
+        'momentum-factor-theme',
+        'sox-theme',
+      ];
       const validTheme = (value) => value === 'light' || value === 'dark';
       let stored = null;
       try {
@@ -30,27 +37,29 @@
     })();
   </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%233182f6'/%3E%3Cpath d='M14 43 27 29l9 8 14-18' fill='none' stroke='white' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="assets/styles.css?v=357ee1e49b66" />
+  <link rel="stylesheet" href="assets/styles.css?v=d1593983d1be" />
+  <link rel="stylesheet" href="assets/shared-nav.css?v=7f197aa97c71" />
 </head>
-<body id="top">
+<body id="top" class="has-quant-shared-nav">
   <a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
-  <nav class="site-nav" aria-label="연결 프로젝트 바로가기">
-    <a class="site-nav-brand" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="Quant Research Hub로 이동">Quant Research Hub</a>
-    <div class="site-nav-links" aria-label="프로젝트 목록">
-      <a href="https://sonchanggi.github.io/quant-dashboard/">Hub</a>
-      <a href="https://sonchanggi.github.io/fearNgreed/">Fear &amp; Greed</a>
-      <a class="is-active" href="https://sonchanggi.github.io/momentum-factor-lab/" aria-current="page">Momentum</a>
-      <a href="https://sonchanggi.github.io/dram-price/">DRAM</a>
-      <a href="https://sonchanggi.github.io/best-factor/">Best Factor</a>
-      <a href="https://sonchanggi.github.io/etf-tracking/">ETF</a>
-      <a href="https://sonchanggi.github.io/sox/">SOX</a>
-      <a href="https://sonchanggi.github.io/port/">Port</a>
-      <a href="https://sonchanggi.github.io/kelly/">Kelly</a>
+  <nav class="site-nav quant-shared-nav" aria-label="연결 프로젝트 바로가기">
+    <div class="quant-shared-nav__inner">
+      <a class="quant-shared-nav__brand" href="https://sonchanggi.github.io/quant-dashboard/" aria-label="Quant Research Hub로 이동">Quant Research Hub</a>
+      <div class="site-nav-links quant-shared-nav__links" aria-label="프로젝트 목록">
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/fearNgreed/">Fear &amp; Greed</a>
+        <a class="quant-shared-nav__link is-active" href="https://sonchanggi.github.io/momentum-factor-lab/" aria-current="page">Momentum</a>
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/dram-price/">DRAM</a>
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/best-factor/">Best Factor</a>
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/etf-tracking/">ETF</a>
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/sox/">SOX</a>
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/port/">Port</a>
+        <a class="quant-shared-nav__link" href="https://sonchanggi.github.io/kelly/">Kelly</a>
+      </div>
+      <button id="theme-toggle" class="theme-toggle quant-shared-nav__theme" type="button" aria-pressed="false" aria-label="다크 모드로 전환">
+        <span class="theme-toggle-icon quant-shared-nav__theme-icon" aria-hidden="true"></span>
+        <span class="theme-toggle-text quant-shared-nav__theme-text">다크 모드</span>
+      </button>
     </div>
-    <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false" aria-label="다크 모드로 전환">
-      <span class="theme-toggle-icon" aria-hidden="true"></span>
-      <span class="theme-toggle-text">다크 모드</span>
-    </button>
   </nav>
 
   <header class="hero">
@@ -643,7 +652,7 @@
   <footer>
     <span>Quant Research · Momentum Factor Lab</span>
   </footer>
-  <script src="assets/dashboard.js?v=357ee1e49b66"></script>
+  <script src="assets/dashboard.js?v=d1593983d1be"></script>
   <nav class="page-jump-nav" aria-label="페이지 빠른 이동">
     <a href="#top" aria-label="맨 위로 이동" title="맨 위로">↑</a>
     <a href="#page-bottom" aria-label="맨 아래로 이동" title="맨 아래로">↓</a>

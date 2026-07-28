@@ -3536,19 +3536,27 @@ def write_dashboard_site(
     data_dir.mkdir(parents=True, exist_ok=True)
 
     css_bytes = (WEB_ROOT / "styles.css").read_bytes()
+    shared_nav_bytes = (WEB_ROOT / "shared-nav.css").read_bytes()
     js_bytes = (WEB_ROOT / "dashboard.js").read_bytes()
     asset_version = hashlib.sha256(css_bytes + js_bytes).hexdigest()[:12]
+    shared_nav_version = hashlib.sha256(shared_nav_bytes).hexdigest()[:12]
     index = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
-    index = index.replace("__TITLE__", title).replace("__ASSET_VERSION__", asset_version)
+    index = (
+        index.replace("__TITLE__", title)
+        .replace("__ASSET_VERSION__", asset_version)
+        .replace("__SHARED_NAV_VERSION__", shared_nav_version)
+    )
 
     index_path = site_dir / "index.html"
     css_path = assets_dir / "styles.css"
+    shared_nav_path = assets_dir / "shared-nav.css"
     js_path = assets_dir / "dashboard.js"
     data_path = data_dir / "dashboard.json"
     summary_path = data_dir / "summary.json"
     sidecar_path = site_dir / str(payload["factorHoldingHistorySidecar"]["path"])
     index_path.write_text(index, encoding="utf-8")
     shutil.copyfile(WEB_ROOT / "styles.css", css_path)
+    shutil.copyfile(WEB_ROOT / "shared-nav.css", shared_nav_path)
     shutil.copyfile(WEB_ROOT / "dashboard.js", js_path)
     data_path.write_bytes(encoded)
     sidecar_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3560,6 +3568,7 @@ def write_dashboard_site(
     return {
         "index": str(index_path),
         "css": str(css_path),
+        "sharedNav": str(shared_nav_path),
         "js": str(js_path),
         "data": str(data_path),
         "factorHoldingHistory": str(sidecar_path),

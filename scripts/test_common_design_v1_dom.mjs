@@ -4,6 +4,7 @@ import vm from "node:vm";
 
 const html = readFileSync("momentum_factor_lab/web/index.html", "utf8");
 const css = readFileSync("momentum_factor_lab/web/styles.css", "utf8");
+const sharedNav = readFileSync("momentum_factor_lab/web/shared-nav.css", "utf8");
 const source = readFileSync("momentum_factor_lab/web/dashboard.js", "utf8");
 const context = vm.createContext({ console, setTimeout, TextDecoder, TextEncoder, URL, URLSearchParams });
 vm.runInContext(source, context, { filename: "dashboard.js" });
@@ -13,26 +14,44 @@ assert(api, "web test API must be exported without a DOM");
 assert.equal(api.THEME_STORAGE_KEY, "quant-research-theme");
 assert.deepEqual(
   Array.from(api.LEGACY_THEME_STORAGE_KEYS),
-  ["momentum-factor-theme", "quant-dashboard-theme", "quant-calm-theme", "dram-price-theme"],
+  [
+    "quant-dashboard-theme",
+    "quant-calm-theme",
+    "dram-price-theme",
+    "etf-tracking-theme",
+    "momentum-factor-theme",
+    "sox-theme",
+  ],
 );
 
 const expectedNavigation = [
-  ">Hub<",
-  ">Fear &amp; Greed<",
-  ">Momentum<",
-  ">DRAM<",
-  ">Best Factor<",
-  ">ETF<",
-  ">SOX<",
-  ">Port<",
-  ">Kelly<",
+  ["Quant Research Hub", "https://sonchanggi.github.io/quant-dashboard/"],
+  ["Fear &amp; Greed", "https://sonchanggi.github.io/fearNgreed/"],
+  ["Momentum", "https://sonchanggi.github.io/momentum-factor-lab/"],
+  ["DRAM", "https://sonchanggi.github.io/dram-price/"],
+  ["Best Factor", "https://sonchanggi.github.io/best-factor/"],
+  ["ETF", "https://sonchanggi.github.io/etf-tracking/"],
+  ["SOX", "https://sonchanggi.github.io/sox/"],
+  ["Port", "https://sonchanggi.github.io/port/"],
+  ["Kelly", "https://sonchanggi.github.io/kelly/"],
 ];
 let previousIndex = -1;
-for (const label of expectedNavigation) {
-  const index = html.indexOf(label);
+for (const [label, href] of expectedNavigation) {
+  const index = html.indexOf(`href="${href}"`);
   assert(index > previousIndex, `${label} must follow the canonical project navigation order`);
   previousIndex = index;
 }
+const navigation = html.match(/<nav class="site-nav quant-shared-nav"[\s\S]*?<\/nav>/)?.[0] || "";
+assert.match(html, /<body id="top" class="has-quant-shared-nav">/);
+assert.match(html, /assets\/shared-nav\.css\?v=__SHARED_NAV_VERSION__/);
+assert.equal((navigation.match(/href="https:\/\/sonchanggi\.github\.io\//g) || []).length, 9);
+assert.equal((navigation.match(/aria-current="page"/g) || []).length, 1);
+assert.match(navigation, /quant-shared-nav__brand[^>]*href="https:\/\/sonchanggi\.github\.io\/quant-dashboard\/"/);
+assert.doesNotMatch(navigation, />Hub<\/a>/);
+assert.match(sharedNav, /position:\s*fixed\s*!important/);
+assert.match(sharedNav, /--quant-shared-nav-height:\s*59px/);
+assert.match(sharedNav, /--quant-shared-nav-height:\s*101px/);
+assert.match(sharedNav, /grid-template-rows:\s*50px 44px/);
 
 for (const id of [
   "backtest-series-controls",
