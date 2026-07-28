@@ -38,4 +38,18 @@ assert.equal(request.entry, null);
 assert.equal(request.baseEntry.resultKey, identity.resultKey);
 assert.equal(request.requestedInputs.top_n, changed.top_n);
 
+const explicitDays = structuredClone(entry.normalizedInputs);
+explicitDays.evaluation_window_days = 755;
+const explicitDaysSearch = api.searchForRequest(entry.resultKey, explicitDays, entry.presetId);
+assert.match(explicitDaysSearch, /evaluation_window_days=755/);
+assert.doesNotMatch(explicitDaysSearch, /evaluationYears/);
+
+const legacyYears = entry.normalizedInputs.evaluation_window_days / 252;
+assert.equal(Number.isInteger(legacyYears), true);
+const legacyRequest = api.requestFromSearch(
+  manifest,
+  `?result=${entry.resultKey}&evaluationYears=${legacyYears}`,
+);
+assert.equal(legacyRequest.requestedInputs.evaluation_window_days, legacyYears * 252);
+
 console.log("PASS exact static preset resolution and arbitrary-input handoff");

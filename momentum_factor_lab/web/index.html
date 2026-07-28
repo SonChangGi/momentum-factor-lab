@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
-  <meta name="quant-run-api-base" content="" />
+  <meta name="quant-run-api-base" content="https://quant-control-api.onrender.com" />
   <title>__TITLE__</title>
   <script>
     (() => {
@@ -232,8 +232,8 @@
                   <option value="QE">분기말(QE)</option>
                 </select>
               </label>
-              <label>평가 기간(년)
-                <input id="input-evaluation-years" type="number" min="1" max="10" step="1" inputmode="numeric" />
+              <label>평가 기간(거래일)
+                <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="1" inputmode="numeric" />
               </label>
               <label>Top-N
                 <input id="input-top-n" name="top_n" type="number" min="1" max="50" step="1" inputmode="numeric" />
@@ -260,10 +260,6 @@
             <details id="advanced-research-inputs" class="advanced-research-inputs">
               <summary>고급 입력 <small>데이터 품질·유동성·선택 가드레일</small></summary>
               <div class="advanced-research-input-grid">
-                <label>평가 창(거래일)
-                  <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="252" inputmode="numeric" readonly aria-readonly="true" />
-                  <small>평가 기간(년)에서 자동 계산</small>
-                </label>
                 <label>최소 가격 이력(거래일)
                   <input id="input-min-history" name="min_history_days" type="number" min="21" step="1" inputmode="numeric" />
                 </label>

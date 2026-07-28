@@ -83,10 +83,10 @@ uv run python -m momentum_factor_lab.cli run \
 
 ## 연구 입력
 
-웹과 로컬 API가 공유하는 `ResearchInputs` v1은 다음을 포함합니다.
+웹과 Python 실행 경로가 공유하는 `ResearchInputs` v2는 다음을 포함합니다.
 
 - 리밸런싱 주기
-- 최근 평가 연수와 대응 거래일 창
+- 평가 창(거래일, 252–2,520일)
 - Top-N, 최대 종목 비중
 - 거래비용, 슬리피지
 - 최소 가격·히스토리·평균 거래대금·평균 거래량
@@ -97,7 +97,7 @@ uv run python -m momentum_factor_lab.cli run \
 - 최대 종목·단일 세션 기여도, 최대 종목 절대기여 점유율, 최대 leave-one CAGR 변화
 - 극단사건 `warn`/`penalize`/`exclude` 조치와 최대 감점
 
-절대 선택 가드레일은 `ResearchInputs` v1의 canonical per-request 필드입니다. Python 실행의 `--selection-*` 기본값과 동일하며, 웹/API 요청이 값을 바꾸면 정규화 입력·selection hash·result key가 함께 바뀌고 전체 grid를 새로 계산합니다.
+절대 선택 가드레일은 `ResearchInputs` v2의 canonical per-request 필드입니다. Python 실행의 `--selection-*` 기본값과 동일하며, 웹/API 요청이 값을 바꾸면 정규화 입력·selection hash·result key가 함께 바뀌고 전체 grid를 새로 계산합니다.
 
 입력이 바뀌면 전체 팩터 랭킹, 최고 팩터, 각 팩터의 성과와 포트폴리오, turnover, 비용, 종목·점수·비중·현금이 Python에서 다시 계산됩니다. 화면의 ‘사용자 선택 팩터’ 변경은 이미 계산된 같은 실행 안에서 비교 대상을 바꾸며, Python 최고 팩터를 덮어쓰지 않습니다.
 
@@ -111,7 +111,7 @@ docs/data/grid/v1/results/<resultKey>.json
 docs/data/grid/v1/summaries/<resultKey>.json
 ```
 
-브라우저는 manifest에서 전체 입력 tuple이 정확히 같은 entry만 정적 결과로 엽니다. 부분 일치나 최근접 preset은 없습니다. 미지원 입력은 기본 `127.0.0.1:8765` loopback Python API에 canonical `ResearchInputs`를 POST하고 완료 상태를 polling한 뒤, actual-market 2,700+·61개 독립 팩터 회계·고정 비중 방법·identity를 다시 검증해 같은 화면에 로컬 API 결과로 구분 표시합니다. API가 실행 중이지 않거나 계약 검증에 실패하면 이전 결과를 숨기고 fail-closed 오류를 표시합니다.
+브라우저는 manifest에서 전체 입력 tuple이 정확히 같은 entry만 정적 결과로 엽니다. 부분 일치나 최근접 preset은 없습니다. 공개 Pages의 미지원 입력은 배포된 공통 control API가 GitHub Actions/Python worker에 전달합니다. loopback 또는 파일 기반 로컬 미리보기에서는 `127.0.0.1:8765` 로컬 API를 사용합니다. 두 경로 모두 actual-market 2,700+·61개 독립 팩터 회계·고정 비중 방법·identity를 다시 검증한 뒤에만 화면을 바꾸며, 실행이나 계약 검증이 실패하면 현재 검증 결과를 유지합니다.
 
 여러 사전 계산 결과를 하나의 bounded grid로 만들 수 있습니다.
 
@@ -153,15 +153,15 @@ cache hit은 canonical schema-v5 결과를 반환하고, 새 장기 실행은 `2
 허용합니다. 다른 검토된 HTTPS origin은 반복 가능한 `--allowed-origin`으로 명시하며,
 그 밖의 Origin은 preflight와 본 요청 모두 시장 로드 전에 403으로 차단됩니다.
 
-정적 viewer에서 임의 입력을 실행하려면 위 loopback API를 먼저 시작합니다. API 결과 URL은 manifest에 없는 동적 result key를 정적 preset처럼 가장하지 않습니다. URL의 base result는 최신 default preset으로 유지하고 공개 입력 전체를 기록하므로, 새로고침·공유 시 같은 최신 조건을 API에서 다시 실행합니다.
+로컬 정적 viewer에서 임의 입력을 실행하려면 위 loopback API를 먼저 시작합니다. 공개 Pages는 loopback을 호출하지 않습니다. API 결과 URL은 manifest에 없는 동적 result key를 정적 preset처럼 가장하지 않습니다. URL의 base result는 최신 default preset으로 유지하고 공개 입력 전체를 기록하므로, 새로고침·공유 시 같은 최신 조건을 다시 실행할 수 있습니다.
 각 정적 entry의 안정적인 `presetId`도 URL에 기록하므로 일일 갱신으로 content-addressed
 result key가 교체·정리된 뒤에도 같은 rolling preset과 공개 입력을 새 manifest에서 복원합니다.
 
 ## 공통 원격 control API
 
-정적 grid와 loopback API는 그대로 유지합니다. 배포 시
-`quant-run-api-base` meta가 비어 있지 않은 경우에만 브라우저가 공통 control API를
-사용합니다.
+정적 grid와 loopback API는 그대로 유지합니다. 공개 Pages는
+`https://quant-control-api.onrender.com`을 `quant-run-api-base`로 사용하고,
+로컬 미리보기는 loopback API를 우선합니다.
 
 ```text
 GET  /v1/projects/momentum/capabilities
@@ -170,7 +170,8 @@ GET  /v1/runs/<runId>
 GET  /v1/runs/<runId>/result
 ```
 
-원격 요청은 `momentum/v1`의 26개 입력을 전부 보내며 부분 입력, 알 수 없는 입력,
+원격 요청은 `momentum/v2`의 26개 입력을 전부 보내며 평가 창은
+`evaluationWindowDays` 정수로 전달합니다. 부분 입력, 알 수 없는 입력,
 fallback을 거절합니다. API가 만든 `configHash`와 worker가 같은 RFC 8785 입력으로
 계산한 hash가 다르면 Python을 실행하지 않습니다.
 

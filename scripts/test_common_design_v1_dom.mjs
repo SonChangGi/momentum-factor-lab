@@ -101,9 +101,14 @@ assert.match(source, /event\.key === 'ArrowLeft'/);
 assert.match(source, /event\.key === 'ArrowRight'/);
 assert.match(source, /event\.key === 'Home'/);
 assert.match(source, /event\.key === 'End'/);
-assert.match(html, /id="input-evaluation-window-days"[^>]*readonly[^>]*aria-readonly="true"/);
+assert.match(
+  html,
+  /평가 기간\(거래일\)[\s\S]*id="input-evaluation-window-days"[^>]*min="252"[^>]*max="2520"[^>]*step="1"/,
+);
+assert.doesNotMatch(html, /id="input-evaluation-years"/);
+assert.doesNotMatch(html, /id="input-evaluation-window-days"[^>]*(?:readonly|aria-readonly)/);
 assert.match(html, /id="research-draft-status"[^>]*data-state="applied"/);
-assert.doesNotMatch(source, /input-evaluation-window-days'\)\.addEventListener\('change'/);
+assert.doesNotMatch(source, /syncEvaluationWindowFromYears/);
 assert.doesNotMatch(source, /function renderWithBusy/);
 
 const fakeSvg = {

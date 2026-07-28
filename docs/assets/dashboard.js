@@ -8,12 +8,13 @@ const MANIFEST_GRID_VERSION = 'v1';
 const RESULT_SCHEMA_VERSION = 5;
 const RESULT_IDENTITY_VERSION = 'momentum-result-identity-v1';
 const CANONICAL_JSON_VERSION = 'rfc8785-jcs-v1';
-const RESEARCH_INPUTS_VERSION = 'research-inputs-v1';
+const RESEARCH_INPUTS_VERSION = 'research-inputs-v2';
+const LEGACY_RESEARCH_INPUTS_VERSION = 'research-inputs-v1';
 const ABSOLUTE_GUARDRAIL_VERSION = 'absolute-factor-v2';
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:8765';
 const LOCAL_API_POLL_INTERVAL_MS = 1000;
 const CONTROL_PROJECT_ID = 'momentum';
-const CONTROL_INPUT_SCHEMA_VERSION = 'momentum/v1';
+const CONTROL_INPUT_SCHEMA_VERSION = 'momentum/v2';
 const CONTROL_CONFIG_HASH_ALGORITHM = 'momentum-research-inputs-rfc8785-v1';
 const CONTROL_ARTIFACT_CONTRACT_VERSION = 'momentum/schema-v5-control-result-v1';
 const CONTROL_API_POLL_INTERVAL_MS = 5000;
@@ -86,7 +87,7 @@ const LIVE_INPUT_HASH_FIELDS = Object.freeze([
 const PRESET_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LOCAL_API_REQUIRED = [
   '이 입력 조합은 정적 grid에 사전 계산되지 않았습니다.',
-  '임의 조건은 127.0.0.1:8765 loopback Python API로 새로 분석해야 합니다.',
+  '새 결과는 연결된 Python API에서 계산해야 합니다.',
 ].join(' ');
 
 const INPUT_FIELDS = Object.freeze([
@@ -146,10 +147,7 @@ const RESEARCH_INPUT_PARITY = Object.freeze({
   selectionExtremeEventAction: 'selection_extreme_event_action',
   selectionExtremeEventPenaltyPoints: 'selection_extreme_event_penalty_points',
 });
-const CONTROL_INPUT_KEYS = Object.freeze([
-  ...Object.keys(RESEARCH_INPUT_PARITY).filter((key) => key !== 'evaluationWindowDays'),
-  'evaluationYears',
-].sort());
+const CONTROL_INPUT_KEYS = Object.freeze(Object.keys(RESEARCH_INPUT_PARITY).sort());
 
 const THEME_STORAGE_KEY = 'quant-research-theme';
 const LEGACY_THEME_STORAGE_KEYS = Object.freeze([
@@ -659,6 +657,7 @@ const state = {
   resultSource: null,
   controlApiBase: null,
   controlCapabilities: null,
+  controlApiError: null,
   pendingControlRun: null,
   backtestChart: {
     pinnedSeriesKey: null,
@@ -914,18 +913,47 @@ function researchInputsFromNormalizedInputs(normalizedInputs) {
   });
   requireCondition(
     integer(normalizedInputs.evaluation_window_days)
-      && Number(normalizedInputs.evaluation_window_days) % 252 === 0,
-    'evaluation_window_days는 252의 정수배여야 합니다.',
+      && Number(normalizedInputs.evaluation_window_days) >= 252
+      && Number(normalizedInputs.evaluation_window_days) <= 2520,
+    'evaluation_window_days는 252–2520 정수여야 합니다.',
   );
-  result.evaluationYears = Number(normalizedInputs.evaluation_window_days) / 252;
-  result.evaluationWindowDays = Number(normalizedInputs.evaluation_window_days);
   return result;
+}
+
+function validateResearchInputsPayload(researchInputs, normalizedInputs) {
+  requireCondition(isRecord(researchInputs), 'researchInputs가 객체가 아닙니다.');
+  requireCondition(
+    researchInputs.version === RESEARCH_INPUTS_VERSION
+      || researchInputs.version === LEGACY_RESEARCH_INPUTS_VERSION,
+    'researchInputs 버전 계약이 아닙니다.',
+  );
+  Object.entries(RESEARCH_INPUT_PARITY).forEach(([publicKey, normalizedKey]) => {
+    requireCondition(
+      Object.prototype.hasOwnProperty.call(researchInputs, publicKey)
+        && Object.prototype.hasOwnProperty.call(normalizedInputs, normalizedKey)
+        && sameJson(researchInputs[publicKey], normalizedInputs[normalizedKey]),
+      `researchInputs.${publicKey}가 요청 입력과 다릅니다.`,
+    );
+  });
+  if (researchInputs.version === LEGACY_RESEARCH_INPUTS_VERSION) {
+    requireCondition(
+      integer(researchInputs.evaluationYears)
+        && Number(researchInputs.evaluationYears) * 252
+          === Number(researchInputs.evaluationWindowDays),
+      'legacy researchInputs 평가 기간 의미가 평가 창과 다릅니다.',
+    );
+  } else {
+    requireCondition(
+      !Object.prototype.hasOwnProperty.call(researchInputs, 'evaluationYears'),
+      'research-inputs-v2에는 evaluationYears가 없어야 합니다.',
+    );
+  }
+  return cloneJson(researchInputs);
 }
 
 function controlRunInputsFromNormalizedInputs(normalizedInputs) {
   const researchInputs = researchInputsFromNormalizedInputs(normalizedInputs);
   delete researchInputs.version;
-  delete researchInputs.evaluationWindowDays;
   requireCondition(
     Object.keys(researchInputs).length === 26,
     '원격 분석 요청은 정확히 26개 ResearchInputs여야 합니다.',
@@ -1033,15 +1061,6 @@ function searchForRequest(resultKey, normalizedInputs, presetId = null) {
       params.set(field.key, serializeInputValue(field, normalizedInputs[field.key]));
     }
   });
-  if (
-    integer(normalizedInputs.evaluation_window_days)
-    && Number(normalizedInputs.evaluation_window_days) % 252 === 0
-  ) {
-    params.set(
-      'evaluationYears',
-      String(Number(normalizedInputs.evaluation_window_days) / 252),
-    );
-  }
   return `?${params.toString()}`;
 }
 
@@ -1468,19 +1487,7 @@ async function validateResult(entry, payload, summary = null, options = {}) {
       && observedHashFields.every((field) => validSha256(data.inputSha256[field])),
     '실제시장 provenance 입력 해시 계약이 다릅니다.',
   );
-  requireCondition(
-    isRecord(payload.researchInputs)
-      && payload.researchInputs.version === RESEARCH_INPUTS_VERSION,
-    'researchInputs 버전 계약이 아닙니다.',
-  );
-  Object.entries(RESEARCH_INPUT_PARITY).forEach(([publicKey, normalizedKey]) => {
-    requireCondition(
-      Object.prototype.hasOwnProperty.call(payload.researchInputs, publicKey)
-        && Object.prototype.hasOwnProperty.call(entry.normalizedInputs, normalizedKey)
-        && sameJson(payload.researchInputs[publicKey], entry.normalizedInputs[normalizedKey]),
-      `researchInputs.${publicKey}가 요청 입력과 다릅니다.`,
-    );
-  });
+  validateResearchInputsPayload(payload.researchInputs, entry.normalizedInputs);
   if (apiResult) {
     requireCondition(
       sameJson(payload.researchInputs, options.expectedResearchInputs),
@@ -5421,7 +5428,22 @@ function normalizeControlApiBase(value) {
   return parsed.href.replace(/\/+$/, '');
 }
 
+function isLoopbackOrFilePreview(locationLike = globalThis.location) {
+  const protocol = String(locationLike?.protocol || '').toLowerCase();
+  const hostname = String(locationLike?.hostname || '').toLowerCase();
+  return protocol === 'file:'
+    || hostname === 'localhost'
+    || hostname === '127.0.0.1'
+    || hostname === '::1';
+}
+
+function analysisExecutionRoute(controlApiBase, locationLike = globalThis.location) {
+  if (controlApiBase) return 'remote';
+  return isLoopbackOrFilePreview(locationLike) ? 'local' : 'blocked';
+}
+
 function configuredControlApiBase() {
+  if (isLoopbackOrFilePreview(window.location)) return null;
   return normalizeControlApiBase(
     document.querySelector?.('meta[name="quant-run-api-base"]')?.content || '',
   );
@@ -5578,13 +5600,13 @@ function waitForControlPoll() {
   return new Promise((resolve) => window.setTimeout(resolve, CONTROL_API_POLL_INTERVAL_MS));
 }
 
-async function resolveControlRun(submission, token, loadToken, options = {}) {
+async function resolveControlRun(submission, loadToken, options = {}) {
   const capabilities = options.capabilities || state.controlCapabilities;
   const fetchStatus = options.fetchStatus || ((runId) => (
-    fetchControlApiJson(`/v1/runs/${encodeURIComponent(runId)}`, { token })
+    fetchControlApiJson(`/v1/runs/${encodeURIComponent(runId)}`)
   ));
   const fetchResult = options.fetchResult || ((runId) => (
-    fetchControlApiJson(`/v1/runs/${encodeURIComponent(runId)}/result`, { token })
+    fetchControlApiJson(`/v1/runs/${encodeURIComponent(runId)}/result`)
   ));
   const wait = options.wait || waitForControlPoll;
   const isCurrent = options.isCurrent || (() => loadToken === state.loadToken);
@@ -5687,9 +5709,21 @@ async function fetchVerifiedControlArtifact(resultEnvelope, options = {}) {
 }
 
 async function initializeControlApi(options = {}) {
-  const base = options.base === undefined ? configuredControlApiBase() : normalizeControlApiBase(options.base);
+  let base;
+  try {
+    base = options.base === undefined
+      ? configuredControlApiBase()
+      : normalizeControlApiBase(options.base);
+  } catch (error) {
+    state.controlApiBase = null;
+    state.controlCapabilities = null;
+    state.controlApiError = error.message;
+    setInputStatus(`원격 API 설정을 사용할 수 없습니다. 현재 정적 결과를 유지합니다. ${error.message}`, 'error');
+    return null;
+  }
   if (!base) return null;
   state.controlApiBase = base;
+  state.controlApiError = null;
   const connection = document.querySelector('#remote-control-connection');
   const localNote = document.querySelector('#local-api-note');
   const mode = document.querySelector('#remote-control-mode');
@@ -5705,6 +5739,7 @@ async function initializeControlApi(options = {}) {
     return state.controlCapabilities;
   } catch (error) {
     state.controlCapabilities = null;
+    state.controlApiError = error.message;
     if (mode) mode.textContent = '원격 API 오류';
     setInputStatus(`원격 API를 사용할 수 없습니다. 현재 정적 결과를 유지합니다. ${error.message}`, 'error');
     return null;
@@ -6677,28 +6712,13 @@ function populateResultOptions(manifest) {
   select.disabled = manifest.entries.length <= 1;
 }
 
-function fillResearchForm(entry, normalizedInputs = entry.normalizedInputs, researchInputs = null) {
+function fillResearchForm(entry, normalizedInputs = entry.normalizedInputs) {
   INPUT_FIELDS.forEach((field) => {
     const element = document.querySelector(`#${field.id}`);
     if (element && Object.prototype.hasOwnProperty.call(normalizedInputs, field.key)) {
       element.value = serializeInputValue(field, normalizedInputs[field.key]);
     }
   });
-  const evaluationYears = document.querySelector('#input-evaluation-years');
-  if (!evaluationYears) return;
-  if (integer(researchInputs?.evaluationYears)) {
-    evaluationYears.value = String(researchInputs.evaluationYears);
-  } else if (finite(normalizedInputs.evaluation_window_days)) {
-    evaluationYears.value = String(Number(normalizedInputs.evaluation_window_days) / 252);
-  }
-}
-
-function syncEvaluationWindowFromYears() {
-  const years = Number(document.querySelector('#input-evaluation-years')?.value);
-  const days = document.querySelector('#input-evaluation-window-days');
-  if (days && Number.isInteger(years) && years >= 1 && years <= 10) {
-    days.value = String(years * 252);
-  }
 }
 
 function readResearchFormRequest() {
@@ -6713,11 +6733,13 @@ function readResearchFormRequest() {
     requireCondition(element, `Python 분석 입력 control이 없습니다: ${field.id}`);
     requestedInputs[field.key] = parseInputValue(field, element.value);
   });
-  const evaluationYears = Number(document.querySelector('#input-evaluation-years')?.value);
-  if (!Number.isInteger(evaluationYears) || evaluationYears < 1 || evaluationYears > 10) {
-    throw new Error('평가 기간(년)은 1–10 정수여야 합니다.');
+  if (
+    !Number.isInteger(Number(requestedInputs.evaluation_window_days))
+      || Number(requestedInputs.evaluation_window_days) < 252
+      || Number(requestedInputs.evaluation_window_days) > 2520
+  ) {
+    throw new Error('평가 기간(거래일)은 252–2520 정수여야 합니다.');
   }
-  requestedInputs.evaluation_window_days = evaluationYears * 252;
   if (Number(requestedInputs.top_n) < 1 || Number(requestedInputs.top_n) > 50) {
     throw new Error('Top-N은 1–50 정수여야 합니다.');
   }
@@ -6775,12 +6797,23 @@ function renderResearchDraftState() {
     setInputStatus('미적용 변경 · 저장 결과를 열기 전까지 현재 결과를 유지합니다.', 'pending');
     return;
   }
-  submit.textContent = state.controlCapabilities ? '원격 API로 분석' : '로컬 API로 분석';
+  if (state.controlCapabilities) {
+    submit.disabled = false;
+    submit.textContent = '원격 API로 분석';
+    setInputStatus('미적용 변경 · 원격 API 실행 전까지 현재 결과를 유지합니다.', 'pending');
+    return;
+  }
+  if (isLoopbackOrFilePreview(window.location)) {
+    submit.disabled = false;
+    submit.textContent = '로컬 API로 분석';
+    setInputStatus('미적용 변경 · 로컬 Python API 실행 필요 · 현재 결과를 유지합니다.', 'pending');
+    return;
+  }
+  submit.disabled = true;
+  submit.textContent = '분석 API 연결 필요';
   setInputStatus(
-    state.controlCapabilities
-      ? '미적용 변경 · 원격 API 실행 전까지 현재 결과를 유지합니다.'
-      : '미적용 변경 · 로컬 Python API 실행 필요 · 현재 결과를 유지합니다.',
-    'pending',
+    `미적용 변경 · 원격 API 연결이 확인되지 않아 현재 결과를 유지합니다.${state.controlApiError ? ` ${state.controlApiError}` : ''}`,
+    'error',
   );
 }
 
@@ -6858,7 +6891,7 @@ function installValidatedPayload({
   fillControls();
   populateFixedPolicyView(payload);
   bindFactorAnalysisControls();
-  fillResearchForm(baseEntry, entry.normalizedInputs, payload.researchInputs);
+  fillResearchForm(baseEntry, entry.normalizedInputs);
   setResultSource(source, entry.resultKey);
   renderResearchDraftState();
   renderAll();
@@ -6998,7 +7031,6 @@ async function loadRemoteControlResult(requestedInputs, baseEntry, options = {})
     );
     const resultEnvelope = await resolveControlRun(
       submitted,
-      tokenValue,
       loadToken,
       { capabilities },
     );
@@ -7088,8 +7120,6 @@ function bindBrowserContractControls() {
     fillResearchForm(entry);
     loadEntry(entry, { historyMode: 'push' });
   });
-  document.querySelector('#input-evaluation-years').addEventListener('input', syncEvaluationWindowFromYears);
-  document.querySelector('#input-evaluation-years').addEventListener('change', syncEvaluationWindowFromYears);
   const researchForm = document.querySelector('#research-input-form');
   researchForm.addEventListener('input', renderResearchDraftState);
   researchForm.addEventListener('change', renderResearchDraftState);
@@ -7109,23 +7139,35 @@ function bindBrowserContractControls() {
         state.manifest,
         request.requestedInputs,
       );
-      if (state.controlApiBase) {
+      const executionRoute = analysisExecutionRoute(state.controlApiBase, window.location);
+      if (executionRoute === 'remote') {
         loadRemoteControlResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
           historyMode: 'push',
         });
-      } else {
+      } else if (executionRoute === 'local') {
         loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
           historyMode: 'push',
         });
+      } else {
+        setInputStatus(
+          '원격 API 연결이 확인되지 않아 분석을 시작하지 않았습니다. 현재 검증 결과를 유지합니다.',
+          'error',
+        );
       }
     } catch (error) {
-      if (state.controlApiBase) {
+      const executionRoute = analysisExecutionRoute(state.controlApiBase, window.location);
+      if (executionRoute === 'remote') {
         setInputStatus(
           `원격 분석을 요청하지 않았습니다. 현재 결과를 유지합니다. ${error.message}`,
           'error',
         );
-      } else {
+      } else if (executionRoute === 'local') {
         setInputStatus(`분석을 요청하지 않았습니다. 현재 결과 유지 · ${error.message}`, 'error');
+      } else {
+        setInputStatus(
+          `원격 분석을 요청하지 않았습니다. 현재 결과를 유지합니다. ${error.message}`,
+          'error',
+        );
       }
     }
   });
@@ -7166,7 +7208,8 @@ async function loadFromLocation(options = {}) {
   }
   if (!request.entry) {
     const apiRequest = localApiRequestFromStaticState(state.manifest, request.requestedInputs);
-    if (state.controlApiBase) {
+    const executionRoute = analysisExecutionRoute(state.controlApiBase, window.location);
+    if (executionRoute === 'remote') {
       await loadEntry(apiRequest.baseEntry, { historyMode: 'replace' });
       fillResearchForm(apiRequest.baseEntry, apiRequest.requestedInputs);
       setInputStatus(
@@ -7175,9 +7218,18 @@ async function loadFromLocation(options = {}) {
       );
       return;
     }
-    await loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
-      historyMode: 'replace',
-    });
+    if (executionRoute === 'local') {
+      await loadLocalApiResult(apiRequest.requestedInputs, apiRequest.baseEntry, {
+        historyMode: 'replace',
+      });
+      return;
+    }
+    await loadEntry(apiRequest.baseEntry, { historyMode: 'replace' });
+    fillResearchForm(apiRequest.baseEntry, apiRequest.requestedInputs);
+    setInputStatus(
+      'URL의 입력값을 초안으로 열었지만 원격 API 연결이 확인되지 않았습니다. 현재 검증 결과를 유지합니다.',
+      'error',
+    );
     return;
   }
   await loadEntry(request.entry, {
@@ -7203,7 +7255,14 @@ async function loadBrowserDashboard() {
     bindDashboardControls();
     const controlApiInitialization = initializeControlApi();
     await loadFromLocation({ replaceHistory: !window.location.search });
-    await controlApiInitialization;
+    const controlCapabilities = await controlApiInitialization;
+    renderResearchDraftState();
+    if (!controlCapabilities && state.controlApiError) {
+      setInputStatus(
+        `원격 API를 사용할 수 없습니다. 현재 정적 결과를 유지합니다. ${state.controlApiError}`,
+        'error',
+      );
+    }
   } catch (error) {
     showUnavailable(`정적 grid를 사용할 수 없습니다: ${error.message}`);
     console.error(error);
@@ -7223,6 +7282,7 @@ if (typeof globalThis !== 'undefined') {
     requestFromSearch,
     searchForRequest,
     researchInputsFromNormalizedInputs,
+    validateResearchInputsPayload,
     controlRunInputsFromNormalizedInputs,
     localApiRequestFromStaticState,
     validateTargetAllocation,
@@ -7235,6 +7295,8 @@ if (typeof globalThis !== 'undefined') {
     fetchLocalApiJson,
     resolveLocalApiResult,
     normalizeControlApiBase,
+    isLoopbackOrFilePreview,
+    analysisExecutionRoute,
     normalizeControlCapabilities,
     buildControlRunSubmission,
     normalizeControlRunEnvelope,

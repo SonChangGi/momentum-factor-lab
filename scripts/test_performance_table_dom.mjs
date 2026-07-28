@@ -26,8 +26,14 @@ const bestSeries = {
 };
 const selected = api.commonEvaluationSeriesSegments(selectedSeries, period);
 const best = api.commonEvaluationSeriesSegments(bestSeries, period);
-assert.equal(selected.points.length, period.returnObservationCount + 1);
-assert.equal(best.points.length, period.returnObservationCount + 1);
+assert.equal(
+  selected.points.length + selected.missingCount,
+  period.returnObservationCount + 1,
+);
+assert.equal(
+  best.points.length + best.missingCount,
+  period.returnObservationCount + 1,
+);
 assert.equal(selected.points[0].normalized, 1);
 assert.equal(best.points[0].normalized, 1);
 assert.equal(

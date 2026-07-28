@@ -22,24 +22,54 @@ const api = context.__MFL_WEB_TESTS__;
 
 const normalized = structuredClone(payload.resultIdentity.keyParts.normalizedInputs);
 const request = JSON.parse(JSON.stringify(api.buildControlRunSubmission(normalized)));
-assert.equal(request.inputSchemaVersion, 'momentum/v1');
+assert.equal(request.inputSchemaVersion, 'momentum/v2');
 assert.equal(request.allowFallback, false);
 assert.equal(Object.keys(request.inputs).length, 26);
 assert.equal('version' in request.inputs, false);
-assert.equal('evaluationWindowDays' in request.inputs, false);
-assert.equal(request.inputs.evaluationYears, normalized.evaluation_window_days / 252);
+assert.equal('evaluationYears' in request.inputs, false);
+assert.equal(request.inputs.evaluationWindowDays, normalized.evaluation_window_days);
 assert.equal(request.inputs.topN, normalized.top_n);
 
 const inputFields = Object.keys(request.inputs).sort().map((key) => ({ key }));
 const capabilities = JSON.parse(JSON.stringify(api.normalizeControlCapabilities({
   projectId: 'momentum',
   projectName: 'Momentum Factor',
-  inputSchemaVersion: 'momentum/v1',
+  inputSchemaVersion: 'momentum/v2',
   inputSchemaHash: 'a'.repeat(64),
   configHashAlgorithm: 'momentum-research-inputs-rfc8785-v1',
   acceptsRuns: true,
   inputs: inputFields,
 })));
+
+const observedControlRequests = [];
+const controlResponseBytes = new TextEncoder().encode(JSON.stringify({ status: 'ok' }));
+const controlFetch = async (url, init) => {
+  observedControlRequests.push({
+    url,
+    init: JSON.parse(JSON.stringify(init)),
+  });
+  return {
+    ok: true,
+    status: 200,
+    arrayBuffer: async () => controlResponseBytes.buffer,
+  };
+};
+await api.fetchControlApiJson('/v1/runs/momentum-run-0001', {
+  base: 'https://api.example.com',
+  fetchImpl: controlFetch,
+});
+await api.fetchControlApiJson('/v1/projects/momentum/runs', {
+  base: 'https://api.example.com',
+  fetchImpl: controlFetch,
+  method: 'POST',
+  body: request,
+  token: 'owner-session-token',
+});
+assert.equal(observedControlRequests[0].init.headers.Authorization, undefined);
+assert.equal(
+  observedControlRequests[1].init.headers.Authorization,
+  'Bearer owner-session-token',
+);
 
 const envelope = {
   projectId: 'momentum',
@@ -125,6 +155,24 @@ assert.equal(api.normalizeControlApiBase('http://127.0.0.1:8000/'), 'http://127.
 assert.throws(() => api.normalizeControlApiBase('http://api.example.com'), /HTTPS/);
 assert.throws(() => api.normalizeControlApiBase('https://token@example.com'), /인증정보/);
 assert.throws(() => api.normalizeControlApiBase('https://api.example.com?token=x'), /쿼리/);
+assert.equal(api.isLoopbackOrFilePreview({ protocol: 'https:', hostname: 'sonchanggi.github.io' }), false);
+assert.equal(api.isLoopbackOrFilePreview({ protocol: 'http:', hostname: '127.0.0.1' }), true);
+assert.equal(api.isLoopbackOrFilePreview({ protocol: 'file:', hostname: '' }), true);
+assert.equal(
+  api.analysisExecutionRoute(
+    'https://quant-control-api.onrender.com',
+    { protocol: 'https:', hostname: 'sonchanggi.github.io' },
+  ),
+  'remote',
+);
+assert.equal(
+  api.analysisExecutionRoute(null, { protocol: 'https:', hostname: 'sonchanggi.github.io' }),
+  'blocked',
+);
+assert.equal(
+  api.analysisExecutionRoute(null, { protocol: 'http:', hostname: '127.0.0.1' }),
+  'local',
+);
 
 const artifactBytes = new TextEncoder().encode(JSON.stringify(payload));
 const artifactSha = createHash('sha256').update(artifactBytes).digest('hex');
@@ -230,17 +278,36 @@ await assert.rejects(
   /SHA-256/,
 );
 
-assert.match(html, /<meta name="quant-run-api-base" content=""\s*\/>/);
+assert.match(
+  html,
+  /<meta name="quant-run-api-base" content="https:\/\/quant-control-api\.onrender\.com"\s*\/>/,
+);
 assert.match(html, /id="remote-control-token"[\s\S]*?autocomplete="off"/);
 assert.match(html, /id="analysis-settings"[^>]*>/);
 assert.doesNotMatch(html, /id="analysis-settings"[^>]*\sopen(?:\s|>)/);
 assert.doesNotMatch(source, /localStorage[^;]*(?:token|bearer)|sessionStorage[^;]*(?:token|bearer)/i);
 assert.match(source, /Authorization = `Bearer \$\{options\.token\}`/);
 assert.match(source, /'Idempotency-Key': controlIdempotencyKey\(\)/);
+const resolveControlRunSource = source.slice(
+  source.indexOf('async function resolveControlRun'),
+  source.indexOf('async function fetchVerifiedControlArtifact'),
+);
+assert.match(
+  resolveControlRunSource,
+  /async function resolveControlRun\(submission, loadToken, options = \{\}\)/,
+);
+assert.doesNotMatch(resolveControlRunSource, /\btoken\b|Authorization/);
+const loadRemoteControlResultSource = source.slice(
+  source.indexOf('async function loadRemoteControlResult'),
+  source.indexOf('function bindBrowserContractControls'),
+);
+assert.match(loadRemoteControlResultSource, /method: 'POST'[\s\S]*token: tokenValue/);
 assert.match(source, /if \(!sameJson\(currentDraft, normalizedResultInputs\)\) preservedDraft = currentDraft/);
 assert.match(source, /if \(preservedDraft\) fillResearchForm\(baseEntry, preservedDraft\)/);
 assert.match(source, /const CONTROL_API_POLL_INTERVAL_MS = 5000;/);
 assert.match(source, /const CONTROL_API_MAX_POLLS = 2880;/);
+assert.match(source, /submit\.textContent = '분석 API 연결 필요'/);
+assert.match(source, /const controlCapabilities = await controlApiInitialization;[\s\S]*renderResearchDraftState\(\);/);
 
 assert.match(workflow, /research_inputs_json:/);
 assert.match(workflow, /control_run_id:/);

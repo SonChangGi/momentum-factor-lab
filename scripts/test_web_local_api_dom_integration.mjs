@@ -10,13 +10,36 @@ const api = context.__MFL_WEB_TESTS__;
 const normalized = structuredClone(payload.resultIdentity.keyParts.normalizedInputs);
 normalized.top_n = Math.min(50, normalized.top_n + 1);
 normalized.max_extreme_daily_return = 0.8;
+normalized.evaluation_window_days = 755;
 
 const research = api.researchInputsFromNormalizedInputs(normalized);
-assert.equal(research.version, "research-inputs-v1");
+assert.equal(research.version, "research-inputs-v2");
 assert.equal(research.topN, normalized.top_n);
 assert.equal(research.maxExtremeDailyReturn, 0.8);
 assert.equal(research.evaluationWindowDays, normalized.evaluation_window_days);
-assert.equal(research.evaluationYears, normalized.evaluation_window_days / 252);
+assert.equal("evaluationYears" in research, false);
+assert.equal(
+  JSON.stringify(api.validateResearchInputsPayload(research, normalized)),
+  JSON.stringify(research),
+);
+
+const legacyNormalized = structuredClone(payload.resultIdentity.keyParts.normalizedInputs);
+const legacyResearch = {
+  ...api.researchInputsFromNormalizedInputs(legacyNormalized),
+  version: "research-inputs-v1",
+  evaluationYears: legacyNormalized.evaluation_window_days / 252,
+};
+assert.equal(
+  JSON.stringify(api.validateResearchInputsPayload(legacyResearch, legacyNormalized)),
+  JSON.stringify(legacyResearch),
+);
+assert.throws(
+  () => api.validateResearchInputsPayload(
+    { ...legacyResearch, evaluationYears: legacyResearch.evaluationYears + 1 },
+    legacyNormalized,
+  ),
+  /legacy researchInputs/,
+);
 assert.equal(api.serializeInputValue({ kind: "percent" }, 0.8), "80");
 assert.equal(api.resultSourceLabel("local_api"), "로컬 API 계산 결과");
 assert.match(api.LOCAL_API_REQUIRED, /Python API/);
