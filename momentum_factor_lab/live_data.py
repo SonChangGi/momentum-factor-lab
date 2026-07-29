@@ -24,6 +24,10 @@ from .universe import (
     stock_only_universe_frame,
     universe_frame_for_symbols,
 )
+from .publication_security import (
+    PUBLIC_CACHE_REFERENCE,
+    redact_credential_like_text,
+)
 
 
 @dataclass(slots=True)
@@ -86,6 +90,33 @@ def _source_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
         if col not in frame:
             frame[col] = None
     return frame[columns]
+
+
+def _sanitize_public_source_health(frame: pd.DataFrame) -> pd.DataFrame:
+    """Remove local paths and credential-shaped provider diagnostics.
+
+    Source-health rows are embedded in immutable public result artifacts and
+    participate in their hashes. Local cache filenames are neither portable nor
+    analytically meaningful; one such filename for ticker AVNS also matches the
+    Aiven service-password prefix used by push protection.
+    """
+
+    sanitized = frame.copy()
+    if "cache_path" in sanitized:
+        stable_cache_references = {"", "disabled", "package-resource"}
+
+        def sanitize_cache_path(value: object) -> object:
+            if value is None or pd.isna(value):
+                return value
+            text = str(value)
+            return text if text in stable_cache_references else PUBLIC_CACHE_REFERENCE
+
+        sanitized["cache_path"] = sanitized["cache_path"].map(sanitize_cache_path)
+    for column in sanitized.columns:
+        dtype = sanitized[column].dtype
+        if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype):
+            sanitized[column] = sanitized[column].map(redact_credential_like_text)
+    return sanitized
 
 
 def _candidate_universe(config: RunConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -2104,6 +2135,7 @@ def download_live_data(config: RunConfig) -> MarketData:
         ],
         ignore_index=True,
     )
+    data_sources = _sanitize_public_source_health(data_sources)
     return MarketData(
         prices=prices,
         volumes=volumes,

@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_CUTOFF_HOUR_KST = 6
 DEFAULT_CUTOFF_MINUTE_KST = 30
+AUTOMATION_STATUS_CONTRACT = "momentum-dashboard-automation-status"
+AUTOMATION_STATUS_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,9 @@ class DashboardFreshnessDecision:
     event_name: str
     latest_run_kst: datetime | None
     latest_data_as_of: date | None
+    latest_automation_state: str | None
+    latest_automation_attempt_kst: datetime | None
+    latest_successful_publication_kst: datetime | None
     target_data_as_of: date
     cutoff_kst: datetime
     reason: str
@@ -33,6 +38,17 @@ class DashboardFreshnessDecision:
             "latest_data_as_of": self.latest_data_as_of.isoformat()
             if self.latest_data_as_of
             else "none",
+            "latest_automation_state": self.latest_automation_state or "none",
+            "latest_automation_attempt_kst": (
+                self.latest_automation_attempt_kst.isoformat()
+                if self.latest_automation_attempt_kst
+                else "none"
+            ),
+            "latest_successful_publication_kst": (
+                self.latest_successful_publication_kst.isoformat()
+                if self.latest_successful_publication_kst
+                else "none"
+            ),
             "target_data_as_of": self.target_data_as_of.isoformat(),
             "cutoff_kst": self.cutoff_kst.isoformat(),
             "reason": self.reason,
@@ -43,18 +59,12 @@ def decide_dashboard_freshness(
     dashboard: dict[str, Any],
     *,
     event_name: str,
+    automation_status: dict[str, Any] | None = None,
     now: datetime | None = None,
     cutoff_hour_kst: int = DEFAULT_CUTOFF_HOUR_KST,
     cutoff_minute_kst: int = DEFAULT_CUTOFF_MINUTE_KST,
 ) -> DashboardFreshnessDecision:
-    """Require snapshot revalidation before any scheduled analysis-cache hit.
-
-    A published date and generation timestamp cannot prove that provider data,
-    the universe, factor code, policy code, or selection rules are unchanged.
-    Therefore this preflight never skips a scheduled or manual run. The run may
-    still finish cheaply after market refresh when its content-addressed result
-    identity matches the analysis cache.
-    """
+    """Skip duplicate schedules only after a fresh, successful publication."""
 
     now_kst = _to_kst(now) if now else datetime.now(KST)
     cutoff_kst = datetime.combine(
@@ -62,18 +72,72 @@ def decide_dashboard_freshness(
     )
     latest_run_kst = latest_dashboard_run_kst(dashboard)
     latest_data_as_of = latest_dashboard_data_as_of(dashboard)
-    target_data_as_of = expected_recent_us_close_date(now_kst)
-    skip = False
-    reason = (
-        "scheduled snapshot revalidation required before content-addressed cache lookup"
-        if event_name == "schedule"
-        else "manual dashboard execution required"
+    normalized_automation_status = automation_status or {}
+    latest_automation_state = _automation_state(normalized_automation_status)
+    latest_automation_attempt_kst = _parse_timestamp_to_kst(
+        normalized_automation_status.get("attemptedAtUtc")
     )
+    latest_successful_publication_kst = latest_run_kst
+    if (
+        latest_automation_attempt_kst is not None
+        and _available_status_matches_dashboard(
+            normalized_automation_status,
+            dashboard,
+        )
+        and (
+            latest_successful_publication_kst is None
+            or latest_automation_attempt_kst > latest_successful_publication_kst
+        )
+    ):
+        # An analysis cache hit republishes the validated aliases without
+        # changing the immutable payload's generatedAtUtc. The bound status
+        # attempt is therefore the authoritative successful publication time.
+        latest_successful_publication_kst = latest_automation_attempt_kst
+    target_data_as_of = expected_recent_us_close_date(now_kst)
+    latest_failure_is_actionable = latest_automation_state in {
+        "degraded",
+        "unavailable",
+        "failed",
+    } and (
+        latest_automation_attempt_kst is None
+        or latest_run_kst is None
+        or latest_automation_attempt_kst >= latest_run_kst
+    )
+    if event_name != "schedule":
+        skip = False
+        reason = "manual dashboard execution required"
+    elif latest_failure_is_actionable:
+        skip = False
+        reason = (
+            "latest scheduled automation state is "
+            f"{latest_automation_state}; retry is required"
+        )
+    elif latest_data_as_of is None:
+        skip = False
+        reason = "published dashboard has no valid market-data date"
+    elif latest_data_as_of < target_data_as_of:
+        skip = False
+        reason = (
+            f"published market-data date {latest_data_as_of.isoformat()} is older than "
+            f"target {target_data_as_of.isoformat()}"
+        )
+    elif latest_successful_publication_kst is None:
+        skip = False
+        reason = "published dashboard has no valid generation timestamp"
+    elif latest_successful_publication_kst < cutoff_kst:
+        skip = False
+        reason = "latest successful publication predates the daily KST cutoff"
+    else:
+        skip = True
+        reason = "dashboard already has a fresh successful publication for the target close"
     return DashboardFreshnessDecision(
         skip=skip,
         event_name=event_name,
         latest_run_kst=latest_run_kst,
         latest_data_as_of=latest_data_as_of,
+        latest_automation_state=latest_automation_state,
+        latest_automation_attempt_kst=latest_automation_attempt_kst,
+        latest_successful_publication_kst=latest_successful_publication_kst,
         target_data_as_of=target_data_as_of,
         cutoff_kst=cutoff_kst,
         reason=reason,
@@ -147,6 +211,50 @@ def load_dashboard_payload(path: str | Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _automation_state(payload: dict[str, Any]) -> str | None:
+    value = payload.get("state")
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _available_status_matches_dashboard(
+    status: dict[str, Any],
+    dashboard: dict[str, Any],
+) -> bool:
+    """Accept a success timestamp only when it is bound to this dashboard."""
+
+    if (
+        status.get("contract") != AUTOMATION_STATUS_CONTRACT
+        or status.get("schemaVersion") != AUTOMATION_STATUS_SCHEMA_VERSION
+        or _automation_state(status) != "available"
+    ):
+        return False
+    publication = status.get("publication")
+    last_good = status.get("lastGood")
+    data = dashboard.get("data")
+    if (
+        not isinstance(publication, dict)
+        or publication.get("updated") is not True
+        or not isinstance(last_good, dict)
+        or not isinstance(data, dict)
+    ):
+        return False
+    expected = {
+        "resultKey": dashboard.get("resultKey"),
+        "dataAsOf": data.get("asOf"),
+        "generatedAtUtc": dashboard.get("generatedAtUtc"),
+        "path": "data/dashboard.json",
+    }
+    if not all(isinstance(value, str) and value for value in expected.values()):
+        return False
+    return (
+        status.get("targetDataAsOf") == expected["dataAsOf"]
+        and all(last_good.get(key) == value for key, value in expected.items())
+    )
+
+
 def _parse_date(value: Any) -> date | None:
     if not value:
         return None
@@ -183,6 +291,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--data-path", default="docs/data/dashboard.json", help="Dashboard JSON path to inspect"
     )
     parser.add_argument(
+        "--status-path",
+        default="docs/data/automation-status.json",
+        help="Latest scheduled automation status JSON path to inspect",
+    )
+    parser.add_argument(
         "--now-utc", default=None, help="Optional ISO timestamp for deterministic tests"
     )
     return parser
@@ -194,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     decision = decide_dashboard_freshness(
         load_dashboard_payload(args.data_path),
         event_name=args.event_name,
+        automation_status=load_dashboard_payload(args.status_path),
         now=now,
     )
     for key, value in decision.as_github_outputs().items():

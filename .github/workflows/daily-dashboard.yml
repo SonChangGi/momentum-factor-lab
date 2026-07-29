@@ -2,7 +2,12 @@ name: Daily Momentum Dashboard
 
 on:
   workflow_dispatch:
-    # Manual dispatch remains available for reviewed reruns.
+    inputs:
+      watchdog_origin:
+        description: Treat this queued watchdog rerun as a freshness-gated schedule
+        required: true
+        default: false
+        type: boolean
   schedule:
     # 06:30 KST Tue-Sat: first refresh after the prior U.S. regular session close settles.
     - cron: "30 21 * * 1-5"
@@ -34,10 +39,17 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          WATCHDOG_ORIGIN: ${{ inputs.watchdog_origin || false }}
         run: |
+          effective_event_name="${GITHUB_EVENT_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] \
+            && [ "${WATCHDOG_ORIGIN}" = "true" ]; then
+            effective_event_name="schedule"
+          fi
           python -m momentum_factor_lab.dashboard_freshness \
-            --event-name "${GITHUB_EVENT_NAME}" \
-            --data-path docs/data/dashboard.json >> "$GITHUB_OUTPUT"
+            --event-name "${effective_event_name}" \
+            --data-path docs/data/dashboard.json \
+            --status-path docs/data/automation-status.json >> "$GITHUB_OUTPUT"
 
       - name: Report skipped dashboard refresh
         if: steps.freshness.outputs.skip == 'true'
@@ -66,20 +78,30 @@ jobs:
             --config .github/momentum-dashboard-config.json \
             --site-dir docs
 
+      - name: Reject secrets in generated publication
+        if: steps.freshness.outputs.skip != 'true'
+        run: |
+          python -m momentum_factor_lab.publication_security docs
+
       - name: Commit dashboard updates
         if: steps.freshness.outputs.skip != 'true'
         env:
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          FRESHNESS_EVENT_NAME: ${{ steps.freshness.outputs.event_name }}
         run: |
           validate_candidate_against_remote() {
             git fetch origin "${GITHUB_REF_NAME}" --depth=1
             remote_dashboard="${RUNNER_TEMP}/remote-dashboard.json"
+            remote_automation_status="${RUNNER_TEMP}/remote-automation-status.json"
             if git show "origin/${GITHUB_REF_NAME}:docs/data/dashboard.json" > "${remote_dashboard}" 2>/dev/null; then
-              if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+              if ! git show "origin/${GITHUB_REF_NAME}:docs/data/automation-status.json" > "${remote_automation_status}" 2>/dev/null; then
+                printf '{}\n' > "${remote_automation_status}"
+              fi
+              if [ "${FRESHNESS_EVENT_NAME}" = "schedule" ]; then
                 precommit_freshness="${RUNNER_TEMP}/precommit-freshness.out"
                 python -m momentum_factor_lab.dashboard_freshness \
-                  --event-name "${GITHUB_EVENT_NAME}" \
-                  --data-path "${remote_dashboard}" > "${precommit_freshness}" || true
+                  --event-name "${FRESHNESS_EVENT_NAME}" \
+                  --data-path "${remote_dashboard}" \
+                  --status-path "${remote_automation_status}" > "${precommit_freshness}" || true
                 cat "${precommit_freshness}"
                 if grep -q '^skip=true$' "${precommit_freshness}"; then
                   echo "Remote branch already has a dashboard execution after 06:30 KST; skipping duplicate commit."

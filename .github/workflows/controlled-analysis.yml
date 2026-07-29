@@ -95,6 +95,15 @@ jobs:
             --output-dir outputs/controlled-run \
             --github-output "${GITHUB_OUTPUT}"
 
+      - name: Reject secrets in immutable controlled result
+        env:
+          ARTIFACT_PATH: ${{ steps.result.outputs.artifact_path }}
+          SIDECAR_PATH: ${{ steps.result.outputs.sidecar_path }}
+        run: |
+          python -m momentum_factor_lab.publication_security \
+            "${ARTIFACT_PATH}" \
+            "${SIDECAR_PATH}"
+
       - name: Commit only the immutable controlled result
         env:
           ARTIFACT_PATH: ${{ steps.result.outputs.artifact_path }}

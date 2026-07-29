@@ -15,6 +15,7 @@ from momentum_factor_lab.config import (
 )
 from momentum_factor_lab.portfolio import construct_target_allocation
 from momentum_factor_lab.workflow import (
+    NoEligibleFactorError,
     AnalysisResult,
     _apply_factor_guardrails,
     _policy_grid_reasons,
@@ -294,8 +295,10 @@ def test_factor_selection_fails_closed_when_every_factor_breaks_guardrails(
     ranking["execution_coverage_ratio"] = 0.0
     ranking["blocked_execution_count"] = 1
     ranking["total_unpriceable_target_count"] = 1
-    with pytest.raises(ValueError, match="no factor passes"):
+    with pytest.raises(NoEligibleFactorError, match="no factor passes") as exc_info:
         _apply_factor_guardrails(ranking, demo_result.config)
+    assert exc_info.value.evaluated_factor_count > 0
+    assert exc_info.value.guardrail_breach_counts
 
 
 def test_unavailable_advanced_factors_remain_in_single_fixed_method_catalog(

@@ -41,7 +41,8 @@ jobs:
         run: |
           python -m momentum_factor_lab.dashboard_freshness \
             --event-name "${DASHBOARD_FRESHNESS_EVENT_NAME}" \
-            --data-path docs/data/dashboard.json >> "$GITHUB_OUTPUT"
+            --data-path docs/data/dashboard.json \
+            --status-path docs/data/automation-status.json >> "$GITHUB_OUTPUT"
 
       - name: Dispatch daily dashboard workflow
         if: steps.freshness.outputs.skip != 'true'
@@ -52,7 +53,10 @@ jobs:
           echo "Dashboard is stale: ${{ steps.freshness.outputs.reason }}"
           echo "Latest run KST: ${{ steps.freshness.outputs.latest_run_kst }}"
           echo "Cutoff KST: ${{ steps.freshness.outputs.cutoff_kst }}"
-          gh workflow run daily-dashboard.yml --repo "${GITHUB_REPOSITORY}" --ref "${DEFAULT_BRANCH:-main}"
+          gh workflow run daily-dashboard.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${DEFAULT_BRANCH:-main}" \
+            -f watchdog_origin=true
 
       - name: Report dashboard already fresh
         if: steps.freshness.outputs.skip == 'true'

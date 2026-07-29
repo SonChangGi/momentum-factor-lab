@@ -179,9 +179,31 @@ def test_scheduled_dashboard_config_parses_as_uncapped_live_input() -> None:
 
 def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     workflow = (ROOT / ".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
+    watchdog = (ROOT / ".github/workflows/daily-dashboard-watchdog.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "momentum_factor_lab.dashboard_freshness" in workflow
     assert "momentum_factor_lab.dashboard_monotonic" in workflow
     assert "momentum_factor_lab.cli scheduled-dashboard" in workflow
+    assert "momentum_factor_lab.publication_security docs" in workflow
     assert "--data-path docs/data/dashboard.json" in workflow
+    assert "--status-path docs/data/automation-status.json" in workflow
+    assert workflow.count("--status-path docs/data/automation-status.json") == 1
+    assert "watchdog_origin:" in workflow
+    assert "WATCHDOG_ORIGIN:" in workflow
+    assert 'effective_event_name="schedule"' in workflow
+    assert "FRESHNESS_EVENT_NAME: ${{ steps.freshness.outputs.event_name }}" in workflow
+    assert (
+        'origin/${GITHUB_REF_NAME}:docs/data/automation-status.json'
+        in workflow
+    )
+    assert '--status-path "${remote_automation_status}"' in workflow
+    assert workflow.index("momentum_factor_lab.publication_security docs") < workflow.index(
+        "git add docs"
+    )
     assert "git add docs" in workflow
+    assert "--status-path docs/data/automation-status.json" in watchdog
+    assert "-f watchdog_origin=true" in watchdog
+    assert "if: steps.freshness.outputs.skip != 'true'" in watchdog
+    assert "if: steps.freshness.outputs.skip == 'true'" in watchdog

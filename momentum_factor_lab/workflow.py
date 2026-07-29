@@ -78,6 +78,32 @@ FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT = "momentum-factor-holding-history-sidec
 FACTOR_HOLDING_HISTORY_SIDECAR_CONTRACT_VERSION = 2
 FACTOR_HOLDING_HISTORY_SIDECAR_DIRECTORY = "factor-holding-history"
 MAX_FACTOR_HOLDING_HISTORY_SIDECAR_BYTES = 5_000_000
+
+
+class NoEligibleFactorError(ValueError):
+    """The fixed absolute policy produced no publishable factor.
+
+    This is a valid fail-closed analytical outcome, not permission to relax a
+    guardrail or select a fallback factor.
+    """
+
+    def __init__(self, details: list[dict[str, Any]]) -> None:
+        self.evaluated_factor_count = len(details)
+        breach_counts: dict[str, int] = {}
+        for detail in details:
+            breaches = detail.get("guardrail_breaches")
+            if not isinstance(breaches, list):
+                continue
+            for breach in breaches:
+                name = str(breach)
+                breach_counts[name] = breach_counts.get(name, 0) + 1
+        self.guardrail_breach_counts = dict(sorted(breach_counts.items()))
+        super().__init__(
+            "no factor passes the absolute selection guardrails under the fixed policy: "
+            + json.dumps(details, ensure_ascii=False)
+        )
+
+
 FACTOR_DIAGNOSTICS_CONTRACT_VERSION = 1
 FACTOR_DIAGNOSTICS_RANK_IC_HORIZON_SESSIONS = 21
 FACTOR_DIAGNOSTICS_MAX_SIGNAL_SESSIONS = 756
@@ -978,10 +1004,7 @@ def _apply_factor_guardrails(
             metric_available,
             ["factor", "policy_id", "guardrail_breaches"],
         ].to_dict(orient="records")
-        raise ValueError(
-            "no factor passes the absolute selection guardrails under the fixed policy: "
-            + json.dumps(detail, ensure_ascii=False)
-        )
+        raise NoEligibleFactorError(detail)
     sort_columns = [
         "selection_score",
         "base_composite_score",
