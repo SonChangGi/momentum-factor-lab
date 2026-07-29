@@ -17,7 +17,12 @@ from momentum_factor_lab.cli import (
     main,
 )
 from momentum_factor_lab.research_inputs import ResearchInputs
-from momentum_factor_lab.workflow import AnalysisResult, result_payload, write_result_json
+from momentum_factor_lab.workflow import (
+    AnalysisResult,
+    NoEligibleFactorError,
+    result_payload,
+    write_result_json,
+)
 
 
 def _command_parser(name: str) -> argparse.ArgumentParser:
@@ -672,6 +677,95 @@ def test_scheduled_grid_recomputes_every_declared_input_and_market_offset_preset
         0,
         7,
     ]
+    assert summary["automationStatus"]["state"] == "available"
+    assert Path(summary["paths"]["automationStatus"]).exists()
+
+
+def test_scheduled_grid_preserves_last_good_when_no_factor_is_eligible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site_dir = tmp_path / "site"
+    data_dir = site_dir / "data"
+    data_dir.mkdir(parents=True)
+    dashboard_path = data_dir / "dashboard.json"
+    dashboard_bytes = json.dumps(
+        {
+            "schemaVersion": 5,
+            "resultKey": "f" * 64,
+            "generatedAtUtc": "2026-07-27T23:06:06Z",
+            "data": {"asOf": "2026-07-27"},
+        }
+    ).encode()
+    dashboard_path.write_bytes(dashboard_bytes)
+    manifest_path = data_dir / "grid" / "v1" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b"last-good-grid\n")
+
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--live",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--site-dir",
+            str(site_dir),
+        ]
+    )
+    dates = pd.bdate_range("2026-07-01", periods=20)
+    base_market = SimpleNamespace(
+        candidate_symbols=[f"S{index:04d}" for index in range(2_700)],
+        prices=pd.DataFrame({"SPY": 100.0}, index=dates),
+        requested_through=dates[-1].date().isoformat(),
+        as_of=dates[-1],
+    )
+    monkeypatch.setattr("momentum_factor_lab.cli.load_market_data", lambda config: base_market)
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.write_market_data_snapshot",
+        lambda market, path: {"manifest": str(path / "market_data_manifest.json")},
+    )
+
+    error = NoEligibleFactorError(
+        [
+            {
+                "factor": "mom_12_1",
+                "policy_id": "score_liquidity_rank",
+                "guardrail_breaches": ["minimum_sharpe", "maximum_drawdown"],
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli._compute_payload",
+        lambda config, market: (_ for _ in ()).throw(error),
+    )
+
+    summary = _execute_scheduled_grid(
+        args,
+        site_dir=site_dir,
+        title="Scheduled grid",
+        presets=[
+            ScheduledGridPreset("latest-top20", ResearchInputs(top_n=20), 0),
+            ScheduledGridPreset("latest-top30", ResearchInputs(top_n=30), 0),
+        ],
+        default_preset_id="latest-top20",
+    )
+
+    status = summary["automationStatus"]
+    assert status["state"] == "degraded"
+    assert status["reasonCode"] == "no_eligible_factor"
+    assert status["targetDataAsOf"] == dates[-1].date().isoformat()
+    assert status["analysis"]["eligibleFactorCount"] == 0
+    assert status["analysis"]["guardrailsRelaxed"] is False
+    assert status["analysis"]["fallbackFactorSelected"] is False
+    assert status["publication"] == {
+        "updated": False,
+        "lastGoodPreserved": True,
+        "policy": "preserve_last_good",
+    }
+    assert status["lastGood"]["resultKey"] == "f" * 64
+    assert dashboard_path.read_bytes() == dashboard_bytes
+    assert manifest_path.read_bytes() == b"last-good-grid\n"
+    assert json.loads(Path(summary["paths"]["automationStatus"]).read_text()) == status
 
 
 def test_committed_dashboard_config_runs_full_packaged_live_universe() -> None:

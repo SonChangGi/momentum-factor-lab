@@ -6,10 +6,11 @@ import io
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import MAX_TOP_N, RunConfig
+from .config import ABSOLUTE_GUARDRAIL_VERSION, MAX_TOP_N, RunConfig
 from .data import (
     MarketData,
     load_market_data,
@@ -26,7 +27,12 @@ from .static_grid import (
     write_static_grid,
 )
 from .universe import normalize_symbols
-from .workflow import result_payload, run_analysis, write_payload_json
+from .workflow import (
+    NoEligibleFactorError,
+    result_payload,
+    run_analysis,
+    write_payload_json,
+)
 
 
 LEGACY_SCHEDULED_ARGUMENTS = frozenset(
@@ -53,6 +59,9 @@ LEGACY_SCHEDULED_ARGUMENTS = frozenset(
 )
 
 _SCHEDULED_PRESET_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+AUTOMATION_STATUS_CONTRACT = "momentum-dashboard-automation-status"
+AUTOMATION_STATUS_SCHEMA_VERSION = 1
+AUTOMATION_STATUS_FILENAME = "automation-status.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +69,118 @@ class ScheduledGridPreset:
     preset_id: str
     research_inputs: ResearchInputs
     market_session_offset: int = 0
+
+
+def _last_good_reference(site_dir: Path) -> dict[str, Any] | None:
+    dashboard_path = site_dir / "data" / "dashboard.json"
+    try:
+        payload = json.loads(dashboard_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    data_as_of = data.get("asOf") if isinstance(data, dict) else None
+    result_key = payload.get("resultKey")
+    generated_at = payload.get("generatedAtUtc")
+    if not any(isinstance(value, str) and value for value in (data_as_of, result_key, generated_at)):
+        return None
+    return {
+        "resultKey": result_key if isinstance(result_key, str) else None,
+        "dataAsOf": data_as_of if isinstance(data_as_of, str) else None,
+        "generatedAtUtc": generated_at if isinstance(generated_at, str) else None,
+        "path": "data/dashboard.json",
+    }
+
+
+def _automation_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _write_automation_status(site_dir: Path, status: dict[str, Any]) -> Path:
+    data_dir = site_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / AUTOMATION_STATUS_FILENAME
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+def _unavailable_automation_status(
+    *,
+    site_dir: Path,
+    preset_id: str,
+    target_data_as_of: str | None,
+    error: NoEligibleFactorError,
+) -> tuple[dict[str, Any], Path]:
+    last_good = _last_good_reference(site_dir)
+    status = {
+        "schemaVersion": AUTOMATION_STATUS_SCHEMA_VERSION,
+        "contract": AUTOMATION_STATUS_CONTRACT,
+        "project": "momentum-factor-lab",
+        "state": "degraded" if last_good is not None else "unavailable",
+        "reasonCode": "no_eligible_factor",
+        "attemptedAtUtc": _automation_timestamp(),
+        "targetDataAsOf": target_data_as_of,
+        "affectedPresetId": preset_id,
+        "analysis": {
+            "guardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
+            "evaluatedFactorCount": error.evaluated_factor_count,
+            "eligibleFactorCount": 0,
+            "guardrailBreachCounts": error.guardrail_breach_counts,
+            "guardrailsRelaxed": False,
+            "fallbackFactorSelected": False,
+        },
+        "publication": {
+            "updated": False,
+            "lastGoodPreserved": last_good is not None,
+            "policy": "preserve_last_good",
+        },
+        "lastGood": last_good,
+    }
+    return status, _write_automation_status(site_dir, status)
+
+
+def _available_automation_status(
+    *,
+    site_dir: Path,
+    payload: dict[str, Any],
+    preset_count: int,
+) -> tuple[dict[str, Any], Path]:
+    data = payload.get("data")
+    data_as_of = data.get("asOf") if isinstance(data, dict) else None
+    status = {
+        "schemaVersion": AUTOMATION_STATUS_SCHEMA_VERSION,
+        "contract": AUTOMATION_STATUS_CONTRACT,
+        "project": "momentum-factor-lab",
+        "state": "available",
+        "reasonCode": "published",
+        "attemptedAtUtc": _automation_timestamp(),
+        "targetDataAsOf": data_as_of if isinstance(data_as_of, str) else None,
+        "affectedPresetId": None,
+        "analysis": {
+            "guardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
+            "presetCount": preset_count,
+            "guardrailsRelaxed": False,
+            "fallbackFactorSelected": False,
+        },
+        "publication": {
+            "updated": True,
+            "lastGoodPreserved": False,
+            "policy": "validated_static_grid",
+        },
+        "lastGood": {
+            "resultKey": payload.get("resultKey"),
+            "dataAsOf": data_as_of if isinstance(data_as_of, str) else None,
+            "generatedAtUtc": payload.get("generatedAtUtc"),
+            "path": "data/dashboard.json",
+        },
+    }
+    return status, _write_automation_status(site_dir, status)
 
 
 def _optional_nonnegative_int(value: str) -> int | None:
@@ -796,7 +917,25 @@ def _execute_scheduled_grid(
         else:
             market = read_market_data_snapshot(config, snapshot_dir)
             market.requested_through = config.effective_end_date
-        payload, result_path = _compute_payload(config, market)
+        try:
+            payload, result_path = _compute_payload(config, market)
+        except NoEligibleFactorError as error:
+            market_as_of = getattr(market, "as_of", None)
+            target_data_as_of = (
+                str(market_as_of)[:10]
+                if market_as_of is not None
+                else (config.end_date or str(sessions[-1].date()))
+            )
+            automation_status, automation_status_path = _unavailable_automation_status(
+                site_dir=site_dir,
+                preset_id=preset.preset_id,
+                target_data_as_of=target_data_as_of,
+                error=error,
+            )
+            return {
+                "automationStatus": automation_status,
+                "paths": {"automationStatus": str(automation_status_path)},
+            }
         _require_full_actual_publication(payload, config)
         summary_payload = dashboard_summary(payload)
         artifacts.append(
@@ -831,6 +970,13 @@ def _execute_scheduled_grid(
     paths["result"] = str(default_result_path)
     summary = _compact_summary(default_payload, paths)
     summary["staticGridPresets"] = preset_receipts
+    automation_status, automation_status_path = _available_automation_status(
+        site_dir=site_dir,
+        payload=default_payload,
+        preset_count=len(preset_receipts),
+    )
+    summary["automationStatus"] = automation_status
+    summary["paths"]["automationStatus"] = str(automation_status_path)
     return summary
 
 
@@ -916,6 +1062,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
             if args.json:
                 print(json.dumps(summary, ensure_ascii=False, indent=2))
+            elif summary.get("automationStatus", {}).get("state") in {
+                "degraded",
+                "unavailable",
+            }:
+                automation = summary["automationStatus"]
+                print(
+                    f"automation_state={automation['state']} "
+                    f"reason={automation['reasonCode']} "
+                    f"target_data_as_of={automation['targetDataAsOf']} "
+                    f"last_good_preserved={automation['publication']['lastGoodPreserved']}"
+                )
             else:
                 _print_run_summary(summary)
             return 0

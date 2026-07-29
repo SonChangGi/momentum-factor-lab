@@ -373,4 +373,11 @@ def test_workflow_is_thin_external_worker_with_callback() -> None:
     assert workflow.count("or parsed_callback_base.username") == 1
     assert workflow.count("or parsed.query") == 1
     assert workflow.count("or parsed_callback_base.query") == 1
+    assert "Reject secrets in immutable controlled result" in workflow
+    assert "momentum_factor_lab.publication_security" in workflow
+    assert '"${ARTIFACT_PATH}"' in workflow
+    assert '"${SIDECAR_PATH}"' in workflow
+    assert workflow.index("momentum_factor_lab.publication_security") < workflow.index(
+        'git add -- "${ARTIFACT_PATH}" "${SIDECAR_PATH}"'
+    )
     assert "run_analysis" not in workflow

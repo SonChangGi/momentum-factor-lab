@@ -131,6 +131,31 @@ source와 수집 source health도 파일 hash로 봉인해 replay합니다. 따�
 preset에서도 refresh universe의 종목명과 공급자 provenance가 사라지거나 일반적인
 snapshot label로 대체되지 않습니다.
 
+### 정기 갱신·watchdog 상태
+
+`Daily Momentum Dashboard`는 미국 정규장 완료 이후 06:30 KST에 실행합니다.
+08:30·10:30·12:30 KST watchdog은 공개 데이터 기준일과 성공 생성 시각을 확인해,
+이미 최신인 경우 실제로 건너뛰고 stale 또는 최근 실패 상태일 때만 본 실행을 다시
+요청합니다. watchdog이 queue한 dispatch는 시작 시점에도 schedule 의미로 최신
+dashboard/status 원격 쌍을 다시 확인해 경합으로 생기는 중복 게시를 막습니다. 사람이
+실행하는 수동 dispatch의 `watchdog_origin` 기본값은 `false`이며 이 중복 방지와
+무관하게 항상 실행합니다. 분석 cache hit으로 immutable 결과의 `generatedAtUtc`가
+유지되는 경우에는, 정확히 같은 result/data/generated identity에 결합된
+`available.attemptedAtUtc`를 성공 게시 시각으로 사용합니다.
+
+고정 절대 가드레일을 통과한 팩터가 하나도 없으면 임의 팩터를 선택하거나 임계값을
+완화하지 않습니다. 이는 실행 오류가 아니라 fail-closed 분석 결과이므로 workflow는
+`docs/data/automation-status.json`에 `degraded`(기존 검증 결과가 없으면
+`unavailable`)와 `no_eligible_factor`를 기록하고 정상 종료합니다. 공개 dashboard와
+3-preset grid는 마지막 검증 결과를 그대로 유지하며, watchdog은 이 상태를 최근 실패로
+보고 다음 제한된 재시도 시점에 다시 실행합니다.
+
+공개 source health에는 로컬 cache 경로를 싣지 않습니다. 생성된 `docs`는 커밋 전에
+provider credential 형식과 민감한 JSON 필드를 스캔하며, 탐지된 실제 값은 로그에
+출력하거나 push-protection 우회 대상으로 처리하지 않고 게시를 중단합니다. 원격
+control run도 immutable artifact와 sidecar를 같은 scanner로 통과한 뒤에만
+커밋합니다.
+
 임의 입력은 loopback 전용 로컬 API에서 실행합니다.
 
 ```bash
@@ -219,6 +244,7 @@ worker callback에는 다음 저장소 secret이 필요합니다.
 - `outputs/.../input/market_data_manifest.json`: 파일·행렬 SHA-256, 실제 as-of, 후보 수, read contract
 - `docs/data/grid/v1/manifest.json`: 지원 입력과 content-addressed 결과 목록
 - `docs/data/dashboard.json`, `docs/data/summary.json`: default entry의 byte-identical migration alias
+- `docs/data/automation-status.json`: 최근 정기 분석·게시 상태와 last-good 보존 여부
 - `docs/index.html`, `docs/assets/*`: 정적 viewer
 
 schema-v5에는 다음이 포함됩니다.

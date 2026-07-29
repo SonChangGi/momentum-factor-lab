@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,22 +22,61 @@ def _dashboard(
     }
 
 
-def _dashboard_v5(timestamp: str, *, data_as_of: str = "2026-06-09") -> dict[str, object]:
+def _dashboard_v5(
+    timestamp: str,
+    *,
+    data_as_of: str = "2026-06-09",
+    result_key: str = "a" * 64,
+) -> dict[str, object]:
     return {
         "schemaVersion": 5,
+        "resultKey": result_key,
         "generatedAtUtc": timestamp,
         "data": {"asOf": data_as_of},
     }
 
 
-def test_schema_v5_uses_generated_at_and_actual_data_as_of() -> None:
+def _automation(
+    state: str,
+    attempted_at: str,
+    *,
+    dashboard: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schemaVersion": 1,
+        "contract": "momentum-dashboard-automation-status",
+        "state": state,
+        "attemptedAtUtc": attempted_at,
+    }
+    if dashboard is not None:
+        data = dashboard.get("data")
+        assert isinstance(data, dict)
+        payload.update(
+            {
+                "targetDataAsOf": data.get("asOf"),
+                "publication": {
+                    "updated": state == "available",
+                    "lastGoodPreserved": state != "available",
+                },
+                "lastGood": {
+                    "resultKey": dashboard.get("resultKey"),
+                    "dataAsOf": data.get("asOf"),
+                    "generatedAtUtc": dashboard.get("generatedAtUtc"),
+                    "path": "data/dashboard.json",
+                },
+            }
+        )
+    return payload
+
+
+def test_first_state_without_public_status_skips_when_dashboard_is_fresh() -> None:
     decision = decide_dashboard_freshness(
         _dashboard_v5("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
     )
 
-    assert decision.skip is False
+    assert decision.skip is True
     assert decision.latest_run_kst is not None
     assert decision.latest_run_kst.isoformat() == "2026-06-10T06:40:00+09:00"
     assert decision.latest_data_as_of is not None
@@ -55,15 +95,15 @@ def test_schedule_runs_when_latest_execution_is_before_kst_cutoff() -> None:
     assert decision.latest_run_kst.hour == 2
 
 
-def test_schedule_revalidates_even_after_cutoff_with_target_date() -> None:
+def test_schedule_skips_after_cutoff_with_target_date() -> None:
     decision = decide_dashboard_freshness(
         _dashboard("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
     )
 
-    assert decision.skip is False
-    assert "snapshot revalidation" in decision.reason
+    assert decision.skip is True
+    assert "fresh successful publication" in decision.reason
     assert decision.latest_data_as_of is not None
     assert decision.latest_data_as_of.isoformat() == "2026-06-09"
     assert decision.target_data_as_of.isoformat() == "2026-06-09"
@@ -77,18 +117,18 @@ def test_schedule_retries_when_execution_after_cutoff_has_stale_data_as_of() -> 
     )
 
     assert decision.skip is False
-    assert "snapshot revalidation" in decision.reason
+    assert "older than target" in decision.reason
     assert decision.target_data_as_of.isoformat() == "2026-06-10"
 
 
-def test_exact_kst_cutoff_still_requires_snapshot_revalidation() -> None:
+def test_exact_kst_cutoff_with_target_data_is_fresh() -> None:
     decision = decide_dashboard_freshness(
         _dashboard("2026-06-09T21:30:00Z", data_as_of="2026-06-09"),
         event_name="schedule",
         now=datetime(2026, 6, 9, 23, 17, tzinfo=UTC),
     )
 
-    assert decision.skip is False
+    assert decision.skip is True
 
 
 def test_generated_at_is_used_when_run_timestamp_is_missing() -> None:
@@ -107,7 +147,7 @@ def test_generated_at_is_used_when_run_timestamp_is_missing() -> None:
         now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
     )
 
-    assert decision.skip is False
+    assert decision.skip is True
     assert decision.latest_run_kst is not None
     assert decision.latest_run_kst.hour == 6
     assert decision.latest_run_kst.minute == 40
@@ -121,6 +161,123 @@ def test_manual_dispatch_never_skips_even_after_kst_cutoff() -> None:
     )
 
     assert decision.skip is False
+
+
+def test_latest_degraded_automation_state_forces_watchdog_retry() -> None:
+    decision = decide_dashboard_freshness(
+        _dashboard_v5("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
+        event_name="schedule",
+        automation_status=_automation("degraded", "2026-06-09T22:00:00Z"),
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+
+    assert decision.skip is False
+    assert decision.latest_automation_state == "degraded"
+    assert decision.latest_automation_attempt_kst is not None
+    assert "retry is required" in decision.reason
+
+
+def test_failure_older_than_latest_success_does_not_trigger_duplicate_retry() -> None:
+    decision = decide_dashboard_freshness(
+        _dashboard_v5("2026-06-09T21:40:00Z", data_as_of="2026-06-09"),
+        event_name="schedule",
+        automation_status=_automation("degraded", "2026-06-09T20:00:00Z"),
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+
+    assert decision.skip is True
+
+
+def test_bound_available_attempt_marks_cache_hit_as_successful_publication() -> None:
+    dashboard = _dashboard_v5(
+        "2026-06-09T18:00:00Z",
+        data_as_of="2026-06-09",
+    )
+
+    decision = decide_dashboard_freshness(
+        dashboard,
+        event_name="schedule",
+        automation_status=_automation(
+            "available",
+            "2026-06-09T21:45:00Z",
+            dashboard=dashboard,
+        ),
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+
+    assert decision.skip is True
+    assert decision.latest_run_kst is not None
+    assert decision.latest_run_kst < decision.cutoff_kst
+    assert decision.latest_successful_publication_kst is not None
+    assert (
+        decision.latest_successful_publication_kst.isoformat()
+        == "2026-06-10T06:45:00+09:00"
+    )
+
+
+def test_unbound_available_attempt_cannot_make_stale_dashboard_fresh() -> None:
+    dashboard = _dashboard_v5(
+        "2026-06-09T18:00:00Z",
+        data_as_of="2026-06-09",
+    )
+    other_dashboard = _dashboard_v5(
+        "2026-06-09T18:00:00Z",
+        data_as_of="2026-06-09",
+        result_key="b" * 64,
+    )
+
+    decision = decide_dashboard_freshness(
+        dashboard,
+        event_name="schedule",
+        automation_status=_automation(
+            "available",
+            "2026-06-09T21:45:00Z",
+            dashboard=other_dashboard,
+        ),
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+
+    assert decision.skip is False
+    assert decision.latest_successful_publication_kst == decision.latest_run_kst
+    assert "predates" in decision.reason
+
+
+def test_remote_dashboard_and_status_pair_avoids_last_good_race() -> None:
+    remote_dashboard = _dashboard_v5(
+        "2026-06-09T18:00:00Z",
+        data_as_of="2026-06-09",
+        result_key="b" * 64,
+    )
+    remote_status = _automation(
+        "available",
+        "2026-06-09T21:45:00Z",
+        dashboard=remote_dashboard,
+    )
+    stale_local_status = _automation(
+        "degraded",
+        "2026-06-09T22:00:00Z",
+        dashboard=_dashboard_v5(
+            "2026-06-09T17:00:00Z",
+            data_as_of="2026-06-09",
+            result_key="a" * 64,
+        ),
+    )
+
+    remote_pair = decide_dashboard_freshness(
+        remote_dashboard,
+        event_name="schedule",
+        automation_status=remote_status,
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+    mixed_pair = decide_dashboard_freshness(
+        remote_dashboard,
+        event_name="schedule",
+        automation_status=stale_local_status,
+        now=datetime(2026, 6, 9, 23, 47, tzinfo=UTC),
+    )
+
+    assert remote_pair.skip is True
+    assert mixed_pair.skip is False
 
 
 def test_invalid_dashboard_payload_fails_open(tmp_path: Path) -> None:
@@ -167,6 +324,47 @@ def test_dashboard_freshness_cli_emits_github_outputs(tmp_path: Path, capsys) ->
             "schedule",
             "--data-path",
             str(data_path),
+            "--status-path",
+            str(tmp_path / "automation-status.json"),
+            "--now-utc",
+            "2026-06-09T23:47:00+00:00",
+        ]
+    )
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "skip=true" in stdout
+    assert "latest_run_kst=2026-06-10T06:40:00+09:00" in stdout
+    assert "latest_data_as_of=2026-06-09" in stdout
+    assert "latest_automation_state=none" in stdout
+    assert "target_data_as_of=2026-06-09" in stdout
+
+
+def test_dashboard_freshness_cli_retries_after_degraded_status_commit(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    data_path = tmp_path / "dashboard.json"
+    status_path = tmp_path / "automation-status.json"
+    data_path.write_text(
+        json.dumps(
+            _dashboard_v5("2026-06-09T21:40:00Z", data_as_of="2026-06-09")
+        ),
+        encoding="utf-8",
+    )
+    status_path.write_text(
+        json.dumps(_automation("degraded", "2026-06-09T22:00:00Z")),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--event-name",
+            "schedule",
+            "--data-path",
+            str(data_path),
+            "--status-path",
+            str(status_path),
             "--now-utc",
             "2026-06-09T23:47:00+00:00",
         ]
@@ -175,6 +373,5 @@ def test_dashboard_freshness_cli_emits_github_outputs(tmp_path: Path, capsys) ->
     stdout = capsys.readouterr().out
     assert exit_code == 0
     assert "skip=false" in stdout
-    assert "latest_run_kst=2026-06-10T06:40:00+09:00" in stdout
-    assert "latest_data_as_of=2026-06-09" in stdout
-    assert "target_data_as_of=2026-06-09" in stdout
+    assert "latest_automation_state=degraded" in stdout
+    assert "retry is required" in stdout
