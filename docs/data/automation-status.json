@@ -1,0 +1,27 @@
+{
+  "affectedPresetId": null,
+  "analysis": {
+    "fallbackFactorSelected": false,
+    "guardrailVersion": "absolute-factor-v2",
+    "guardrailsRelaxed": false,
+    "presetCount": 3
+  },
+  "attemptedAtUtc": "2026-07-30T23:22:43.143234Z",
+  "contract": "momentum-dashboard-automation-status",
+  "lastGood": {
+    "dataAsOf": "2026-07-30",
+    "generatedAtUtc": "2026-07-30T23:09:31.800102+00:00",
+    "path": "data/dashboard.json",
+    "resultKey": "3640f2072f72efb08805f63265817b4e3cf3dfdb4728b9d0a3eb9f8507fb9f63"
+  },
+  "project": "momentum-factor-lab",
+  "publication": {
+    "lastGoodPreserved": false,
+    "policy": "validated_static_grid",
+    "updated": true
+  },
+  "reasonCode": "published",
+  "schemaVersion": 1,
+  "state": "available",
+  "targetDataAsOf": "2026-07-30"
+}
