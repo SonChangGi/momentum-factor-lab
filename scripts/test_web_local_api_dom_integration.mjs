@@ -10,7 +10,7 @@ const api = context.__MFL_WEB_TESTS__;
 const normalized = structuredClone(payload.resultIdentity.keyParts.normalizedInputs);
 normalized.top_n = Math.min(50, normalized.top_n + 1);
 normalized.max_extreme_daily_return = 0.8;
-normalized.evaluation_window_days = 755;
+normalized.evaluation_window_days = 126;
 
 const research = api.researchInputsFromNormalizedInputs(normalized);
 assert.equal(research.version, "research-inputs-v2");
@@ -52,5 +52,7 @@ const baseEntry = {
 const request = api.localApiRequestFromStaticState({ defaultResultKey: payload.resultKey, entries: [baseEntry] }, normalized);
 assert.equal(request.baseEntry.resultKey, payload.resultKey);
 assert.equal(request.requestedInputs.top_n, normalized.top_n);
+assert.equal(request.requestedInputs.min_evaluation_observations, 126);
+assert.equal(request.requestedInputs.min_daily_risk_observations, 126);
 
 console.log("PASS arbitrary form inputs serialize to canonical Python API request");

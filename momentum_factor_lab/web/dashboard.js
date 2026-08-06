@@ -14,7 +14,7 @@ const ABSOLUTE_GUARDRAIL_VERSION = 'absolute-factor-v2';
 const LOCAL_API_BASE_URL = 'http://127.0.0.1:8765';
 const LOCAL_API_POLL_INTERVAL_MS = 1000;
 const CONTROL_PROJECT_ID = 'momentum';
-const CONTROL_INPUT_SCHEMA_VERSION = 'momentum/v2';
+const CONTROL_INPUT_SCHEMA_VERSION = 'momentum/v3';
 const CONTROL_CONFIG_HASH_ALGORITHM = 'momentum-research-inputs-rfc8785-v1';
 const CONTROL_ARTIFACT_CONTRACT_VERSION = 'momentum/schema-v5-control-result-v1';
 const CONTROL_API_POLL_INTERVAL_MS = 5000;
@@ -895,7 +895,11 @@ function serializeInputValue(field, value) {
 
 function applyResearchInputDependencies(normalizedInputs) {
   if (integer(normalizedInputs.evaluation_window_days)) {
-    const minimumObservations = Math.max(252, Number(normalizedInputs.evaluation_window_days) - 252);
+    const evaluationWindowDays = Number(normalizedInputs.evaluation_window_days);
+    const minimumObservations = Math.min(
+      evaluationWindowDays,
+      Math.max(252, evaluationWindowDays - 252),
+    );
     normalizedInputs.min_evaluation_observations = minimumObservations;
     normalizedInputs.min_daily_risk_observations = minimumObservations;
   }
@@ -913,9 +917,9 @@ function researchInputsFromNormalizedInputs(normalizedInputs) {
   });
   requireCondition(
     integer(normalizedInputs.evaluation_window_days)
-      && Number(normalizedInputs.evaluation_window_days) >= 252
+      && Number(normalizedInputs.evaluation_window_days) >= 21
       && Number(normalizedInputs.evaluation_window_days) <= 2520,
-    'evaluation_window_days는 252–2520 정수여야 합니다.',
+    'evaluation_window_days는 21–2520 정수여야 합니다.',
   );
   return result;
 }
@@ -4040,6 +4044,44 @@ function formatChartReturn(value) {
   return `${percent > 0 ? '+' : ''}${percent.toFixed(2)}%`;
 }
 
+function compactChartSeriesLabel(value, maxLength = 22) {
+  const label = String(value || '-');
+  return label.length > maxLength ? `${label.slice(0, Math.max(1, maxLength - 1))}…` : label;
+}
+
+function layoutChartEndLabels(items = [], options = {}) {
+  const minY = Number(options.minY);
+  const maxY = Number(options.maxY);
+  const requestedGap = Math.max(0, Number(options.gap) || 0);
+  const labels = items
+    .filter((item) => item && Number.isFinite(Number(item.y)))
+    .map((item) => ({ ...item, y: Number(item.y) }))
+    .sort((left, right) => left.y - right.y);
+  if (!labels.length || !Number.isFinite(minY) || !Number.isFinite(maxY) || maxY < minY) {
+    return [];
+  }
+  const gap = labels.length <= 1
+    ? 0
+    : Math.min(requestedGap, (maxY - minY) / (labels.length - 1));
+  labels.forEach((item, index) => {
+    const bounded = Math.max(minY, Math.min(maxY, item.y));
+    item.labelY = index === 0
+      ? bounded
+      : Math.max(bounded, labels[index - 1].labelY + gap);
+  });
+  if (labels.at(-1).labelY > maxY) {
+    labels.at(-1).labelY = maxY;
+    for (let index = labels.length - 2; index >= 0; index -= 1) {
+      labels[index].labelY = Math.min(labels[index].labelY, labels[index + 1].labelY - gap);
+    }
+  }
+  if (labels[0].labelY < minY) {
+    const shift = minY - labels[0].labelY;
+    labels.forEach((item) => { item.labelY += shift; });
+  }
+  return labels;
+}
+
 function renderBacktestChart() {
   const run = currentRun();
   const factor = selectedFactor();
@@ -4141,9 +4183,9 @@ function renderBacktestChart() {
     chartState.pinnedDate || commonPeriod?.endDate || allDates.at(-1),
   );
 
-  const width = 760;
-  const height = 300;
-  const plot = { left: 70, right: 22, top: 20, bottom: 54 };
+  const width = 1240;
+  const height = 420;
+  const plot = { left: 78, right: 265, top: 26, bottom: 60 };
   const plotWidth = width - plot.left - plot.right;
   const plotHeight = height - plot.top - plot.bottom;
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -4208,11 +4250,65 @@ function renderBacktestChart() {
       svg.appendChild(polyline);
     });
   });
+  const plotEndX = width - plot.right;
+  const endLabelX = plotEndX + 24;
+  appendSvgText(svg, '종료일 누적', endLabelX, 16, 'chart-end-heading', 'start');
+  const endLabels = layoutChartEndLabels(
+    seriesModels.map((series) => ({
+      series,
+      point: series.model.points.at(-1),
+      y: yFor(series.model.points.at(-1)?.normalized),
+    })),
+    {
+      minY: plot.top + 8,
+      maxY: height - plot.bottom - 8,
+      gap: 28,
+    },
+  );
+  endLabels.forEach(({ series, point, labelY }) => {
+    const connector = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    connector.setAttribute('points', [
+      `${xFor(point).toFixed(1)},${yFor(point.normalized).toFixed(1)}`,
+      `${(plotEndX + 9).toFixed(1)},${labelY.toFixed(1)}`,
+      `${(endLabelX - 7).toFixed(1)},${labelY.toFixed(1)}`,
+    ].join(' '));
+    connector.setAttribute('class', `chart-end-connector ${series.className}`);
+    connector.setAttribute('data-series-key', series.key);
+    svg.appendChild(connector);
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', String(endLabelX));
+    text.setAttribute('y', String(labelY));
+    text.setAttribute('class', `chart-end-label ${series.className}`);
+    text.setAttribute('data-series-key', series.key);
+    text.setAttribute('dominant-baseline', 'middle');
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = `${series.label} ${formatChartReturn(point.normalized - 1)}`;
+    text.appendChild(title);
+    const name = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+    name.setAttribute('class', 'chart-end-name');
+    name.textContent = compactChartSeriesLabel(series.label);
+    text.appendChild(name);
+    const value = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+    value.setAttribute('class', 'chart-end-value');
+    value.setAttribute('dx', '8');
+    value.textContent = formatChartReturn(point.normalized - 1);
+    text.appendChild(value);
+    svg.appendChild(text);
+  });
   const dateGuide = document.createElementNS('http://www.w3.org/2000/svg', 'line');
   dateGuide.setAttribute('y1', String(plot.top));
   dateGuide.setAttribute('y2', String(height - plot.bottom));
   dateGuide.setAttribute('class', 'chart-date-guide');
   svg.appendChild(dateGuide);
+  const selectedDatePoints = new Map();
+  seriesModels.forEach((series) => {
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    marker.setAttribute('r', '4');
+    marker.setAttribute('class', `chart-series-point ${series.className}`);
+    marker.setAttribute('data-series-key', series.key);
+    svg.appendChild(marker);
+    selectedDatePoints.set(series.key, marker);
+  });
   const activePoint = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
   activePoint.setAttribute('r', '5.5');
   activePoint.setAttribute('class', 'chart-active-point');
@@ -4234,7 +4330,13 @@ function renderBacktestChart() {
       button.type = 'button';
       button.className = `chart-series-button ${series.className}`;
       button.dataset.seriesKey = series.key;
-      button.textContent = series.label;
+      const name = document.createElement('span');
+      name.className = 'chart-series-name';
+      name.textContent = series.label;
+      const value = document.createElement('strong');
+      value.className = 'chart-series-value';
+      value.textContent = '관측 없음';
+      button.replaceChildren(name, value);
       button.addEventListener('pointerenter', () => {
         chartState.previewSeriesKey = series.key;
         updatePresentation();
@@ -4307,15 +4409,34 @@ function renderBacktestChart() {
     });
     seriesControls?.querySelectorAll('button').forEach((button) => {
       const key = button.dataset.seriesKey;
+      const series = seriesModels.find((item) => item.key === key);
+      const seriesPoint = chartPointAtDate(series?.model.points, activeDate);
+      const formattedValue = seriesPoint
+        ? formatChartReturn(seriesPoint.normalized - 1)
+        : '관측 없음';
       button.setAttribute('aria-pressed', String(key === chartState.pinnedSeriesKey));
       button.classList.toggle('is-preview', key === chartState.previewSeriesKey);
+      button.querySelector('.chart-series-value').textContent = formattedValue;
+      button.setAttribute('aria-label', `${series?.label || key} · ${activeDate} ${formattedValue}`);
     });
     const guideX = xForDate(activeDate);
     dateGuide.setAttribute('x1', String(guideX));
     dateGuide.setAttribute('x2', String(guideX));
+    selectedDatePoints.forEach((marker, key) => {
+      const series = seriesModels.find((item) => item.key === key);
+      const seriesPoint = chartPointAtDate(series?.model.points, activeDate);
+      if (!seriesPoint) {
+        marker.setAttribute('hidden', '');
+        return;
+      }
+      marker.removeAttribute('hidden');
+      marker.setAttribute('cx', String(guideX));
+      marker.setAttribute('cy', String(yFor(seriesPoint.normalized)));
+    });
     const point = chartPointAtDate(activeSeries.model.points, activeDate);
     if (point) {
       activePoint.removeAttribute('hidden');
+      activePoint.setAttribute('class', `chart-active-point ${activeSeries.className}`);
       activePoint.setAttribute('cx', String(guideX));
       activePoint.setAttribute('cy', String(yFor(point.normalized)));
     } else {
@@ -4352,6 +4473,7 @@ function renderBacktestChart() {
     return allDates[index];
   };
   hitTarget.addEventListener('pointermove', (event) => {
+    if (event.pointerType === 'touch') return;
     chartState.previewDate = dateForClientX(event.clientX, event.clientY);
     updatePresentation();
   });
@@ -4384,7 +4506,8 @@ function renderBacktestChart() {
   };
   function ensureActiveDateVisible(date) {
     if (!date || target.scrollWidth <= target.clientWidth) return;
-    const screenPoint = svgPointToClient(svg, xForDate(date), height / 2);
+    const revealX = date === allDates.at(-1) ? width : xForDate(date);
+    const screenPoint = svgPointToClient(svg, revealX, height / 2);
     if (!screenPoint) return;
     const targetRect = target.getBoundingClientRect();
     const contentX = target.scrollLeft + screenPoint.x - targetRect.left;
@@ -6735,10 +6858,10 @@ function readResearchFormRequest() {
   });
   if (
     !Number.isInteger(Number(requestedInputs.evaluation_window_days))
-      || Number(requestedInputs.evaluation_window_days) < 252
+      || Number(requestedInputs.evaluation_window_days) < 21
       || Number(requestedInputs.evaluation_window_days) > 2520
   ) {
-    throw new Error('평가 기간(거래일)은 252–2520 정수여야 합니다.');
+    throw new Error('평가 기간(거래일)은 21–2520 정수여야 합니다.');
   }
   if (Number(requestedInputs.top_n) < 1 || Number(requestedInputs.top_n) > 50) {
     throw new Error('Top-N은 1–50 정수여야 합니다.');
@@ -7326,6 +7449,8 @@ if (typeof globalThis !== 'undefined') {
     scrollLeftToReveal,
     chartIndexForPointer,
     formatChartReturn,
+    compactChartSeriesLabel,
+    layoutChartEndLabels,
     pythonPerformanceMetric,
     renderPythonPerformanceMetricsTable,
     renderBacktestComparisonSummary,

@@ -89,6 +89,8 @@ def test_exactly_one_live_local_or_demo_source_is_required() -> None:
         ({"top_n": MAX_TOP_N + 1}, "top_n"),
         ({"top_n": True}, "top_n"),
         ({"max_weight": 0.0}, "max_weight"),
+        ({"evaluation_window_days": 20}, "evaluation_window_days"),
+        ({"evaluation_window_days": 2_521}, "evaluation_window_days"),
         ({"min_evaluation_observations": 200}, "min_evaluation_observations"),
         ({"score_winsor_lower": 0.9, "score_winsor_upper": 0.1}, "winsor"),
         ({"score_sortino_weight": 0.30}, "sum to 1"),
@@ -217,6 +219,17 @@ def test_config_exposes_live_mode_without_credentials_or_execution_contracts() -
 def test_cash_return_at_or_below_total_loss_is_rejected() -> None:
     with pytest.raises(ValueError, match="greater than -1"):
         RunConfig(demo=True, annual_cash_return=-1.0).validate()
+
+
+def test_short_evaluation_window_accepts_full_window_coverage() -> None:
+    config = RunConfig(
+        demo=True,
+        evaluation_window_days=21,
+        min_evaluation_observations=21,
+        min_daily_risk_observations=21,
+    )
+
+    config.validate()
 
 
 def test_local_volume_requires_explicit_split_adjusted_basis() -> None:

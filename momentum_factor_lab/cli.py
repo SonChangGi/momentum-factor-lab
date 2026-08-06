@@ -10,7 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import ABSOLUTE_GUARDRAIL_VERSION, MAX_TOP_N, RunConfig
+from .config import (
+    ABSOLUTE_GUARDRAIL_VERSION,
+    MAX_TOP_N,
+    RunConfig,
+    minimum_evaluation_observations,
+)
 from .data import (
     MarketData,
     load_market_data,
@@ -254,9 +259,9 @@ def _add_run_arguments(run: argparse.ArgumentParser) -> None:
 
     evaluation = run.add_argument_group("factor evaluation and coverage")
     evaluation.add_argument("--evaluation-window-days", type=int, default=756)
-    evaluation.add_argument("--min-evaluation-observations", type=int, default=504)
+    evaluation.add_argument("--min-evaluation-observations", type=int)
     evaluation.add_argument("--min-valuation-coverage", type=float, default=0.98)
-    evaluation.add_argument("--min-daily-risk-observations", type=int, default=504)
+    evaluation.add_argument("--min-daily-risk-observations", type=int)
     evaluation.add_argument("--stability-periods", type=int, default=3)
     evaluation.add_argument("--score-sortino-weight", type=float, default=0.25)
     evaluation.add_argument("--score-calmar-weight", type=float, default=0.20)
@@ -461,6 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _config(args: argparse.Namespace) -> RunConfig:
+    derived_minimum_observations = minimum_evaluation_observations(args.evaluation_window_days)
     return RunConfig(
         start_date=args.start_date,
         end_date=args.end_date,
@@ -496,9 +502,17 @@ def _config(args: argparse.Namespace) -> RunConfig:
         max_volume_missing_ratio=args.max_volume_missing_ratio,
         max_extreme_daily_return=args.max_extreme_daily_return,
         evaluation_window_days=args.evaluation_window_days,
-        min_evaluation_observations=args.min_evaluation_observations,
+        min_evaluation_observations=(
+            args.min_evaluation_observations
+            if args.min_evaluation_observations is not None
+            else derived_minimum_observations
+        ),
         min_valuation_coverage=args.min_valuation_coverage,
-        min_daily_risk_observations=args.min_daily_risk_observations,
+        min_daily_risk_observations=(
+            args.min_daily_risk_observations
+            if args.min_daily_risk_observations is not None
+            else derived_minimum_observations
+        ),
         stability_periods=args.stability_periods,
         score_sortino_weight=args.score_sortino_weight,
         score_calmar_weight=args.score_calmar_weight,

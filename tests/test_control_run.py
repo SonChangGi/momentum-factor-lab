@@ -15,6 +15,8 @@ from momentum_factor_lab.control_run import (
     CONTROL_INPUT_SCHEMA,
     CONTROL_INPUT_SCHEMA_HASH,
     CONTROL_INPUT_SCHEMA_VERSION,
+    PREVIOUS_CONTROL_INPUT_SCHEMA_HASH,
+    PREVIOUS_CONTROL_INPUT_SCHEMA_VERSION,
     ControlBinding,
     ControlledRunError,
     control_config_hash,
@@ -125,9 +127,71 @@ def test_complete_26_input_object_round_trips_to_run_config(tmp_path: Path) -> N
     # Cross-repository handshake with the common control API Momentum adapter.
     assert (
         CONTROL_INPUT_SCHEMA_HASH
-        == "a2240581098f496fc555edac9d4b0e342eee6221a87e046a47f51ee7f6a4e81e"
+        == "7a135e791a3269486b540c9ab02ca712077558598cc08982ba57113cff816327"
     )
     assert tuple(field["key"] for field in CONTROL_INPUT_SCHEMA["fields"]) == CONTROL_INPUT_KEYS
+    evaluation_window = next(
+        field
+        for field in CONTROL_INPUT_SCHEMA["fields"]
+        if field["key"] == "evaluationWindowDays"
+    )
+    assert evaluation_window["minimum"] == 21
+    assert CONTROL_INPUT_SCHEMA["derivedFields"] == {
+        "minimumEvaluationObservations": (
+            "min(evaluationWindowDays, max(252, evaluationWindowDays - 252))"
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("evaluation_window_days", "minimum_observations"),
+    [(21, 21), (126, 126), (252, 252)],
+)
+def test_short_control_windows_apply_and_bind_exactly(
+    evaluation_window_days: int,
+    minimum_observations: int,
+) -> None:
+    inputs, normalized = normalize_control_inputs(
+        _inputs(evaluationWindowDays=evaluation_window_days)
+    )
+    config = inputs.apply(RunConfig(demo=True))
+    binding = _binding(normalized)
+
+    assert config.evaluation_window_days == evaluation_window_days
+    assert config.min_evaluation_observations == minimum_observations
+    assert config.min_daily_risk_observations == minimum_observations
+    assert binding.input_schema_version == "momentum/v3"
+    assert binding.input_schema_hash == CONTROL_INPUT_SCHEMA_HASH
+
+
+def test_previous_v2_binding_remains_accepted_for_in_flight_runs() -> None:
+    normalized = _inputs(evaluationWindowDays=252)
+    binding = validate_control_binding(
+        run_id="momentum-v2-run-0001",
+        input_schema_version=PREVIOUS_CONTROL_INPUT_SCHEMA_VERSION,
+        input_schema_hash=PREVIOUS_CONTROL_INPUT_SCHEMA_HASH,
+        config_hash_algorithm=CONTROL_CONFIG_HASH_ALGORITHM,
+        config_hash=control_config_hash(normalized),
+        normalized_inputs=normalized,
+        allow_fallback=False,
+    )
+
+    assert binding.input_schema_version == "momentum/v2"
+    assert binding.input_schema_hash == PREVIOUS_CONTROL_INPUT_SCHEMA_HASH
+
+
+def test_previous_v2_binding_preserves_its_252_day_minimum() -> None:
+    normalized = _inputs(evaluationWindowDays=21)
+    with pytest.raises(ControlledRunError, match="v2 evaluationWindowDays"):
+        validate_control_binding(
+            run_id="momentum-v2-run-0002",
+            input_schema_version=PREVIOUS_CONTROL_INPUT_SCHEMA_VERSION,
+            input_schema_hash=PREVIOUS_CONTROL_INPUT_SCHEMA_HASH,
+            config_hash_algorithm=CONTROL_CONFIG_HASH_ALGORITHM,
+            config_hash=control_config_hash(normalized),
+            normalized_inputs=normalized,
+            allow_fallback=False,
+        )
 
 
 @pytest.mark.parametrize(

@@ -39,9 +39,9 @@ assert.equal(request.baseEntry.resultKey, identity.resultKey);
 assert.equal(request.requestedInputs.top_n, changed.top_n);
 
 const explicitDays = structuredClone(entry.normalizedInputs);
-explicitDays.evaluation_window_days = 755;
+explicitDays.evaluation_window_days = 126;
 const explicitDaysSearch = api.searchForRequest(entry.resultKey, explicitDays, entry.presetId);
-assert.match(explicitDaysSearch, /evaluation_window_days=755/);
+assert.match(explicitDaysSearch, /evaluation_window_days=126/);
 assert.doesNotMatch(explicitDaysSearch, /evaluationYears/);
 
 const legacyYears = entry.normalizedInputs.evaluation_window_days / 252;

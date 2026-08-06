@@ -119,8 +119,8 @@
         <div id="backtest-comparison-summary" class="comparison-summary" aria-live="polite"></div>
         <div class="chart-inspector">
           <div>
-            <span class="chart-inspector-label">강조 계열</span>
-            <div id="backtest-series-controls" class="chart-series-controls" role="group" aria-label="강조할 성과 계열"></div>
+            <span class="chart-inspector-label">강조 계열 · 선택일 값</span>
+            <div id="backtest-series-controls" class="chart-series-controls" role="group" aria-label="강조할 성과 계열과 선택일 누적 수익률"></div>
           </div>
           <div class="chart-date-controls">
             <label for="backtest-date-input">차트 선택일
@@ -135,7 +135,7 @@
           <b id="backtest-active-value">-</b>
           <small id="backtest-active-context">데이터를 불러오는 중입니다.</small>
         </div>
-        <p id="backtest-chart-help" class="visually-hidden">차트는 마우스, 클릭, 좌우 화살표, Home, End 키로 탐색할 수 있습니다.</p>
+        <p id="backtest-chart-help" class="visually-hidden">차트는 마우스, 클릭, 좌우 화살표, Home, End 키로 탐색할 수 있으며 선택일의 모든 계열 값은 차트 위 계열 버튼에 표시됩니다.</p>
         <div
           id="backtest-chart"
           class="line-chart interactive-line-chart"
@@ -233,7 +233,7 @@
                 </select>
               </label>
               <label>평가 기간(거래일)
-                <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="252" max="2520" step="1" inputmode="numeric" />
+                <input id="input-evaluation-window-days" name="evaluation_window_days" type="number" min="21" max="2520" step="1" inputmode="numeric" />
               </label>
               <label>Top-N
                 <input id="input-top-n" name="top_n" type="number" min="1" max="50" step="1" inputmode="numeric" />
