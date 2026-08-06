@@ -80,6 +80,24 @@ def test_run_cli_maps_top_n_into_the_canonical_bounded_config() -> None:
     assert str(MAX_TOP_N) in str(top_n_action.help)
 
 
+@pytest.mark.parametrize(
+    ("evaluation_window_days", "minimum_observations"),
+    [(21, 21), (126, 126), (252, 252), (756, 504)],
+)
+def test_run_cli_derives_coverage_for_the_requested_evaluation_window(
+    evaluation_window_days: int,
+    minimum_observations: int,
+) -> None:
+    args = build_parser().parse_args(
+        ["run", "--demo", "--evaluation-window-days", str(evaluation_window_days)]
+    )
+
+    config = _config(args)
+    config.validate()
+    assert config.min_evaluation_observations == minimum_observations
+    assert config.min_daily_risk_observations == minimum_observations
+
+
 def test_run_cli_exposes_live_coverage_policy_and_output_config() -> None:
     run = _command_parser("run")
     options = {option for action in run._actions for option in action.option_strings}

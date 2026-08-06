@@ -86,7 +86,7 @@ uv run python -m momentum_factor_lab.cli run \
 웹과 Python 실행 경로가 공유하는 `ResearchInputs` v2는 다음을 포함합니다.
 
 - 리밸런싱 주기
-- 평가 창(거래일, 252–2,520일)
+- 평가 창(거래일, 21–2,520일)
 - Top-N, 최대 종목 비중
 - 거래비용, 슬리피지
 - 최소 가격·히스토리·평균 거래대금·평균 거래량
@@ -195,8 +195,8 @@ GET  /v1/runs/<runId>
 GET  /v1/runs/<runId>/result
 ```
 
-원격 요청은 `momentum/v2`의 26개 입력을 전부 보내며 평가 창은
-`evaluationWindowDays` 정수로 전달합니다. 부분 입력, 알 수 없는 입력,
+원격 요청은 `momentum/v3`의 26개 입력을 전부 보내며 평가 창은 21–2,520
+거래 세션의 `evaluationWindowDays` 정수로 전달합니다. 부분 입력, 알 수 없는 입력,
 fallback을 거절합니다. API가 만든 `configHash`와 worker가 같은 RFC 8785 입력으로
 계산한 hash가 다르면 Python을 실행하지 않습니다.
 

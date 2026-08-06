@@ -29,7 +29,8 @@ from .research_inputs import ResearchInputError, ResearchInputs
 
 
 CONTROL_PROJECT_ID = "momentum"
-CONTROL_INPUT_SCHEMA_VERSION = "momentum/v2"
+CONTROL_INPUT_SCHEMA_VERSION = "momentum/v3"
+PREVIOUS_CONTROL_INPUT_SCHEMA_VERSION = "momentum/v2"
 CONTROL_CONFIG_HASH_ALGORITHM = "momentum-research-inputs-rfc8785-v1"
 CONTROL_ARTIFACT_CONTRACT_VERSION = "momentum/schema-v5-control-result-v1"
 CONTROL_ARTIFACT_DIRECTORY = PurePosixPath("data/control-runs/v1")
@@ -76,7 +77,7 @@ CONTROL_INPUT_FIELDS = (
     {
         "key": "evaluationWindowDays",
         "type": "integer",
-        "minimum": 252,
+        "minimum": 21,
         "maximum": 2_520,
         "unit": "sessions",
     },
@@ -207,7 +208,9 @@ def _control_input_schema() -> dict[str, object]:
             "selectionMinEffectiveNames <= topN",
         ],
         "derivedFields": {
-            "minimumEvaluationObservations": "max(252, evaluationWindowDays - 252)",
+            "minimumEvaluationObservations": (
+                "min(evaluationWindowDays, max(252, evaluationWindowDays - 252))"
+            ),
         },
         "authoritativeValidator": "ResearchInputs.from_mapping:research-inputs-v2",
     }
@@ -215,6 +218,9 @@ def _control_input_schema() -> dict[str, object]:
 
 CONTROL_INPUT_SCHEMA = _control_input_schema()
 CONTROL_INPUT_SCHEMA_HASH = canonical_sha256(CONTROL_INPUT_SCHEMA)
+PREVIOUS_CONTROL_INPUT_SCHEMA_HASH = (
+    "a2240581098f496fc555edac9d4b0e342eee6221a87e046a47f51ee7f6a4e81e"
+)
 
 
 class ControlledRunError(ValueError):
@@ -289,12 +295,26 @@ def validate_control_binding(
 ) -> ControlBinding:
     if not _SAFE_CONTROL_RUN_ID.fullmatch(run_id):
         raise ControlledRunError("control run id must be 8-128 path-safe ASCII characters")
-    if input_schema_version != CONTROL_INPUT_SCHEMA_VERSION:
+    supported_schema_hashes = {
+        CONTROL_INPUT_SCHEMA_VERSION: CONTROL_INPUT_SCHEMA_HASH,
+        PREVIOUS_CONTROL_INPUT_SCHEMA_VERSION: PREVIOUS_CONTROL_INPUT_SCHEMA_HASH,
+    }
+    if input_schema_version not in supported_schema_hashes:
         raise ControlledRunError(
             f"input schema mismatch: expected {CONTROL_INPUT_SCHEMA_VERSION}"
         )
-    if input_schema_hash != CONTROL_INPUT_SCHEMA_HASH:
+    if input_schema_hash != supported_schema_hashes[input_schema_version]:
         raise ControlledRunError("input schema hash does not match this worker")
+    if input_schema_version == PREVIOUS_CONTROL_INPUT_SCHEMA_VERSION:
+        previous_window = normalized_inputs.get("evaluationWindowDays")
+        if (
+            not isinstance(previous_window, int)
+            or isinstance(previous_window, bool)
+            or not 252 <= previous_window <= 2_520
+        ):
+            raise ControlledRunError(
+                "momentum/v2 evaluationWindowDays must be between 252 and 2520"
+            )
     if config_hash_algorithm != CONTROL_CONFIG_HASH_ALGORITHM:
         raise ControlledRunError("config hash algorithm does not match this worker")
     if not _SHA256.fullmatch(config_hash):

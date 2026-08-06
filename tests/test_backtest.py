@@ -95,6 +95,35 @@ def _run(
     )
 
 
+def test_evaluation_window_changes_the_trailing_analysis_metrics() -> None:
+    dates = pd.bdate_range("2025-01-02", periods=300)
+    returns = pd.Series(
+        np.r_[np.full(174, -0.002), np.full(126, 0.002)],
+        index=dates,
+    )
+    zeros = pd.Series(0.0, index=dates)
+
+    short = evaluation_metrics(
+        returns,
+        zeros,
+        zeros,
+        window_days=126,
+        stability_periods=3,
+    )
+    long = evaluation_metrics(
+        returns,
+        zeros,
+        zeros,
+        window_days=252,
+        stability_periods=3,
+    )
+
+    assert short["observations"] == 126
+    assert long["observations"] == 252
+    assert short["cagr"] > 0.0
+    assert short["cagr"] > long["cagr"]
+
+
 def test_month_end_signal_uses_next_close_without_capturing_that_session_return() -> None:
     prices, scores, eligible, config = _fixture()
     config.transaction_cost_bps = 0.0

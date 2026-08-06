@@ -51,7 +51,7 @@ def test_public_inputs_round_trip_and_apply_to_run_config(tmp_path: Path) -> Non
         {"nearestPreset": True},
         {"version": "research-inputs-v0"},
         {"evaluationYears": 3},
-        {"evaluationWindowDays": 251},
+        {"evaluationWindowDays": 20},
         {"evaluationWindowDays": 2_521},
         {"evaluationWindowDays": 2.5},
         {"evaluationWindowDays": True},
@@ -74,6 +74,32 @@ def test_different_public_inputs_have_different_state_keys() -> None:
     baseline = ResearchInputs()
     changed = ResearchInputs(evaluation_window_days=757)
     assert baseline.state_key != changed.state_key
+
+
+@pytest.mark.parametrize(
+    ("evaluation_window_days", "minimum_observations"),
+    [
+        (21, 21),
+        (126, 126),
+        (251, 251),
+        (252, 252),
+        (504, 252),
+        (505, 253),
+        (756, 504),
+        (2_520, 2_268),
+    ],
+)
+def test_short_and_long_evaluation_windows_derive_bounded_coverage(
+    evaluation_window_days: int,
+    minimum_observations: int,
+) -> None:
+    inputs = ResearchInputs.from_mapping({"evaluationWindowDays": evaluation_window_days})
+
+    assert inputs.minimum_evaluation_observations == minimum_observations
+    config = inputs.apply(RunConfig(demo=True))
+    assert config.evaluation_window_days == evaluation_window_days
+    assert config.min_evaluation_observations == minimum_observations
+    assert config.min_daily_risk_observations == minimum_observations
 
 
 def test_explicit_legacy_v1_inputs_can_be_read_but_normalize_to_v2() -> None:

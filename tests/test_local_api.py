@@ -764,7 +764,7 @@ def test_post_accepts_nonannual_evaluation_window_as_canonical_v2_input(
     api, _ = _api(tmp_path, executor=ManualExecutor())
 
     baseline = _post(api, ResearchInputs())
-    changed = _post(api, ResearchInputs(evaluation_window_days=1_000))
+    changed = _post(api, ResearchInputs(evaluation_window_days=126))
 
     assert baseline.status_code == changed.status_code == 202
     assert baseline.body["resultKey"] != changed.body["resultKey"]
@@ -781,7 +781,7 @@ def test_post_accepts_nonannual_evaluation_window_as_canonical_v2_input(
             "version": "research-inputs-v1",
             "evaluationYears": 3,
         },
-        {**ResearchInputs().to_dict(), "evaluationWindowDays": 251},
+        {**ResearchInputs().to_dict(), "evaluationWindowDays": 20},
         {**ResearchInputs().to_dict(), "topN": 0},
         {**ResearchInputs().to_dict(), "topN": MAX_TOP_N + 1},
     ],

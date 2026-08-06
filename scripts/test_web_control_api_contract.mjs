@@ -22,7 +22,7 @@ const api = context.__MFL_WEB_TESTS__;
 
 const normalized = structuredClone(payload.resultIdentity.keyParts.normalizedInputs);
 const request = JSON.parse(JSON.stringify(api.buildControlRunSubmission(normalized)));
-assert.equal(request.inputSchemaVersion, 'momentum/v2');
+assert.equal(request.inputSchemaVersion, 'momentum/v3');
 assert.equal(request.allowFallback, false);
 assert.equal(Object.keys(request.inputs).length, 26);
 assert.equal('version' in request.inputs, false);
@@ -30,16 +30,35 @@ assert.equal('evaluationYears' in request.inputs, false);
 assert.equal(request.inputs.evaluationWindowDays, normalized.evaluation_window_days);
 assert.equal(request.inputs.topN, normalized.top_n);
 
+const shortWindowRequest = JSON.parse(JSON.stringify(api.buildControlRunSubmission({
+  ...normalized,
+  evaluation_window_days: 126,
+})));
+assert.equal(shortWindowRequest.inputSchemaVersion, 'momentum/v3');
+assert.equal(shortWindowRequest.inputs.evaluationWindowDays, 126);
+
 const inputFields = Object.keys(request.inputs).sort().map((key) => ({ key }));
 const capabilities = JSON.parse(JSON.stringify(api.normalizeControlCapabilities({
   projectId: 'momentum',
   projectName: 'Momentum Factor',
-  inputSchemaVersion: 'momentum/v2',
+  inputSchemaVersion: 'momentum/v3',
   inputSchemaHash: 'a'.repeat(64),
   configHashAlgorithm: 'momentum-research-inputs-rfc8785-v1',
   acceptsRuns: true,
   inputs: inputFields,
 })));
+assert.throws(
+  () => api.normalizeControlCapabilities({
+    projectId: 'momentum',
+    projectName: 'Momentum Factor',
+    inputSchemaVersion: 'momentum/v2',
+    inputSchemaHash: 'a'.repeat(64),
+    configHashAlgorithm: 'momentum-research-inputs-rfc8785-v1',
+    acceptsRuns: true,
+    inputs: inputFields,
+  }),
+  /schema version/,
+);
 
 const observedControlRequests = [];
 const controlResponseBytes = new TextEncoder().encode(JSON.stringify({ status: 'ok' }));

@@ -4,15 +4,19 @@ from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Any, Mapping
 
-from .config import MAX_TOP_N, RunConfig
+from .config import (
+    MAX_EVALUATION_WINDOW_DAYS,
+    MAX_TOP_N,
+    MIN_EVALUATION_WINDOW_DAYS,
+    RunConfig,
+    minimum_evaluation_observations,
+)
 from .identity import canonical_sha256
 
 
 RESEARCH_INPUTS_VERSION = "research-inputs-v2"
 LEGACY_RESEARCH_INPUTS_VERSION = "research-inputs-v1"
 TRADING_SESSIONS_PER_YEAR = 252
-MIN_EVALUATION_WINDOW_DAYS = 252
-MAX_EVALUATION_WINDOW_DAYS = 2_520
 
 
 class ResearchInputError(ValueError):
@@ -50,10 +54,7 @@ class ResearchInputs:
 
     @property
     def minimum_evaluation_observations(self) -> int:
-        return max(
-            TRADING_SESSIONS_PER_YEAR,
-            self.evaluation_window_days - TRADING_SESSIONS_PER_YEAR,
-        )
+        return minimum_evaluation_observations(self.evaluation_window_days)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -293,10 +294,10 @@ class ResearchInputs:
             or isinstance(self.evaluation_window_days, bool)
         ):
             raise ResearchInputError("evaluationWindowDays must be an integer")
-        if not MIN_EVALUATION_WINDOW_DAYS <= self.evaluation_window_days <= MAX_EVALUATION_WINDOW_DAYS:
-            raise ResearchInputError(
-                "evaluationWindowDays must be between 252 and 2520"
-            )
+        if not (
+            MIN_EVALUATION_WINDOW_DAYS <= self.evaluation_window_days <= MAX_EVALUATION_WINDOW_DAYS
+        ):
+            raise ResearchInputError("evaluationWindowDays must be between 21 and 2520")
         if (
             not isinstance(self.top_n, int)
             or isinstance(self.top_n, bool)

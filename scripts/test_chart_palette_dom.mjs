@@ -13,6 +13,10 @@ assert.match(css, /\.line-path\.best/);
 assert.match(css, /\.line-path\.benchmark-spy/);
 assert.match(css, /\.line-path\.benchmark-ixic/);
 assert.match(css, /\.line-path\.benchmark-qqq/);
+assert.match(js, /layoutChartEndLabels/);
+assert.match(js, /chart-series-value/);
+assert.match(css, /\.chart-end-label\.benchmark-spy/);
+assert.match(css, /\.chart-series-point\.benchmark-qqq/);
 assert.match(css, /\.policy-score-liquidity-rank/);
 assert.match(css, /\[data-theme="dark"\]/);
 

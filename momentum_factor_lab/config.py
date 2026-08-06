@@ -12,6 +12,18 @@ from .universe import DEFAULT_UNIVERSE, is_supported_symbol, normalize_symbol
 FIXED_WEIGHTING_POLICY = "score_liquidity_rank"
 WEIGHTING_POLICIES = (FIXED_WEIGHTING_POLICY,)
 MAX_TOP_N = 50
+MIN_EVALUATION_WINDOW_DAYS = 21
+MAX_EVALUATION_WINDOW_DAYS = 2_520
+
+
+def minimum_evaluation_observations(evaluation_window_days: int) -> int:
+    """Return the comparison-coverage floor for an evaluation window."""
+
+    return min(
+        evaluation_window_days,
+        max(252, evaluation_window_days - 252),
+    )
+
 
 POLICY_REGISTRY_VERSION = "weighting-policy-registry-v3"
 POLICY_REGISTRY = {
@@ -339,9 +351,19 @@ class RunConfig:
             raise ValueError("max_price_missing_ratio must be in [0, 1)")
         if self.rebalance_frequency not in {"W", "ME", "QE"}:
             raise ValueError("rebalance_frequency must be W, ME, or QE")
-        if self.evaluation_window_days < 252:
-            raise ValueError("evaluation_window_days must be at least 252")
-        if not 252 <= self.min_evaluation_observations <= self.evaluation_window_days:
+        if not (
+            MIN_EVALUATION_WINDOW_DAYS <= self.evaluation_window_days <= MAX_EVALUATION_WINDOW_DAYS
+        ):
+            raise ValueError(
+                "evaluation_window_days must be between "
+                f"{MIN_EVALUATION_WINDOW_DAYS} and {MAX_EVALUATION_WINDOW_DAYS}"
+            )
+        minimum_required_observations = min(252, self.evaluation_window_days)
+        if not (
+            minimum_required_observations
+            <= self.min_evaluation_observations
+            <= self.evaluation_window_days
+        ):
             raise ValueError("min_evaluation_observations must fit the evaluation window")
         if not 0.0 < self.min_valuation_coverage <= 1.0:
             raise ValueError("min_valuation_coverage must be in (0, 1]")
