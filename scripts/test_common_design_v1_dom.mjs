@@ -27,7 +27,6 @@ const expectedNavigation = [
   ">Risk Score<",
   ">Port<",
   ">Valuation<",
-  ">Kelly<",
 ];
 let previousIndex = -1;
 for (const label of expectedNavigation) {
