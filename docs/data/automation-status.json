@@ -6,13 +6,13 @@
     "guardrailsRelaxed": false,
     "presetCount": 3
   },
-  "attemptedAtUtc": "2026-08-05T23:18:21.520479Z",
+  "attemptedAtUtc": "2026-08-07T01:51:09.525550Z",
   "contract": "momentum-dashboard-automation-status",
   "lastGood": {
-    "dataAsOf": "2026-08-05",
-    "generatedAtUtc": "2026-08-05T23:07:32.217969+00:00",
+    "dataAsOf": "2026-08-06",
+    "generatedAtUtc": "2026-08-07T01:35:41.354879+00:00",
     "path": "data/dashboard.json",
-    "resultKey": "641aafea72818c31d38904470dce55e00775ff03522661751d28f95d60362378"
+    "resultKey": "3018bdb8d815a1cf0d5f9fd101bec1c719dc4d7be97e46d9f9652f3fb9ba6a6f"
   },
   "project": "momentum-factor-lab",
   "publication": {
@@ -23,5 +23,5 @@
   "reasonCode": "published",
   "schemaVersion": 1,
   "state": "available",
-  "targetDataAsOf": "2026-08-05"
+  "targetDataAsOf": "2026-08-06"
 }
