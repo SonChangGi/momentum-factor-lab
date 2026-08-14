@@ -1,0 +1,201 @@
+name: Deploy Momentum Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact current main SHA requested by an authenticated producer workflow
+        required: false
+        default: ''
+        type: string
+      request_origin:
+        description: Auditable deployment request origin
+        required: false
+        default: manual
+        type: string
+
+concurrency:
+  group: momentum-factor-lab-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  deploy-pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the current production branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Resolve and bind the requested source revision
+        id: source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REQUESTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          PUSH_SOURCE_SHA: ${{ github.event_name == 'push' && github.sha || '' }}
+          REQUEST_ORIGIN: ${{ inputs.request_origin || github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" != "${DEFAULT_BRANCH}" ]]; then
+            echo "Pages may only deploy ${DEFAULT_BRANCH}; received ${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+          timeout 60s git fetch origin "${DEFAULT_BRANCH}" --depth=1
+          local_sha="$(git rev-parse HEAD)"
+          remote_sha="$(git rev-parse "origin/${DEFAULT_BRANCH}")"
+          expected_sha="${REQUESTED_SOURCE_SHA:-${PUSH_SOURCE_SHA}}"
+          expected_sha="${expected_sha:-${local_sha}}"
+          case "${REQUEST_ORIGIN}" in
+            manual|push|daily-dashboard|controlled-analysis) ;;
+            *)
+              echo "Unsupported deployment request origin." >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! "${expected_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid expected source SHA: ${expected_sha}" >&2
+            exit 1
+          fi
+          if [[ "${local_sha}" != "${expected_sha}" ]] \
+            || [[ "${remote_sha}" != "${expected_sha}" ]]; then
+            echo "Refusing stale Pages artifact: local=${local_sha} remote=${remote_sha} expected=${expected_sha}." >&2
+            exit 1
+          fi
+          echo "sha=${expected_sha}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Momentum Pages deployment identity"
+            echo "- owner: workflow"
+            echo "- request origin: \`${REQUEST_ORIGIN}\`"
+            echo "- source SHA: \`${expected_sha}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Confirm workflow owns Pages publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          build_type="$(timeout 30s gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type')"
+          if [[ "${build_type}" != "workflow" ]]; then
+            echo "GitHub Pages build_type must be workflow; received ${build_type}." >&2
+            echo "Disable the legacy branch publisher before deploying this artifact." >&2
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Test and validate the committed static publication
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          python -m pytest -q \
+            tests/test_actions_pinning.py \
+            tests/test_dashboard_monotonic.py \
+            tests/test_docs_contract.py \
+            tests/test_publication_security.py
+          python -m momentum_factor_lab.publication_security docs
+          node --check docs/assets/dashboard.js
+          MFL_TEST_PAYLOAD=docs/data/grid/v1/latest.json node scripts/test_web_contract.mjs
+          MFL_TEST_PAYLOAD=docs/data/grid/v1/latest.json node scripts/test_common_design_v1_dom.mjs
+          MFL_TEST_PAYLOAD=docs/data/grid/v1/latest.json node scripts/test_static_web_loader_contract.mjs
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+
+      - name: Build exact Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs
+
+      - name: Reject a stale main after artifact upload
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          timeout 60s git fetch origin "${DEFAULT_BRANCH}" --depth=1
+          remote_sha="$(git rev-parse "origin/${DEFAULT_BRANCH}")"
+          if [[ "${remote_sha}" != "${EXPECTED_SOURCE_SHA}" ]]; then
+            echo "Main advanced to ${remote_sha} after upload; refusing stale artifact ${EXPECTED_SOURCE_SHA}." >&2
+            exit 1
+          fi
+
+      - name: Deploy exact Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+
+      - name: Verify the complete public site byte-for-byte
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          expected_page_url="https://sonchanggi.github.io/momentum-factor-lab/"
+          if [[ "${PAGE_URL%/}/" != "${expected_page_url}" ]]; then
+            echo "Unexpected Pages deployment URL: ${PAGE_URL}" >&2
+            exit 1
+          fi
+          mapfile -d '' public_files < <(find docs -type f -print0 | sort -z)
+          if (( ${#public_files[@]} == 0 )); then
+            echo "No committed public files were found." >&2
+            exit 1
+          fi
+          readback_dir="$(mktemp -d)"
+          trap 'rm -rf "$readback_dir"' EXIT
+          for attempt in {1..18}; do
+            all_match=true
+            for local_path in "${public_files[@]}"; do
+              relative="${local_path#docs/}"
+              if [[ ! "${relative}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                echo "Unsupported public path for deterministic readback: ${relative}" >&2
+                exit 1
+              fi
+              remote_path="${readback_dir}/$(printf '%s' "${relative}" | tr '/' '_')"
+              url="${PAGE_URL%/}/${relative}?__momentum_readback=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"
+              if ! curl --fail --silent --show-error --location \
+                --header "Cache-Control: no-cache" \
+                --connect-timeout 10 \
+                --max-time 120 \
+                "${url}" --output "${remote_path}"; then
+                all_match=false
+                break
+              fi
+              if ! cmp --silent "${local_path}" "${remote_path}"; then
+                all_match=false
+                break
+              fi
+            done
+            if [[ "${all_match}" == "true" ]]; then
+              echo "Verified ${#public_files[@]} public files byte-for-byte."
+              exit 0
+            fi
+            if (( attempt < 18 )); then
+              sleep $((attempt * 5))
+            fi
+          done
+          echo "Public Momentum Pages readback did not converge to source ${EXPECTED_SOURCE_SHA}." >&2
+          exit 1

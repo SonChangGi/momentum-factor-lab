@@ -156,6 +156,18 @@ provider credential 형식과 민감한 JSON 필드를 스캔하며, 탐지된 �
 control run도 immutable artifact와 sidecar를 같은 scanner로 통과한 뒤에만
 커밋합니다.
 
+Pages 게시자는 `Deploy Momentum Pages` workflow 하나입니다. 사람의 `main` push는
+직접 배포를 요청하고, `GITHUB_TOKEN`으로 만든 정기 dashboard·controlled-result
+커밋은 push workflow를 재실행하지 않으므로 각 producer workflow가 배포 workflow를
+명시적으로 dispatch합니다. 배포는 항상 현재 원격 `main`을 새로 checkout해 정적 계약과
+credential scan을 다시 검증하고, 요청 SHA와 현재 `main`이 다르거나 artifact upload 중
+`main`이 전진하면 stale artifact를 거부합니다. 배포 뒤에는 `docs`의 모든 공개 파일을
+uncached byte-for-byte로 다시 읽습니다. 저장소 Pages 설정은 최초 적용 시
+`gh api --method PUT repos/SonChangGi/momentum-factor-lab/pages -f build_type=workflow`로
+전환하고 `gh api repos/SonChangGi/momentum-factor-lab/pages --jq .build_type`이
+`workflow`인지 확인해야 합니다. 전환 전 배포 workflow는 이중 publisher를 허용하지
+않고 fail-closed합니다.
+
 임의 입력은 loopback 전용 로컬 API에서 실행합니다.
 
 ```bash

@@ -184,6 +184,10 @@ def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     )
 
     assert "momentum_factor_lab.dashboard_freshness" in workflow
+    freshness_block = workflow.split(
+        "- name: Decide whether dashboard refresh should run", maxsplit=1
+    )[1].split("- name: Report skipped dashboard refresh", maxsplit=1)[0]
+    assert "continue-on-error" not in freshness_block
     assert "momentum_factor_lab.dashboard_monotonic" in workflow
     assert "momentum_factor_lab.cli scheduled-dashboard" in workflow
     assert "momentum_factor_lab.publication_security docs" in workflow
@@ -207,3 +211,40 @@ def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     assert "-f watchdog_origin=true" in watchdog
     assert "if: steps.freshness.outputs.skip != 'true'" in watchdog
     assert "if: steps.freshness.outputs.skip == 'true'" in watchdog
+
+
+def test_pages_workflow_has_one_owner_current_main_and_exact_readback() -> None:
+    daily = (ROOT / ".github/workflows/daily-dashboard.yml").read_text(encoding="utf-8")
+    controlled = (ROOT / ".github/workflows/controlled-analysis.yml").read_text(
+        encoding="utf-8"
+    )
+    pages = (ROOT / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "actions: write" in daily
+    assert "request-pages-deployment:" in daily
+    assert "gh workflow run deploy-pages.yml" in daily
+    assert "request_origin=daily-dashboard" in daily
+    assert "actions: write" in controlled
+    assert "gh workflow run deploy-pages.yml" in controlled
+    assert "request_origin=controlled-analysis" in controlled
+    assert "push:" in pages
+    assert "workflow_dispatch:" in pages
+    assert "Check out the current production branch" in pages
+    assert "ref: ${{ github.event.repository.default_branch }}" in pages
+    assert "Confirm workflow owns Pages publication" in pages
+    assert "timeout 30s gh api" in pages
+    assert '[[ "${build_type}" != "workflow" ]]' in pages
+    assert "Refusing stale Pages artifact" in pages
+    assert "Reject a stale main after artifact upload" in pages
+    assert "Test and validate the committed static publication" in pages
+    assert "actions/configure-pages@" in pages
+    assert "actions/upload-pages-artifact@" in pages
+    assert "actions/deploy-pages@" in pages
+    assert "find docs -type f -print0" in pages
+    assert '--header "Cache-Control: no-cache"' in pages
+    assert "--connect-timeout 10" in pages
+    assert "--max-time 120" in pages
+    assert "cmp --silent" in pages
+    assert "build_type=workflow" in readme
+    assert "GITHUB_TOKEN" in readme
