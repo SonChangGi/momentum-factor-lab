@@ -143,6 +143,14 @@ dashboard/status 원격 쌍을 다시 확인해 경합으로 생기는 중복 �
 유지되는 경우에는, 정확히 같은 result/data/generated identity에 결합된
 `available.attemptedAtUtc`를 성공 게시 시각으로 사용합니다.
 
+정기 실행이나 watchdog 재시도에서 공급자·분석·dispatch 오류가 발생하면 새 후보는
+게시하지 않고 기존 검증 결과를 유지합니다. 해당 오류는 run log와 automation status에
+남지만, 별도 public-site health job이 기존 `index.html`, `summary.json`,
+`dashboard.json`을 실제 Pages에서 읽어 정상임을 확인하면 workflow 실패 메일은 만들지
+않습니다. 공개 필수 파일이 반복 확인 후에도 없거나 JSON이 유효하지 않을 때만 자동
+실패 신호를 냅니다. 일반 수동 실행과 controlled analysis는 계약 검증을 위해 계속
+엄격하게 실패합니다.
+
 고정 절대 가드레일을 통과한 팩터가 하나도 없으면 임의 팩터를 선택하거나 임계값을
 완화하지 않습니다. 이는 실행 오류가 아니라 fail-closed 분석 결과이므로 workflow는
 `docs/data/automation-status.json`에 `degraded`(기존 검증 결과가 없으면

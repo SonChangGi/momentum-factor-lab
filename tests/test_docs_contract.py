@@ -196,6 +196,9 @@ def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     assert workflow.count("--status-path docs/data/automation-status.json") == 1
     assert "watchdog_origin:" in workflow
     assert "WATCHDOG_ORIGIN:" in workflow
+    assert "continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}" in workflow
+    assert "public-site-health:" in workflow
+    assert "Fail only when the existing Momentum page is unusable" in workflow
     assert 'effective_event_name="schedule"' in workflow
     assert "FRESHNESS_EVENT_NAME: ${{ steps.freshness.outputs.event_name }}" in workflow
     assert (
@@ -211,6 +214,8 @@ def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     assert "-f watchdog_origin=true" in watchdog
     assert "if: steps.freshness.outputs.skip != 'true'" in watchdog
     assert "if: steps.freshness.outputs.skip == 'true'" in watchdog
+    assert "continue-on-error: ${{ github.event_name == 'schedule' }}" in watchdog
+    assert "public-site-health:" in watchdog
 
 
 def test_pages_workflow_has_one_owner_current_main_and_exact_readback() -> None:
@@ -246,5 +251,8 @@ def test_pages_workflow_has_one_owner_current_main_and_exact_readback() -> None:
     assert "--connect-timeout 10" in pages
     assert "--max-time 120" in pages
     assert "cmp --silent" in pages
+    assert "continue-on-error: ${{ github.event_name == 'push' || inputs.request_origin == 'daily-dashboard' }}" in pages
+    assert "public-site-health:" in pages
+    assert "required_paths=(index.html data/summary.json data/dashboard.json)" in pages
     assert "build_type=workflow" in readme
     assert "GITHUB_TOKEN" in readme

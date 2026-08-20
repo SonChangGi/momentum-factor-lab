@@ -22,6 +22,7 @@ permissions:
 jobs:
   update-dashboard:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}
     timeout-minutes: 120
     permissions:
       contents: write
@@ -177,6 +178,7 @@ jobs:
     needs: update-dashboard
     if: needs.update-dashboard.outputs.should_deploy_pages == 'true'
     runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -194,3 +196,53 @@ jobs:
             --ref "${DEFAULT_BRANCH}" \
             -f expected_source_sha="${EXPECTED_SOURCE_SHA}" \
             -f request_origin=daily-dashboard
+
+  public-site-health:
+    needs: [update-dashboard, request-pages-deployment]
+    if: ${{ always() && (github.event_name == 'schedule' || inputs.watchdog_origin == true) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Fail only when the existing Momentum page is unusable
+        env:
+          PAGE_URL: https://sonchanggi.github.io/momentum-factor-lab/
+        shell: bash
+        run: |
+          set -u
+          required_paths=(index.html data/summary.json data/dashboard.json)
+          for attempt in {1..12}; do
+            usable=true
+            for relative_path in "${required_paths[@]}"; do
+              readback="$RUNNER_TEMP/momentum-health-${relative_path//\//-}"
+              if ! curl --fail --silent --show-error --location \
+                --header "Cache-Control: no-cache" \
+                --connect-timeout 10 \
+                --max-time 120 \
+                --output "$readback" \
+                "${PAGE_URL%/}/${relative_path}?health=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"; then
+                usable=false
+                break
+              fi
+              if [[ ! -s "$readback" ]]; then
+                usable=false
+                break
+              fi
+              if [[ "$relative_path" == "index.html" ]] && ! grep -Eiq '<!doctype html|<html' "$readback"; then
+                usable=false
+                break
+              fi
+              if [[ "$relative_path" == *.json ]] && ! jq -e 'type == "object" and length > 0' "$readback" >/dev/null; then
+                usable=false
+                break
+              fi
+            done
+            if [[ "$usable" == "true" ]]; then
+              echo "The existing Momentum page remains usable; scheduled refresh errors stay in run logs without failure mail."
+              exit 0
+            fi
+            [[ $attempt -lt 12 ]] && sleep 10
+          done
+          echo "::error::The public Momentum page or its required JSON is unavailable or invalid."
+          exit 1

@@ -20,6 +20,7 @@ permissions:
 jobs:
   dispatch-if-stale:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event_name == 'schedule' }}
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -64,3 +65,53 @@ jobs:
           echo "${{ steps.freshness.outputs.reason }}"
           echo "Latest run KST: ${{ steps.freshness.outputs.latest_run_kst }}"
           echo "Cutoff KST: ${{ steps.freshness.outputs.cutoff_kst }}"
+
+  public-site-health:
+    needs: dispatch-if-stale
+    if: ${{ always() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Fail only when the existing Momentum page is unusable
+        env:
+          PAGE_URL: https://sonchanggi.github.io/momentum-factor-lab/
+        shell: bash
+        run: |
+          set -u
+          required_paths=(index.html data/summary.json data/dashboard.json)
+          for attempt in {1..12}; do
+            usable=true
+            for relative_path in "${required_paths[@]}"; do
+              readback="$RUNNER_TEMP/momentum-watchdog-health-${relative_path//\//-}"
+              if ! curl --fail --silent --show-error --location \
+                --header "Cache-Control: no-cache" \
+                --connect-timeout 10 \
+                --max-time 120 \
+                --output "$readback" \
+                "${PAGE_URL%/}/${relative_path}?health=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}"; then
+                usable=false
+                break
+              fi
+              if [[ ! -s "$readback" ]]; then
+                usable=false
+                break
+              fi
+              if [[ "$relative_path" == "index.html" ]] && ! grep -Eiq '<!doctype html|<html' "$readback"; then
+                usable=false
+                break
+              fi
+              if [[ "$relative_path" == *.json ]] && ! jq -e 'type == "object" and length > 0' "$readback" >/dev/null; then
+                usable=false
+                break
+              fi
+            done
+            if [[ "$usable" == "true" ]]; then
+              echo "The existing Momentum page remains usable; watchdog errors stay in run logs without failure mail."
+              exit 0
+            fi
+            [[ $attempt -lt 12 ]] && sleep 10
+          done
+          echo "::error::The public Momentum page or its required JSON is unavailable or invalid."
+          exit 1
