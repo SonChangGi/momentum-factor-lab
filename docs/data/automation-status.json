@@ -8,7 +8,7 @@
     "guardrailVersion": "absolute-factor-v2",
     "guardrailsRelaxed": false
   },
-  "attemptedAtUtc": "2026-09-08T08:45:21.355332Z",
+  "attemptedAtUtc": "2026-09-09T01:44:02.251293Z",
   "contract": "momentum-dashboard-automation-status",
   "lastGood": {
     "dataAsOf": "2026-09-04",
@@ -25,5 +25,5 @@
   "reasonCode": "no_eligible_factor",
   "schemaVersion": 1,
   "state": "degraded",
-  "targetDataAsOf": "2026-09-07"
+  "targetDataAsOf": "2026-09-08"
 }
