@@ -1,29 +1,27 @@
 {
-  "affectedPresetId": "latest-top20",
+  "affectedPresetId": null,
   "analysis": {
-    "eligibleFactorCount": 0,
-    "evaluatedFactorCount": 0,
     "fallbackFactorSelected": false,
-    "guardrailBreachCounts": {},
     "guardrailVersion": "absolute-factor-v2",
-    "guardrailsRelaxed": false
+    "guardrailsRelaxed": false,
+    "presetCount": 3
   },
-  "attemptedAtUtc": "2026-09-10T01:40:44.293938Z",
+  "attemptedAtUtc": "2026-09-10T06:51:20.356127Z",
   "contract": "momentum-dashboard-automation-status",
   "lastGood": {
-    "dataAsOf": "2026-09-04",
-    "generatedAtUtc": "2026-09-08T01:43:46.745545+00:00",
+    "dataAsOf": "2026-09-09",
+    "generatedAtUtc": "2026-09-10T06:38:49.405891+00:00",
     "path": "data/dashboard.json",
-    "resultKey": "265a8744d1dea27994488f71d8f912e9112f5e43ba51e492b8d8a5c37e7400a3"
+    "resultKey": "97a4f5bb6cb810b25a52b17587df259a0c522ad1fd48672acb4b1bec83620103"
   },
   "project": "momentum-factor-lab",
   "publication": {
-    "lastGoodPreserved": true,
-    "policy": "preserve_last_good",
-    "updated": false
+    "lastGoodPreserved": false,
+    "policy": "validated_static_grid",
+    "updated": true
   },
-  "reasonCode": "no_eligible_factor",
+  "reasonCode": "published",
   "schemaVersion": 1,
-  "state": "degraded",
+  "state": "available",
   "targetDataAsOf": "2026-09-09"
 }
