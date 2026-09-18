@@ -61,7 +61,7 @@ jobs:
           expected_sha="${REQUESTED_SOURCE_SHA:-${PUSH_SOURCE_SHA}}"
           expected_sha="${expected_sha:-${local_sha}}"
           case "${REQUEST_ORIGIN}" in
-            manual|push|daily-dashboard|controlled-analysis) ;;
+            manual|push|daily-dashboard|daily-dashboard-watchdog|controlled-analysis) ;;
             *)
               echo "Unsupported deployment request origin." >&2
               exit 1
@@ -116,6 +116,7 @@ jobs:
             tests/test_actions_pinning.py \
             tests/test_actions_outcome.py \
             tests/test_actions_source_race.py \
+            tests/test_watchdog_publication_recovery.py \
             tests/test_config.py \
             tests/test_dashboard_freshness.py \
             tests/test_dashboard_monotonic.py \
@@ -207,7 +208,7 @@ jobs:
 
   public-site-health:
     needs: deploy-pages
-    if: ${{ always() && (github.event_name == 'push' || inputs.request_origin == 'daily-dashboard') }}
+    if: ${{ always() && (github.event_name == 'push' || inputs.request_origin == 'daily-dashboard' || inputs.request_origin == 'daily-dashboard-watchdog') }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     permissions:

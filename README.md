@@ -139,22 +139,22 @@ GitHub 실행 대기로 실제 시작은 늦어질 수 있습니다. 실행 요�
 새 요청마다 날짜를 다시 고정합니다. 목표 거래일은 NYSE 달력의 실제 완료 종가로
 판정하며 휴일·서머타임·조기 폐장을 반영합니다. 자동 수집 범위도 그 완료 거래일까지
 명시적으로 제한하므로 장중 재실행이 미완료 세션을 끌어오지 않습니다.
-08:30·10:30·12:30 KST watchdog은 공개 데이터 기준일과 성공 생성 시각을 확인해,
-이미 최신인 경우 실제로 건너뛰고 stale 또는 최근 실패 상태일 때만 본 실행을 다시
-요청합니다. watchdog이 queue한 dispatch는 시작 시점에도 schedule 의미로 최신
+08:30·10:30·12:30 KST watchdog은 저장소의 검증 결과 기준일과 생성 시각을 확인해,
+stale 또는 최근 실패 상태일 때 본 실행을 다시 요청합니다. 저장소가 최신이면 실제
+공개 파일을 저장소와 대조하고, 다를 때는 재수집 없이 Pages 배포만 다시 요청해
+공개 파일 검증까지 기다립니다. 이미 같은 파일이 공개돼 있으면 건너뜁니다.
+watchdog이 queue한 수집 dispatch는 시작 시점에도 schedule 의미로 최신
 dashboard/status 원격 쌍을 다시 확인해 경합으로 생기는 중복 게시를 막습니다. 사람이
 실행하는 수동 dispatch의 `watchdog_origin` 기본값은 `false`이며 이 중복 방지와
 무관하게 항상 실행합니다. 분석 cache hit으로 immutable 결과의 `generatedAtUtc`가
 유지되는 경우에는, 정확히 같은 result/data/generated identity에 결합된
-`available.attemptedAtUtc`를 성공 게시 시각으로 사용합니다.
+`available.attemptedAtUtc`를 검증 결과 생성 시각으로 사용합니다.
 
 정기 실행이나 watchdog 재시도에서 공급자·분석·dispatch 오류가 발생하면 새 후보는
-게시하지 않고 기존 검증 결과를 유지합니다. 해당 오류는 run log와 automation status에
-남지만, 별도 public-site health job이 기존 `index.html`, `summary.json`,
-`dashboard.json`을 실제 Pages에서 읽어 정상임을 확인하면 workflow 실패 메일은 만들지
-않습니다. 공개 필수 파일이 반복 확인 후에도 없거나 JSON이 유효하지 않을 때만 자동
-실패 신호를 냅니다. 일반 수동 실행과 controlled analysis는 계약 검증을 위해 계속
-엄격하게 실패합니다.
+게시하지 않고 기존 검증 결과를 유지합니다. 오류는 run log와 automation status에
+남기고 workflow도 실패로 표시합니다. 별도 public-site health job은 기존
+`index.html`, `summary.json`, `dashboard.json`의 접속 가능 여부만 확인하며,
+수집·배포·공개 파일 검증 실패를 성공으로 바꾸지 않습니다.
 
 고정 절대 가드레일을 통과한 팩터가 하나도 없으면 임의 팩터를 선택하거나 임계값을
 완화하지 않습니다. 이는 임계값을 변경할 근거가 없는 분석 결과입니다. CLI는

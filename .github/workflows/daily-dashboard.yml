@@ -211,7 +211,7 @@ jobs:
     needs: update-dashboard
     if: needs.update-dashboard.outputs.should_deploy_pages == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 40
     permissions:
       contents: read
       actions: write
@@ -238,7 +238,7 @@ jobs:
             sleep 5
           done
           [[ -n "${deployment_run}" ]] || { echo "Pages run was not found." >&2; exit 1; }
-          timeout 600s gh run watch "${deployment_run}" --repo "${GITHUB_REPOSITORY}" --interval 10 --exit-status
+          timeout 2100s gh run watch "${deployment_run}" --repo "${GITHUB_REPOSITORY}" --interval 10 --exit-status
 
   public-site-health:
     needs: [update-dashboard, request-pages-deployment]
