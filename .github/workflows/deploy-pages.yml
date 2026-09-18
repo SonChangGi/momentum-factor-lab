@@ -114,9 +114,14 @@ jobs:
           python -m pip install -e '.[dev]'
           python -m pytest -q \
             tests/test_actions_pinning.py \
+            tests/test_actions_outcome.py \
+            tests/test_actions_source_race.py \
+            tests/test_config.py \
+            tests/test_dashboard_freshness.py \
             tests/test_dashboard_monotonic.py \
             tests/test_docs_contract.py \
-            tests/test_publication_security.py
+            tests/test_publication_security.py \
+            tests/test_scheduled_recovery.py
           python -m momentum_factor_lab.publication_security docs
           node --check docs/assets/dashboard.js
           MFL_TEST_PAYLOAD=docs/data/grid/v1/latest.json node scripts/test_web_contract.mjs
