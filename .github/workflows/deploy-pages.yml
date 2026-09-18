@@ -31,7 +31,6 @@ env:
 jobs:
   deploy-pages:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ github.event_name == 'push' || inputs.request_origin == 'daily-dashboard' }}
     timeout-minutes: 25
     environment:
       name: github-pages

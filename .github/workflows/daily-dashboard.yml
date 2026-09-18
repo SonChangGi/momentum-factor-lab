@@ -119,9 +119,12 @@ jobs:
         env:
           FRESHNESS_EVENT_NAME: ${{ steps.freshness.outputs.event_name }}
         run: |
+          candidate_source_sha="$(git rev-parse HEAD)"
+          readonly candidate_source_sha
           validate_candidate_against_remote() {
             git fetch origin "${GITHUB_REF_NAME}" --depth=1
-            if ! git diff --quiet HEAD "origin/${GITHUB_REF_NAME}" -- momentum_factor_lab .github/momentum-dashboard-config.json; then
+            if ! git diff --quiet "${candidate_source_sha}" "origin/${GITHUB_REF_NAME}" -- \
+              momentum_factor_lab .github/momentum-dashboard-config.json pyproject.toml uv.lock; then
               echo "Source changed while the candidate was being computed; refusing mixed-version publication." >&2
               exit 1
             fi
