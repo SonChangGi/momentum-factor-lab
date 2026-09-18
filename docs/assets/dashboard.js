@@ -2,6 +2,8 @@ const MANUAL_UPDATE_WORKFLOW_URL = 'https://github.com/SonChangGi/momentum-facto
 const MANUAL_UPDATE_COMMAND = 'gh workflow run daily-dashboard.yml --repo SonChangGi/momentum-factor-lab --ref main';
 
 const MANIFEST_URL = 'data/grid/v1/manifest.json';
+const AUTOMATION_STATUS_URL = 'data/automation-status.json';
+const AUTOMATION_STATUS_CONTRACT = 'momentum-dashboard-automation-status';
 const MANIFEST_SCHEMA_VERSION = 1;
 const MANIFEST_CONTRACT = 'momentum-static-result-grid';
 const MANIFEST_GRID_VERSION = 'v1';
@@ -655,6 +657,7 @@ const state = {
   browserControlsBound: false,
   dashboardControlsBound: false,
   resultSource: null,
+  automation: { phase: 'loading', status: null, reference: null },
   controlApiBase: null,
   controlCapabilities: null,
   controlApiError: null,
@@ -1734,34 +1737,137 @@ function humanOutputLabel(value) {
   return labels[text] || text;
 }
 
-function humanStatus(status, outputLabel) {
-  const text = textValue(status);
-  if (text === '-') return humanOutputLabel(outputLabel);
-  if (text === 'sample_offline_not_current') {
-    return '오프라인 샘플 · 현재 추천 아님';
+function automationDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+    ? value : null;
+}
+
+function automationTimestamp(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  if (!automationDate(value.slice(0, 10))) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function validateAutomationStatus(status, reference, now = Date.now()) {
+  requireCondition(
+    isRecord(status) && status.schemaVersion === 1
+      && status.contract === AUTOMATION_STATUS_CONTRACT
+      && status.project === 'momentum-factor-lab'
+      && ['available', 'degraded', 'failed', 'unavailable'].includes(status.state),
+    '자동화 상태 형식을 확인할 수 없습니다.',
+  );
+  const attemptedAt = automationTimestamp(status.attemptedAtUtc);
+  const generatedAt = automationTimestamp(reference?.generatedAtUtc);
+  requireCondition(
+    attemptedAt !== null && generatedAt !== null
+      && attemptedAt >= generatedAt && attemptedAt <= now + 5 * 60 * 1000,
+    '자동화 상태 시각과 공개 결과가 일치하지 않습니다.',
+  );
+  requireCondition(
+    validSha256(reference?.resultKey) && automationDate(reference?.dataAsOf)
+      && reference.path === 'data/dashboard.json'
+      && isRecord(status.lastGood)
+      && ['resultKey', 'dataAsOf', 'generatedAtUtc', 'path'].every((key) => (
+        status.lastGood[key] === reference[key]
+      )),
+    '자동화 상태와 공개 결과가 일치하지 않습니다.',
+  );
+  requireCondition(
+    (status.targetDataAsOf === null || automationDate(status.targetDataAsOf))
+      && typeof status.reasonCode === 'string' && status.reasonCode.length > 0
+      && isRecord(status.publication),
+    '자동화 갱신 정보를 확인할 수 없습니다.',
+  );
+  if (status.state === 'available') {
+    requireCondition(
+      status.publication.updated === true && status.targetDataAsOf === reference.dataAsOf,
+      '자동화 성공 기록과 공개 결과가 일치하지 않습니다.',
+    );
+  } else {
+    requireCondition(
+      status.publication.updated === false && status.publication.lastGoodPreserved === true,
+      '자동화 보존 기록과 공개 결과가 일치하지 않습니다.',
+    );
   }
-  if (text === 'current_live') {
-    return '최신 데이터 · 실행 가능성 점검 통과';
+  return status;
+}
+
+function automationReason(status) {
+  const reasons = {
+    no_comparable_factor: '공통 평가기간을 충족한 팩터 없음',
+    no_eligible_factor: '품질 기준을 통과한 팩터 없음',
+    execution_failed: '수집·분석 실행 실패',
+    stale_market_data: '목표 거래일의 시장 데이터 미확보',
+    incomplete_market_session: '아직 완료되지 않은 시장 거래일 감지',
+    published: '수집·검증 완료',
+  };
+  return reasons[status?.reasonCode] || '수집·분석 또는 검증 실패';
+}
+
+function automationStatusView({ automation, payload, manifest, source, summary = {} }) {
+  if (!isRecord(payload)) {
+    return {
+      title: '검증 결과 없음', detail: '표시할 검증 결과가 없습니다.', tone: 'error',
+      automationTitle: '자동화 상태 확인 불가', automationDetail: '공개 결과를 대조할 수 없음',
+      automationTone: 'error',
+      attemptedAtUtc: null, historical: false,
+    };
   }
-  if (text.includes('subset')) {
-    return '일부 종목 실행 · 연구용';
+  const asOf = payload?.data?.asOf || summary.data_as_of || '-';
+  const defaultEntry = manifest?.entries?.find((entry) => entry.resultKey === manifest.defaultResultKey);
+  const defaultAsOf = defaultEntry?.identity?.keyParts?.marketSnapshot?.dataAsOf;
+  const historical = source === 'static_grid' && automationDate(asOf)
+    && automationDate(defaultAsOf) && asOf < defaultAsOf;
+  const resultLabel = historical ? '과거 기준 조회' : '개별 검증 결과';
+  let title = '자동화 상태 확인 중';
+  let tone = 'pending';
+  let detail = `마지막 검증 기준일 ${asOf}`;
+  let status = null;
+  if (automation?.phase === 'loaded') {
+    try {
+      status = validateAutomationStatus(automation.status, automation.reference);
+      if (source === 'static_grid' && payload?.resultKey === manifest?.defaultResultKey) {
+        requireCondition(
+          payload.resultKey === automation.reference.resultKey
+            && payload.data?.asOf === automation.reference.dataAsOf
+            && payload.generatedAtUtc === automation.reference.generatedAtUtc,
+          '현재 결과와 자동화 기록이 일치하지 않습니다.',
+        );
+      }
+      if (status.state === 'available') {
+        title = '수집·검증 완료';
+        tone = 'ok';
+      } else {
+        title = status.state === 'degraded' ? '갱신 보류' : '갱신 실패';
+        tone = 'error';
+      }
+      detail = `마지막 검증 기준일 ${automation.reference.dataAsOf}`;
+      if (status.state !== 'available') {
+        detail += ` · 목표일 ${status.targetDataAsOf || '확인 불가'} · ${automationReason(status)}`;
+      }
+    } catch (error) {
+      status = null;
+      title = '자동화 상태 확인 불가';
+      detail += ' · 상태 기록과 공개 결과를 대조할 수 없음';
+    }
+  } else if (automation?.phase === 'error') {
+    title = '자동화 상태 확인 불가';
+    detail += ' · 상태 파일을 불러오지 못함';
   }
-  if (text.includes('with_limitations')) {
-    return '최신 데이터 · 연구용 신호';
-  }
-  if (text.includes('research') || String(outputLabel || '').includes('Research signals')) {
-    return '현재 데이터 · 연구용 신호';
-  }
-  if (text.includes('pass')) {
-    return '현재 데이터 사용 · 품질 점검 통과';
-  }
-  if (text.includes('stale')) {
-    return '데이터가 최신이 아닐 수 있음';
-  }
-  if (text.includes('fail') || text.includes('blocked')) {
-    return '추천 보류';
-  }
-  return text;
+  const individual = source === 'local_api' || source === 'remote_api';
+  return {
+    title: historical || individual ? resultLabel : title,
+    detail: historical || individual ? `조회 기준일 ${asOf} · ${humanOutputLabel(summary.recommendation_output_label)}` : detail,
+    tone: historical || individual ? 'neutral' : tone,
+    automationTitle: title,
+    automationDetail: detail,
+    automationTone: tone,
+    attemptedAtUtc: status?.attemptedAtUtc || null,
+    historical,
+  };
 }
 
 function isPracticalRun(run = currentRun()) {
@@ -2470,6 +2576,7 @@ function appendStatusLine(target, label, value) {
   valueNode.textContent = textValue(value);
   row.append(labelNode, valueNode);
   target.appendChild(row);
+  return row;
 }
 
 function appendFactorHoldingHistoryLoadStatus(target, payload) {
@@ -2798,11 +2905,17 @@ function renderSummary() {
     '#selected-factor-detail',
     `전체 평가기간 누적 ${formatPercent(pythonPerformanceMetric(comparisonFull, 'cumulativeReturn'))}`,
   );
-  setText('#recommendation-status', humanStatus(summary.recommendation_status, summary.recommendation_output_label));
+  const automationView = automationStatusView({
+    automation: state.automation, payload, manifest: state.manifest,
+    source: state.resultSource, summary,
+  });
+  setText('#recommendation-status', automationView.title);
+  const dataStatus = document.querySelector('#recommendation-status');
+  if (dataStatus) dataStatus.dataset.tone = automationView.tone;
   const providerSummary = payload.data?.mode === 'live_market' && payload.data?.synthetic === false
     ? '실제시장 공개 데이터'
     : humanProvider(summary.provider);
-  setText('#data-provider', `기준일 ${summary.data_as_of || '-'} · ${providerSummary}`);
+  setText('#data-provider', `${automationView.detail} · ${providerSummary}`);
   setText('#latest-run-at', latestRunAt);
   setText('#latest-run-detail', `분석 실행 기준 · 실행 결과 생성 ${runPayloadGeneratedAtText}`);
   const portfolio = currentWeightedHoldings();
@@ -2812,6 +2925,15 @@ function renderSummary() {
   statusCard.replaceChildren();
   statusCard.removeAttribute('aria-busy');
   statusCard.classList.remove('is-updating');
+  appendStatusLine(statusCard, '자동화', automationView.automationTitle);
+  if (automationView.attemptedAtUtc) {
+    appendStatusLine(statusCard, '최근 시도', formatKoreanDateTime(automationView.attemptedAtUtc));
+  }
+  if (automationView.automationTone !== 'ok' || automationView.historical
+    || ['local_api', 'remote_api'].includes(state.resultSource)) {
+    const automationDetail = appendStatusLine(statusCard, '갱신 점검', automationView.automationDetail);
+    automationDetail.classList.add('status-line-automation-detail');
+  }
   appendStatusLine(statusCard, '공개 상태', resultSourceLabel(state.resultSource));
   appendStatusLine(statusCard, '데이터 기준일', summary.data_as_of || '-');
   appendStatusLine(statusCard, '평가 종료일', run.common_evaluation_period?.endDate || summary.data_as_of || '-');
@@ -5455,6 +5577,36 @@ async function fetchJson(url, label, reference, fetchImpl = globalThis.fetch) {
   }
 }
 
+async function loadAutomationState(manifest, options = {}) {
+  try {
+    const defaultEntry = entryByResultKey(manifest, manifest.defaultResultKey);
+    const manifestUrl = options.manifestUrl || state.manifestUrl;
+    const pageUrl = options.pageUrl || window.location.href;
+    const fetchImpl = options.fetchImpl || globalThis.fetch;
+    requireCondition(defaultEntry && manifestUrl, '자동화 결과 대조 기준이 없습니다.');
+    const [status, summary] = await Promise.all([
+      fetchJson(new URL(AUTOMATION_STATUS_URL, pageUrl).href, 'automation status', undefined, fetchImpl),
+      fetchJson(new URL(defaultEntry.summary.path, manifestUrl).href, 'automation summary', defaultEntry.summary, fetchImpl),
+    ]);
+    requireCondition(
+      summary.resultKey === defaultEntry.resultKey
+        && summary.dataAsOf === defaultEntry.identity.keyParts.marketSnapshot.dataAsOf
+        && sameJson(summary.resultIdentity, defaultEntry.identity),
+      '자동화 대조용 요약과 manifest가 일치하지 않습니다.',
+    );
+    const reference = {
+      resultKey: summary.resultKey,
+      dataAsOf: summary.dataAsOf,
+      generatedAtUtc: summary.generatedAt,
+      path: 'data/dashboard.json',
+    };
+    return { phase: 'loaded', status, reference };
+  } catch (error) {
+    // Failure of the operational status must not discard a validated research result.
+    return { phase: 'error', status: null, reference: null };
+  }
+}
+
 async function fetchLocalApiJson(path, options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const url = new URL(path, `${LOCAL_API_BASE_URL}/`).href;
@@ -7376,8 +7528,11 @@ async function loadBrowserDashboard() {
     populateResultOptions(state.manifest);
     bindBrowserContractControls();
     bindDashboardControls();
+    const automationInitialization = loadAutomationState(state.manifest);
     const controlApiInitialization = initializeControlApi();
     await loadFromLocation({ replaceHistory: !window.location.search });
+    state.automation = await automationInitialization;
+    if (state.data) renderSummary();
     const controlCapabilities = await controlApiInitialization;
     renderResearchDraftState();
     if (!controlCapabilities && state.controlApiError) {
@@ -7401,6 +7556,9 @@ if (typeof globalThis !== 'undefined') {
     serializeInputValue,
     validateIdentity,
     validateManifest,
+    validateAutomationStatus,
+    automationStatusView,
+    loadAutomationState,
     resolveExactEntry,
     requestFromSearch,
     searchForRequest,

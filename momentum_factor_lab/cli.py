@@ -5,6 +5,9 @@ import contextlib
 import io
 import json
 import re
+import shutil
+import tempfile
+import traceback
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,12 +26,14 @@ from .data import (
     write_market_data_snapshot,
 )
 from .dashboard import DEFAULT_SITE_TITLE, dashboard_summary, write_dashboard_site
+from .dashboard_freshness import KST, expected_recent_us_close_date
 from .identity import build_result_identity, load_analysis_cache, write_analysis_cache
 from .local_api import LocalResearchAPI
 from .research_inputs import ResearchInputError, ResearchInputs
 from .static_grid import (
     MIN_ACTUAL_ANALYZED_SECURITY_COUNT,
     StaticGridArtifact,
+    validate_static_grid,
     write_static_grid,
 )
 from .universe import normalize_symbols
@@ -121,6 +126,7 @@ def _unavailable_automation_status(
     preset_id: str,
     target_data_as_of: str | None,
     error: NoEligibleFactorError,
+    preset_data_as_of: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     last_good = _last_good_reference(site_dir)
     status = {
@@ -128,15 +134,23 @@ def _unavailable_automation_status(
         "contract": AUTOMATION_STATUS_CONTRACT,
         "project": "momentum-factor-lab",
         "state": "degraded" if last_good is not None else "unavailable",
-        "reasonCode": "no_eligible_factor",
+        "reasonCode": (
+            "no_eligible_factor" if error.comparable_factor_count else "no_comparable_factor"
+        ),
         "attemptedAtUtc": _automation_timestamp(),
         "targetDataAsOf": target_data_as_of,
         "affectedPresetId": preset_id,
+        "affectedPresetDataAsOf": preset_data_as_of,
         "analysis": {
             "guardrailVersion": ABSOLUTE_GUARDRAIL_VERSION,
             "evaluatedFactorCount": error.evaluated_factor_count,
+            "comparableFactorCount": error.comparable_factor_count,
             "eligibleFactorCount": 0,
             "guardrailBreachCounts": error.guardrail_breach_counts,
+            "comparisonStatusCounts": error.comparison_status_counts,
+            "exclusionReasonCounts": error.exclusion_reason_counts,
+            "selectionStatusCounts": error.selection_status_counts,
+            "factorDetails": error.factor_details,
             "guardrailsRelaxed": False,
             "fallbackFactorSelected": False,
         },
@@ -878,7 +892,99 @@ def _execute_scheduled_grid(
     presets: list[ScheduledGridPreset],
     default_preset_id: str,
 ) -> dict[str, Any]:
-    """Rebuild every declared static preset from one verified actual snapshot."""
+    """Publish a fully built candidate, preserving last-good on every failure."""
+
+    target = expected_recent_us_close_date(datetime.now(KST)).isoformat()
+    site_dir = Path(site_dir)
+    site_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".momentum-candidate-", dir=site_dir.parent) as tmp:
+        candidate = Path(tmp) / "site"
+        if site_dir.exists():
+            shutil.copytree(site_dir, candidate)
+        else:
+            candidate.mkdir()
+        try:
+            summary = _build_scheduled_grid(
+                run_namespace,
+                site_dir=candidate,
+                title=title,
+                presets=presets,
+                default_preset_id=default_preset_id,
+                target_data_as_of=target,
+            )
+        except Exception as error:
+            # Public state carries no raw exception, provider URL, or local path.
+            traceback.print_exc()
+            summary = _failed_scheduled_summary(
+                site_dir=site_dir,
+                target=target,
+                reason="execution_failed",
+                diagnostics={"errorType": type(error).__name__},
+            )
+        else:
+            backup = Path(tmp) / "last-good"
+            if site_dir.exists():
+                site_dir.rename(backup)
+            try:
+                candidate.rename(site_dir)
+            except BaseException:
+                if backup.exists():
+                    backup.rename(site_dir)
+                raise
+            # The returned receipt must refer to the committed destination.
+            def rebase_paths(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {key: rebase_paths(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [rebase_paths(item) for item in value]
+                if isinstance(value, str) and value.startswith(str(candidate) + "/"):
+                    return str(site_dir) + value[len(str(candidate)):]
+                return value
+
+            summary = rebase_paths(summary)
+    return summary
+
+
+def _failed_scheduled_summary(
+    *,
+    site_dir: Path,
+    target: str,
+    reason: str,
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    last_good = _last_good_reference(site_dir)
+    status = {
+        "schemaVersion": AUTOMATION_STATUS_SCHEMA_VERSION,
+        "contract": AUTOMATION_STATUS_CONTRACT,
+        "project": "momentum-factor-lab",
+        "state": "failed",
+        "reasonCode": reason,
+        "attemptedAtUtc": _automation_timestamp(),
+        "targetDataAsOf": target,
+        "affectedPresetId": None,
+        "analysis": {"guardrailsRelaxed": False, "fallbackFactorSelected": False},
+        "diagnostics": diagnostics,
+        "publication": {
+            "updated": False,
+            "lastGoodPreserved": last_good is not None,
+            "policy": "preserve_last_good",
+        },
+        "lastGood": last_good,
+    }
+    path = _write_automation_status(site_dir, status)
+    return {"automationStatus": status, "paths": {"automationStatus": str(path)}}
+
+
+def _build_scheduled_grid(
+    run_namespace: argparse.Namespace,
+    *,
+    site_dir: Path,
+    title: str,
+    presets: list[ScheduledGridPreset],
+    default_preset_id: str,
+    target_data_as_of: str,
+) -> dict[str, Any]:
+    """Rebuild all presets in a private staging tree from one actual snapshot."""
 
     base_config = _config(run_namespace)
     base_config.site_dir = site_dir
@@ -888,6 +994,9 @@ def _execute_scheduled_grid(
         raise ValueError("scheduled static grids require the uncapped full universe")
     if base_config.end_date is not None:
         raise ValueError("scheduled base run must omit --end-date so offset presets roll forward")
+    # Resolve the rolling request once, before any provider is called. An
+    # unbounded latest download can otherwise include an unfinished session.
+    base_config.end_date = target_data_as_of
 
     base_inputs = ResearchInputs.from_config(base_config)
     base_market = load_market_data(base_config)
@@ -901,6 +1010,18 @@ def _execute_scheduled_grid(
     sessions = list(base_market.prices.dropna(axis=0, how="all").index.unique())
     if not sessions:
         raise ValueError("scheduled actual-market snapshot has no observed sessions")
+    observed = sessions[-1].date().isoformat()
+    if observed != target_data_as_of:
+        return _failed_scheduled_summary(
+            site_dir=site_dir,
+            target=target_data_as_of,
+            reason=(
+                "stale_market_data"
+                if observed < target_data_as_of
+                else "incomplete_market_session"
+            ),
+            diagnostics={"observedDataAsOf": observed},
+        )
 
     artifacts: list[StaticGridArtifact] = []
     results: dict[str, tuple[dict[str, Any], Path]] = {}
@@ -935,7 +1056,7 @@ def _execute_scheduled_grid(
             payload, result_path = _compute_payload(config, market)
         except NoEligibleFactorError as error:
             market_as_of = getattr(market, "as_of", None)
-            target_data_as_of = (
+            preset_data_as_of = (
                 str(market_as_of)[:10]
                 if market_as_of is not None
                 else (config.end_date or str(sessions[-1].date()))
@@ -945,6 +1066,7 @@ def _execute_scheduled_grid(
                 preset_id=preset.preset_id,
                 target_data_as_of=target_data_as_of,
                 error=error,
+                preset_data_as_of=preset_data_as_of,
             )
             return {
                 "automationStatus": automation_status,
@@ -980,6 +1102,7 @@ def _execute_scheduled_grid(
         default_result_key=str(default_payload["resultKey"]),
         write_default_aliases=True,
     )
+    validate_static_grid(grid_paths["manifest"])
     paths["gridManifest"] = str(grid_paths["manifest"])
     paths["result"] = str(default_result_path)
     summary = _compact_summary(default_payload, paths)
@@ -1079,6 +1202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif summary.get("automationStatus", {}).get("state") in {
                 "degraded",
                 "unavailable",
+                "failed",
             }:
                 automation = summary["automationStatus"]
                 print(
@@ -1089,6 +1213,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 _print_run_summary(summary)
+            automation = summary.get("automationStatus", {})
+            if (
+                automation.get("state") == "failed"
+                or automation.get("reasonCode") == "no_comparable_factor"
+            ):
+                return 2
             return 0
 
         summary = _execute_run(args)

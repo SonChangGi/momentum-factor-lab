@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import exchange_calendars as xcals
 
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_CUTOFF_HOUR_KST = 6
@@ -161,18 +163,19 @@ def latest_dashboard_data_as_of(dashboard: dict[str, Any]) -> date | None:
 
 
 def expected_recent_us_close_date(now_kst: datetime) -> date:
-    """Return the most recent likely U.S. daily close date for a KST morning run.
+    """Return the latest NYSE session whose regular close has completed."""
 
-    The automation uses free end-of-day providers, so this intentionally stays
-    conservative and dependency-free before package installation. It handles
-    weekends; U.S. market holidays may cause harmless extra retry attempts until
-    the dashboard data date catches up on the next trading day.
-    """
-
-    candidate = now_kst.date() - timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate -= timedelta(days=1)
-    return candidate
+    now_utc = _to_kst(now_kst).astimezone(UTC)
+    # Explicit year bounds also cover the preceding session on New Year's Day
+    # and avoid depending on the library's default calendar construction range.
+    schedule = xcals.get_calendar(
+        "XNYS", start=f"{now_utc.year - 1}-01-01", end=f"{now_utc.year}-12-31"
+    ).schedule
+    # previous_close excludes an exact close timestamp; publication permits it.
+    completed = schedule.index[schedule["close"] <= now_utc]
+    if completed.empty:
+        raise ValueError(f"NYSE calendar has no completed session before {now_utc.isoformat()}")
+    return completed[-1].date()
 
 
 def _latest_dashboard_run(dashboard: dict[str, Any]) -> dict[str, Any] | None:

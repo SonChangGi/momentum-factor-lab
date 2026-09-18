@@ -607,7 +607,7 @@ class LocalResearchAPI:
             raise LocalAPIRequestError(400, "invalid_json", f"invalid JSON: {error}") from error
         inputs = _parse_research_inputs(raw)
         try:
-            config = inputs.apply(self.base_config)
+            config = inputs.apply(self.base_config.for_new_run())
         except (ResearchInputError, ValueError) as error:
             raise LocalAPIRequestError(400, "invalid_research_inputs", str(error)) from error
         try:

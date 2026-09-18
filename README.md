@@ -133,7 +133,12 @@ snapshot label로 대체되지 않습니다.
 
 ### 정기 갱신·watchdog 상태
 
-`Daily Momentum Dashboard`는 미국 정규장 완료 이후 06:30 KST에 실행합니다.
+`Daily Momentum Dashboard`는 미국 정규장 완료 이후 화~토 06:30 KST에 예약됩니다.
+GitHub 실행 대기로 실제 시작은 늦어질 수 있습니다. 실행 요청일은 시작 시 한 번
+고정해 UTC 자정을 넘어도 수집·분석·캐시 identity가 바뀌지 않습니다. 장수 로컬 API는
+새 요청마다 날짜를 다시 고정합니다. 목표 거래일은 NYSE 달력의 실제 완료 종가로
+판정하며 휴일·서머타임·조기 폐장을 반영합니다. 자동 수집 범위도 그 완료 거래일까지
+명시적으로 제한하므로 장중 재실행이 미완료 세션을 끌어오지 않습니다.
 08:30·10:30·12:30 KST watchdog은 공개 데이터 기준일과 성공 생성 시각을 확인해,
 이미 최신인 경우 실제로 건너뛰고 stale 또는 최근 실패 상태일 때만 본 실행을 다시
 요청합니다. watchdog이 queue한 dispatch는 시작 시점에도 schedule 의미로 최신
@@ -152,11 +157,23 @@ dashboard/status 원격 쌍을 다시 확인해 경합으로 생기는 중복 �
 엄격하게 실패합니다.
 
 고정 절대 가드레일을 통과한 팩터가 하나도 없으면 임의 팩터를 선택하거나 임계값을
-완화하지 않습니다. 이는 실행 오류가 아니라 fail-closed 분석 결과이므로 workflow는
+완화하지 않습니다. 이는 임계값을 변경할 근거가 없는 분석 결과입니다. CLI는
 `docs/data/automation-status.json`에 `degraded`(기존 검증 결과가 없으면
-`unavailable`)와 `no_eligible_factor`를 기록하고 정상 종료합니다. 공개 dashboard와
+`unavailable`)와 `no_eligible_factor`를 기록하고 종료합니다. 비교 가능한 팩터가
+전혀 없는 `no_comparable_factor`, 일반 실행 오류인 `execution_failed`, 오래된 입력인
+`stale_market_data`, 미완료 세션인 `incomplete_market_session`은 별도 이유로 구분하며
+CLI 오류 코드로 종료합니다. 전체 평가 수·비교 가능 수·팩터별 제외 사유를 보존합니다. 공개 dashboard와
 3-preset grid는 마지막 검증 결과를 그대로 유지하며, watchdog은 이 상태를 최근 실패로
-보고 다음 제한된 재시도 시점에 다시 실행합니다.
+보고 다음 제한된 재시도 시점에 다시 실행합니다. 모든 preset과 파일 해시 검증을
+별도 후보 디렉터리에서 마친 뒤에만 공개 파일을 교체하므로, 중간 파일 생성 실패도
+기존 정상 결과를 덮어쓰지 않습니다.
+
+수집 작업은 실패 상태도 커밋·배포할 수 있도록 빌드 오류를 일시적으로 받아들이지만,
+최종 `refresh-result`는 새 검증 결과와 Pages 공개 파일 대조가 모두 성공해야 통과합니다.
+기존 페이지 접속 여부는 별도 검사이며 데이터 갱신 성공을 대신하지 않습니다.
+제외 진단과 입력 manifest는 작은 진단 artifact로 3일 보존합니다.
+화면은 운영 상태를 결과 identity와 대조해 갱신 실패·보류·확인 불가를 표시하고,
+과거 preset 조회를 최신 결과와 구분합니다.
 
 공개 source health에는 로컬 cache 경로를 싣지 않습니다. 생성된 `docs`는 커밋 전에
 provider credential 형식과 민감한 JSON 필드를 스캔하며, 탐지된 실제 값은 로그에

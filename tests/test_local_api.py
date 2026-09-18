@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 import hashlib
 import json
 from http.client import HTTPConnection
@@ -683,6 +684,48 @@ def test_distinct_complete_inputs_run_python_with_distinct_configs_and_results(
         assert len(result["factorRanking"]) == 64
         assert len(result["factorPortfolios"]) == 64
         assert result["bestFactorPortfolio"] == result["factorPortfolios"][result["bestFactor"]]
+
+
+def test_api_refreshes_request_date_and_keeps_queued_identity_across_midnight(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class Clock(datetime):
+        current = datetime(2026, 9, 17, 23, 59, 59, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz)
+
+    tasks = []
+
+    class ManualExecutor:
+        def submit(self, task):
+            tasks.append(task)
+
+        def shutdown(self):
+            return None
+
+    monkeypatch.setattr("momentum_factor_lab.config.datetime", Clock)
+    api, calls = _api(tmp_path, executor=ManualExecutor())
+    api.base_config.end_date = None
+    first_submission = _post(api)
+    Clock.current = datetime(2026, 9, 18, 0, 0, 1, tzinfo=UTC)
+    second_submission = _post(api)
+    assert first_submission.status_code == second_submission.status_code == 202
+    assert first_submission.body["resultKey"] != second_submission.body["resultKey"]
+
+    for task in tasks:
+        task()
+    assert [config.effective_end_date for config, _market_data in calls] == [
+        "2026-09-17",
+        "2026-09-18",
+    ]
+    for submission in (first_submission, second_submission):
+        completed = api.dispatch("GET", submission.body["statusUrl"])
+        assert completed.body["status"] == "complete", completed.body
+        assert b"_resolved_end_date" not in canonical_json_bytes(completed.body)
+    assert api.base_config.effective_end_date == "2026-09-17"
 
 
 def test_queued_running_and_complete_states_need_no_background_thread(tmp_path: Path) -> None:

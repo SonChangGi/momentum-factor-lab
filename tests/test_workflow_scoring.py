@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -297,8 +298,67 @@ def test_factor_selection_fails_closed_when_every_factor_breaks_guardrails(
     ranking["total_unpriceable_target_count"] = 1
     with pytest.raises(NoEligibleFactorError, match="no factor passes") as exc_info:
         _apply_factor_guardrails(ranking, demo_result.config)
-    assert exc_info.value.evaluated_factor_count > 0
-    assert exc_info.value.guardrail_breach_counts
+    error = exc_info.value
+    comparable_count = int(ranking["comparison_status"].eq("available").sum())
+    assert error.evaluated_factor_count == len(ranking)
+    assert error.comparable_factor_count == comparable_count
+    assert error.guardrail_breach_counts["execution"] == comparable_count
+    assert error.selection_status_counts["absolute_guardrail_excluded"] == comparable_count
+    assert len(error.factor_details) == len(ranking)
+
+
+def test_no_comparable_factor_preserves_data_exclusion_diagnostics(
+    demo_result: AnalysisResult,
+) -> None:
+    selected = demo_result.factor_ranking.loc[demo_result.factor_ranking["selected"]]
+    ranking = pd.concat([selected] * 3, ignore_index=True)
+    ranking["factor"] = ["execution_shortage", "history_shortage", "diagnostic_alias"]
+    ranking["comparison_status"] = [
+        "incomplete_execution_coverage",
+        "insufficient_history",
+        "duplicate_alias",
+    ]
+    ranking.at[0, "execution_coverage_ratio"] = 0.5
+    ranking.at[0, "blocked_execution_count"] = 2
+    ranking.at[0, "total_unpriceable_target_count"] = 4
+    ranking.at[1, "ending_nav_available"] = True
+    ranking.at[1, "observations"] = 0
+    ranking.at[1, "daily_risk_observations"] = np.nan
+    ranking.at[2, "comparison_reason"] = "duplicate_alias_of:history_shortage"
+    ranking = workflow_module._with_exclusion_accounting(ranking, demo_result.config)
+
+    with pytest.raises(NoEligibleFactorError) as exc_info:
+        _apply_factor_guardrails(ranking, demo_result.config)
+
+    error = exc_info.value
+    assert error.evaluated_factor_count == 3
+    assert error.comparable_factor_count == 0
+    assert error.comparison_status_counts == {
+        "duplicate_alias": 1,
+        "incomplete_execution_coverage": 1,
+        "insufficient_history": 1,
+    }
+    assert error.exclusion_reason_counts == {
+        "duplicate_alias": 1,
+        "incomplete_execution_coverage": 1,
+        "insufficient_observations": 1,
+    }
+    assert error.selection_status_counts == {"data_excluded": 3}
+    # Missing inputs are not counted as failed absolute selection thresholds.
+    assert error.guardrail_breach_counts == {}
+    rows = {row["factor"]: row for row in error.factor_details}
+    execution_reason = rows["execution_shortage"]["exclusion_reasons"][0]
+    assert execution_reason == {
+        "code": "incomplete_execution_coverage",
+        "coverage": 0.5,
+        "blockedExecutions": 2.0,
+        "unpriceableTargets": 4.0,
+    }
+    history_reason = rows["history_shortage"]["exclusion_reasons"][0]
+    assert history_reason["required"] == demo_result.config.min_evaluation_observations
+    assert history_reason["observed"] == 0
+    assert rows["history_shortage"]["daily_risk_observations"] is None
+    assert json.loads(json.dumps(error.factor_details, allow_nan=False)) == error.factor_details
 
 
 def test_unavailable_advanced_factors_remain_in_single_fixed_method_catalog(

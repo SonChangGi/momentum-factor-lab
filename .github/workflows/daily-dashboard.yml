@@ -22,13 +22,15 @@ permissions:
 jobs:
   update-dashboard:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}
     timeout-minutes: 120
     permissions:
       contents: write
     outputs:
       pages_source_sha: ${{ steps.pages-request.outputs.source_sha }}
       should_deploy_pages: ${{ steps.pages-request.outputs.should_deploy }}
+      refresh_skipped: ${{ steps.freshness.outputs.skip }}
+      build_outcome: ${{ steps.build.outcome }}
+      refresh_state: ${{ steps.result.outputs.state }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -39,6 +41,17 @@ jobs:
         run: |
           git fetch origin "${GITHUB_REF_NAME}" --depth=1
           git reset --hard "origin/${GITHUB_REF_NAME}"
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Momentum Factor Lab with live-data extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[live]'
 
       - name: Decide whether dashboard refresh should run
         id: freshness
@@ -63,25 +76,38 @@ jobs:
           echo "Latest run KST: ${{ steps.freshness.outputs.latest_run_kst }}"
           echo "Cutoff KST: ${{ steps.freshness.outputs.cutoff_kst }}"
 
-      - name: Set up Python
-        if: steps.freshness.outputs.skip != 'true'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Momentum Factor Lab with live-data extras
-        if: steps.freshness.outputs.skip != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e '.[live]'
-
       - name: Build daily Korean dashboard
+        id: build
+        continue-on-error: true
         if: steps.freshness.outputs.skip != 'true'
         run: |
           python -m momentum_factor_lab.cli scheduled-dashboard \
             --config .github/momentum-dashboard-config.json \
             --site-dir docs
+
+      - name: Record refresh outcome
+        id: result
+        if: always() && steps.freshness.outputs.skip != 'true'
+        run: |
+          state="$(jq -r '.state // "unknown"' docs/data/automation-status.json 2>/dev/null || echo unknown)"
+          echo "state=${state}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Momentum refresh"
+            echo "Build outcome: ${{ steps.build.outcome }}"
+            echo "Publication state: ${state}"
+            jq '{state, reasonCode, attemptedAtUtc, targetDataAsOf, analysis, publication, lastGood}' docs/data/automation-status.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve bounded refresh diagnostics
+        if: always() && steps.freshness.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: momentum-refresh-diagnostics-${{ github.run_id }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: |
+            docs/data/automation-status.json
+            outputs/daily-dashboard/input/market_data_manifest.json
 
       - name: Reject secrets in generated publication
         if: steps.freshness.outputs.skip != 'true'
@@ -95,6 +121,10 @@ jobs:
         run: |
           validate_candidate_against_remote() {
             git fetch origin "${GITHUB_REF_NAME}" --depth=1
+            if ! git diff --quiet HEAD "origin/${GITHUB_REF_NAME}" -- momentum_factor_lab .github/momentum-dashboard-config.json; then
+              echo "Source changed while the candidate was being computed; refusing mixed-version publication." >&2
+              exit 1
+            fi
             remote_dashboard="${RUNNER_TEMP}/remote-dashboard.json"
             remote_automation_status="${RUNNER_TEMP}/remote-automation-status.json"
             if git show "origin/${GITHUB_REF_NAME}:docs/data/dashboard.json" > "${remote_dashboard}" 2>/dev/null; then
@@ -130,13 +160,13 @@ jobs:
           git add docs
           commit_message="${RUNNER_TEMP}/dashboard-commit-message.txt"
           cat > "${commit_message}" <<'EOF'
-          Keep the published dashboard current after the scheduled data run
+          Record the validated Momentum refresh outcome
 
           Constraint: Scheduled and manual GitHub Actions updates only generated docs assets after freshness and monotonic publication gates.
           Confidence: high
           Scope-risk: narrow
           Directive: Do not use this automated commit for source-code or policy changes; those require reviewed human/agent commits.
-          Tested: momentum_factor_lab.cli scheduled-dashboard completed in this workflow.
+          Validated: generated assets passed publication checks; automation-status records whether the data advanced or last-good was preserved.
           Not-tested: External free data providers may publish the latest close with delay.
           EOF
           perl -pi -e 's/^          //' "${commit_message}"
@@ -178,8 +208,7 @@ jobs:
     needs: update-dashboard
     if: needs.update-dashboard.outputs.should_deploy_pages == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}
-    timeout-minutes: 5
+    timeout-minutes: 12
     permissions:
       contents: read
       actions: write
@@ -191,11 +220,22 @@ jobs:
           EXPECTED_SOURCE_SHA: ${{ needs.update-dashboard.outputs.pages_source_sha }}
         run: |
           set -euo pipefail
+          dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           timeout 30s gh workflow run deploy-pages.yml \
             --repo "${GITHUB_REPOSITORY}" \
             --ref "${DEFAULT_BRANCH}" \
             -f expected_source_sha="${EXPECTED_SOURCE_SHA}" \
             -f request_origin=daily-dashboard
+          deployment_run=""
+          for attempt in {1..12}; do
+            deployment_run="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow deploy-pages.yml \
+              --event workflow_dispatch --commit "${EXPECTED_SOURCE_SHA}" --limit 10 \
+              --json databaseId,createdAt --jq ".[] | select(.createdAt >= \"${dispatched_at}\") | .databaseId" | head -n 1)"
+            [[ -n "${deployment_run}" ]] && break
+            sleep 5
+          done
+          [[ -n "${deployment_run}" ]] || { echo "Pages run was not found." >&2; exit 1; }
+          timeout 600s gh run watch "${deployment_run}" --repo "${GITHUB_REPOSITORY}" --interval 10 --exit-status
 
   public-site-health:
     needs: [update-dashboard, request-pages-deployment]
@@ -205,7 +245,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Fail only when the existing Momentum page is unusable
+      - name: Check public page availability separately from refresh success
         env:
           PAGE_URL: https://sonchanggi.github.io/momentum-factor-lab/
         shell: bash
@@ -239,10 +279,36 @@ jobs:
               fi
             done
             if [[ "$usable" == "true" ]]; then
-              echo "The existing Momentum page remains usable; scheduled refresh errors stay in run logs without failure mail."
+              echo "Public page is reachable. Data refresh success is checked separately."
               exit 0
             fi
             [[ $attempt -lt 12 ]] && sleep 10
           done
           echo "::error::The public Momentum page or its required JSON is unavailable or invalid."
           exit 1
+
+  refresh-result:
+    needs: [update-dashboard, request-pages-deployment]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require a verified refresh and Pages readback
+        env:
+          UPDATE_RESULT: ${{ needs.update-dashboard.result }}
+          REFRESH_SKIPPED: ${{ needs.update-dashboard.outputs.refresh_skipped }}
+          BUILD_OUTCOME: ${{ needs.update-dashboard.outputs.build_outcome }}
+          REFRESH_STATE: ${{ needs.update-dashboard.outputs.refresh_state }}
+          DEPLOY_RESULT: ${{ needs.request-pages-deployment.result }}
+          SHOULD_DEPLOY: ${{ needs.update-dashboard.outputs.should_deploy_pages }}
+        run: |
+          [[ "${UPDATE_RESULT}" == success ]] || exit 1
+          [[ "${REFRESH_SKIPPED}" == true ]] && exit 0
+          [[ "${BUILD_OUTCOME}" == success && "${REFRESH_STATE}" == available ]] || {
+            echo "::error::No new validated dashboard was published. See the preserved refresh diagnostics."
+            exit 1
+          }
+          if [[ "${SHOULD_DEPLOY}" == true ]]; then
+            [[ "${DEPLOY_RESULT}" == success ]] || exit 1
+          fi

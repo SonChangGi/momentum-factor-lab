@@ -196,9 +196,13 @@ def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     assert workflow.count("--status-path docs/data/automation-status.json") == 1
     assert "watchdog_origin:" in workflow
     assert "WATCHDOG_ORIGIN:" in workflow
-    assert "continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}" in workflow
+    assert "continue-on-error: ${{ github.event_name == 'schedule' || inputs.watchdog_origin == true }}" not in workflow
+    assert "id: build\n        continue-on-error: true" in workflow
+    assert "refresh-result:" in workflow
+    assert "--exit-status" in workflow
+    assert "Preserve bounded refresh diagnostics" in workflow
     assert "public-site-health:" in workflow
-    assert "Fail only when the existing Momentum page is unusable" in workflow
+    assert "Check public page availability separately from refresh success" in workflow
     assert 'effective_event_name="schedule"' in workflow
     assert "FRESHNESS_EVENT_NAME: ${{ steps.freshness.outputs.event_name }}" in workflow
     assert (
@@ -214,7 +218,8 @@ def test_daily_workflow_runs_freshness_and_monotonic_schema_gates() -> None:
     assert "-f watchdog_origin=true" in watchdog
     assert "if: steps.freshness.outputs.skip != 'true'" in watchdog
     assert "if: steps.freshness.outputs.skip == 'true'" in watchdog
-    assert "continue-on-error: ${{ github.event_name == 'schedule' }}" in watchdog
+    assert "continue-on-error:" not in watchdog
+    assert "Install trading-session calendar" in watchdog
     assert "public-site-health:" in watchdog
 
 

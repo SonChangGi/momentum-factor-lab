@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -197,6 +198,49 @@ def test_analysis_cache_requires_full_embedded_identity_and_filename(tmp_path: P
     mismatched["resultIdentity"]["keyParts"]["normalizedInputs"]["top_n"] = 99
     path.write_bytes(__import__("json").dumps(mismatched).encode())
     assert load_analysis_cache(config, identity) is None
+
+
+def test_analysis_crossing_utc_midnight_keeps_cache_identity(tmp_path: Path, monkeypatch) -> None:
+    class Clock(datetime):
+        current = datetime(2026, 9, 17, 23, 59, 59, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz)
+
+    monkeypatch.setattr("momentum_factor_lab.config.datetime", Clock)
+    config = _config(tmp_path, end_date=None)
+    market = _market(as_of="2026-09-17")
+    before_analysis = build_result_identity(config, market)
+    Clock.current = datetime(2026, 9, 18, 0, 0, 1, tzinfo=UTC)
+    after_analysis = build_result_identity(config, market)
+
+    assert after_analysis == before_analysis
+    normalized = after_analysis["keyParts"]["normalizedInputs"]
+    assert normalized["end_date"] is None
+    assert normalized["effective_end_date"] == "2026-09-17"
+    assert "_resolved_end_date" not in normalized
+    payload = {"schemaVersion": 5, "resultIdentity": after_analysis}
+    write_analysis_cache(config, before_analysis, payload)
+    assert load_analysis_cache(config, before_analysis) == payload
+    next_run = build_result_identity(config.for_new_run(), market)
+    assert next_run["resultKey"] != before_analysis["resultKey"]
+
+
+def test_explicit_end_date_identity_ignores_run_start_day(tmp_path: Path, monkeypatch) -> None:
+    class Clock(datetime):
+        current = datetime(2026, 9, 17, 23, 59, 59, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz)
+
+    monkeypatch.setattr("momentum_factor_lab.config.datetime", Clock)
+    config = _config(tmp_path)
+    market = _market()
+    first = build_result_identity(config, market)
+    Clock.current = datetime(2026, 9, 18, 0, 0, 1, tzinfo=UTC)
+    assert build_result_identity(config.for_new_run(), market) == first
 
 
 def test_factor_policy_and_selection_digests_are_part_of_identity(

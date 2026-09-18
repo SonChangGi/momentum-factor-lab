@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from math import isclose, isfinite
 from pathlib import Path
@@ -149,6 +149,14 @@ class RunConfig:
     universe_source_mode: str = "packaged"
     universe_profile: str = "large_liquid"
     universe: list[str] = field(default_factory=lambda: list(DEFAULT_UNIVERSE))
+    # Keep one request date across collection, analysis, and preset copies.
+    # This is an init field so dataclasses.replace preserves the same run date.
+    _resolved_end_date: str = field(
+        default_factory=lambda: datetime.now(UTC).date().isoformat(),
+        repr=False,
+        compare=False,
+        kw_only=True,
+    )
 
     def __post_init__(self) -> None:
         self.benchmark = normalize_symbol(self.benchmark)
@@ -224,7 +232,12 @@ class RunConfig:
 
     @property
     def effective_end_date(self) -> str:
-        return self.end_date or datetime.now(UTC).date().isoformat()
+        return self.end_date or self._resolved_end_date
+
+    def for_new_run(self) -> RunConfig:
+        """Resolve a fresh request date without changing an ongoing run's config."""
+
+        return replace(self, _resolved_end_date=datetime.now(UTC).date().isoformat())
 
     @property
     def discovery_min_avg_dollar_volume(self) -> float:
@@ -464,6 +477,7 @@ class RunConfig:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        data.pop("_resolved_end_date")
         for key in (
             "prices_path",
             "volumes_path",

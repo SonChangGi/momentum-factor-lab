@@ -4,6 +4,7 @@ import hashlib
 import json
 import resource
 import sys
+from collections import Counter
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -84,23 +85,48 @@ class NoEligibleFactorError(ValueError):
     """The fixed absolute policy produced no publishable factor.
 
     This is a valid fail-closed analytical outcome, not permission to relax a
-    guardrail or select a fallback factor.
+    guardrail or select a fallback factor. Details retain every evaluated row so
+    unavailable metrics remain distinguishable from absolute guardrail failures.
     """
 
     def __init__(self, details: list[dict[str, Any]]) -> None:
-        self.evaluated_factor_count = len(details)
-        breach_counts: dict[str, int] = {}
-        for detail in details:
-            breaches = detail.get("guardrail_breaches")
-            if not isinstance(breaches, list):
-                continue
-            for breach in breaches:
-                name = str(breach)
-                breach_counts[name] = breach_counts.get(name, 0) + 1
+        self.factor_details = _json_safe(details)
+        self.evaluated_factor_count = len(self.factor_details)
+        comparison_counts: Counter[str] = Counter()
+        selection_counts: Counter[str] = Counter()
+        exclusion_counts: Counter[str] = Counter()
+        breach_counts: Counter[str] = Counter()
+        for detail in self.factor_details:
+            # Older callers supplied comparable rows containing only breaches.
+            status = str(detail.get("comparison_status", "available"))
+            comparison_counts[status] += 1
+            selection_status = str(detail.get("selection_status", "absolute_guardrail_excluded"))
+            selection_counts[selection_status] += 1
+            if status == "available":
+                breach_counts.update(_normalized_reason_codes(detail.get("guardrail_breaches")))
+            else:
+                exclusion_counts.update(
+                    _normalized_reason_codes(detail.get("exclusion_reason_codes"))
+                )
+        self.comparable_factor_count = comparison_counts["available"]
+        self.comparison_status_counts = dict(sorted(comparison_counts.items()))
+        self.selection_status_counts = dict(sorted(selection_counts.items()))
+        self.exclusion_reason_counts = dict(sorted(exclusion_counts.items()))
         self.guardrail_breach_counts = dict(sorted(breach_counts.items()))
         super().__init__(
             "no factor passes the absolute selection guardrails under the fixed policy: "
-            + json.dumps(details, ensure_ascii=False)
+            + json.dumps(
+                {
+                    "evaluatedFactorCount": self.evaluated_factor_count,
+                    "comparableFactorCount": self.comparable_factor_count,
+                    "comparisonStatusCounts": self.comparison_status_counts,
+                    "exclusionReasonCounts": self.exclusion_reason_counts,
+                    "guardrailBreachCounts": self.guardrail_breach_counts,
+                    "factorDetails": self.factor_details,
+                },
+                ensure_ascii=False,
+                allow_nan=False,
+            )
         )
 
 
@@ -1000,9 +1026,34 @@ def _apply_factor_guardrails(
 
     candidates = result[result["selection_eligible"]].copy()
     if candidates.empty:
+        diagnostic_columns = [
+            "factor",
+            "policy_id",
+            "comparison_status",
+            "comparison_eligible",
+            "comparison_reason",
+            "exclusion_reason_codes",
+            "exclusion_reasons",
+            "selection_status",
+            "guardrail_breaches",
+            "observations",
+            "ending_nav_available",
+            "risk_metrics_complete",
+            "valuation_coverage_ratio",
+            "daily_risk_observations",
+            "policy_input_coverage_ratio",
+            "policy_input_reason_counts",
+            "policy_input_failures",
+            "execution_coverage_ratio",
+            "blocked_execution_count",
+            "total_unpriceable_target_count",
+            "current_portfolio_available",
+            "current_portfolio_input_reasons",
+            "contribution_diagnostics_complete",
+            "contribution_diagnostics_reason",
+        ]
         detail = result.loc[
-            metric_available,
-            ["factor", "policy_id", "guardrail_breaches"],
+            :, [column for column in diagnostic_columns if column in result.columns]
         ].to_dict(orient="records")
         raise NoEligibleFactorError(detail)
     sort_columns = [

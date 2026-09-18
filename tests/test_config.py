@@ -1,8 +1,57 @@
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from momentum_factor_lab.config import MAX_TOP_N, RunConfig, WEIGHTING_POLICIES
+from momentum_factor_lab.research_inputs import ResearchInputs
+
+
+def test_implicit_end_date_is_frozen_across_midnight_and_preset_copies(monkeypatch) -> None:
+    class Clock(datetime):
+        current = datetime(2026, 9, 17, 23, 59, 59, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz)
+
+    monkeypatch.setattr("momentum_factor_lab.config.datetime", Clock)
+    config = RunConfig(live=True)
+    Clock.current = datetime(2026, 9, 18, 0, 0, 1, tzinfo=UTC)
+
+    # The first read can happen after midnight, including a copied preset.
+    top30 = ResearchInputs(top_n=30).apply(config)
+    copied = replace(config)
+    for same_run in (config, top30, copied):
+        assert same_run.end_date is None
+        assert same_run.effective_end_date == "2026-09-17"
+        assert same_run.to_dict()["effective_end_date"] == "2026-09-17"
+        assert "_resolved_end_date" not in same_run.to_dict()
+    assert RunConfig(live=True).effective_end_date == "2026-09-18"
+
+
+def test_new_run_refreshes_implicit_date_without_changing_ongoing_run(monkeypatch) -> None:
+    class Clock(datetime):
+        current = datetime(2026, 9, 17, 23, 59, 59, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz)
+
+    monkeypatch.setattr("momentum_factor_lab.config.datetime", Clock)
+    ongoing = RunConfig(live=True)
+    Clock.current = datetime(2026, 9, 18, 0, 0, 1, tzinfo=UTC)
+    next_run = ongoing.for_new_run()
+
+    assert ongoing.end_date is next_run.end_date is None
+    assert ongoing.effective_end_date == "2026-09-17"
+    assert next_run.effective_end_date == "2026-09-18"
+    historical = replace(ongoing, end_date="2026-09-08")
+    assert historical.for_new_run().effective_end_date == "2026-09-08"
+    # Scheduled historical presets set their observed session after copying.
+    historical.end_date = "2026-09-09"
+    assert historical.effective_end_date == "2026-09-09"
 
 
 def test_default_research_contract_has_one_fixed_policy_and_explicit_scores() -> None:

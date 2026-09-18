@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from momentum_factor_lab.dashboard_freshness import (
     decide_dashboard_freshness,
@@ -309,6 +312,51 @@ def test_expected_recent_us_close_date_skips_weekends() -> None:
         expected_recent_us_close_date(datetime(2026, 6, 15, 8, 30, tzinfo=UTC)).isoformat()
         == "2026-06-12"
     )
+
+
+@pytest.mark.parametrize(
+    ("now_utc", "expected"),
+    [
+        ("2026-09-17T19:59:59+00:00", "2026-09-16"),
+        ("2026-09-17T20:00:00+00:00", "2026-09-17"),
+        ("2026-03-06T20:59:59+00:00", "2026-03-05"),
+        ("2026-03-06T21:00:00+00:00", "2026-03-06"),
+        ("2026-03-09T19:59:59+00:00", "2026-03-06"),
+        ("2026-03-09T20:00:00+00:00", "2026-03-09"),
+        ("2026-11-02T20:59:59+00:00", "2026-10-30"),
+        ("2026-11-02T21:00:00+00:00", "2026-11-02"),
+        ("2026-11-27T17:59:59+00:00", "2026-11-25"),
+        ("2026-11-27T18:00:00+00:00", "2026-11-27"),
+        ("2026-12-24T17:59:59+00:00", "2026-12-23"),
+        ("2026-12-24T18:00:00+00:00", "2026-12-24"),
+        ("2026-01-01T23:00:00+00:00", "2025-12-31"),
+        ("2026-04-03T23:00:00+00:00", "2026-04-02"),
+        ("2026-06-19T23:00:00+00:00", "2026-06-18"),
+        ("2026-07-03T23:00:00+00:00", "2026-07-02"),
+        ("2026-09-07T23:00:00+00:00", "2026-09-04"),
+        ("2025-01-09T23:00:00+00:00", "2025-01-08"),
+        ("2012-10-30T23:00:00+00:00", "2012-10-26"),
+    ],
+)
+def test_recent_completed_nyse_session_handles_close_boundaries_and_holidays(
+    now_utc: str,
+    expected: str,
+) -> None:
+    now = datetime.fromisoformat(now_utc)
+    assert expected_recent_us_close_date(now).isoformat() == expected
+    now_kst = now.astimezone(ZoneInfo("Asia/Seoul"))
+    assert expected_recent_us_close_date(now_kst).isoformat() == expected
+
+
+def test_holiday_watchdog_accepts_the_last_completed_market_session() -> None:
+    decision = decide_dashboard_freshness(
+        _dashboard_v5("2026-09-07T21:40:00Z", data_as_of="2026-09-04"),
+        event_name="schedule",
+        now=datetime(2026, 9, 7, 23, 47, tzinfo=UTC),
+    )
+
+    assert decision.target_data_as_of.isoformat() == "2026-09-04"
+    assert decision.skip is True
 
 
 def test_dashboard_freshness_cli_emits_github_outputs(tmp_path: Path, capsys) -> None:

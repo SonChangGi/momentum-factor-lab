@@ -592,6 +592,9 @@ def test_scheduled_grid_recomputes_every_declared_input_and_market_offset_preset
         ]
     )
     dates = pd.bdate_range("2024-01-02", periods=12)
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.expected_recent_us_close_date", lambda now: dates[-1].date()
+    )
     base_market = SimpleNamespace(
         candidate_symbols=[f"S{index:04d}" for index in range(2_700)],
         prices=pd.DataFrame({"SPY": 100.0}, index=dates),
@@ -658,6 +661,7 @@ def test_scheduled_grid_recomputes_every_declared_input_and_market_offset_preset
         return {"manifest": data_dir / "grid" / "v1" / "manifest.json"}
 
     monkeypatch.setattr("momentum_factor_lab.cli.write_static_grid", fake_write_grid)
+    monkeypatch.setattr("momentum_factor_lab.cli.validate_static_grid", lambda path: {})
     monkeypatch.setattr(
         "momentum_factor_lab.cli._compact_summary",
         lambda payload, paths: {"resultKey": payload["resultKey"], "paths": paths},
@@ -678,8 +682,8 @@ def test_scheduled_grid_recomputes_every_declared_input_and_market_offset_preset
 
     assert len(computed_configs) == 3
     assert [config.top_n for config in computed_configs] == [20, 30, 20]
-    assert computed_configs[0].end_date is None
-    assert computed_configs[1].end_date is None
+    assert computed_configs[0].end_date == dates[-1].date().isoformat()
+    assert computed_configs[1].end_date == dates[-1].date().isoformat()
     assert computed_configs[2].end_date == dates[-8].date().isoformat()
     assert len(read_configs) == 2
     assert len(published["artifacts"]) == 3
@@ -731,6 +735,9 @@ def test_scheduled_grid_preserves_last_good_when_no_factor_is_eligible(
         ]
     )
     dates = pd.bdate_range("2026-07-01", periods=20)
+    monkeypatch.setattr(
+        "momentum_factor_lab.cli.expected_recent_us_close_date", lambda now: dates[-1].date()
+    )
     base_market = SimpleNamespace(
         candidate_symbols=[f"S{index:04d}" for index in range(2_700)],
         prices=pd.DataFrame({"SPY": 100.0}, index=dates),
