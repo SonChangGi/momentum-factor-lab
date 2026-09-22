@@ -853,6 +853,87 @@ def _finance_datareader_cache_path(config: RunConfig, symbol: str) -> Path:
     )
 
 
+def _repair_yfinance_latest_session(
+    symbols: list[str],
+    config: RunConfig,
+    frames: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame],
+) -> tuple[tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame], dict[str, object]]:
+    """Retry missing target quotes with a bounded one-session provider request.
+
+    Yahoo can return the last session's OHLCV row with null Close/Adj Close in
+    long-history requests while the one-session endpoint has the actual close.
+    Preserve all historical rows and only accept a complete adjusted/raw/volume
+    quote for the already resolved target. No price is inferred or carried forward.
+    """
+    if not config.require_current_session or config.end_date is None:
+        return frames, {}
+    import yfinance as yf
+
+    target = pd.Timestamp(config.end_date).normalize()
+    prices, raw_closes, volumes, splits = (frame.copy() for frame in frames)
+    index = prices.index.union(pd.DatetimeIndex([target])).sort_values()
+    prices, raw_closes, volumes, splits = (
+        frame.reindex(index=index, columns=symbols) for frame in (prices, raw_closes, volumes, splits)
+    )
+    def missing_symbols() -> list[str]:
+        return [symbol for symbol in symbols if not all(
+            pd.notna(frame.at[target, symbol])
+            and np.isfinite(frame.at[target, symbol])
+            and frame.at[target, symbol] > 0
+            for frame in (prices, raw_closes, volumes)
+        )]
+
+    pending = missing_symbols()
+    originally_missing = len(pending)
+    attempts = 0
+    error_types: list[str] = []
+    for attempt in range(config.retry_count + 1):
+        if not pending:
+            break
+        attempts += 1
+        try:
+            raw = yf.download(
+                tickers=pending, start=config.end_date, end=_yfinance_download_end_date(config),
+                auto_adjust=False, group_by="column", progress=False, threads=False,
+                actions=True, timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
+            )
+            repaired = _extract_yfinance(raw, pending)
+            # A missing adjusted-close field is not evidence of an adjusted price.
+            has_adjusted = (
+                any("Adj Close" in level for level in raw.columns.to_list())
+                if isinstance(raw.columns, pd.MultiIndex)
+                else "Adj Close" in raw.columns
+            )
+            if has_adjusted:
+                for symbol in pending:
+                    if not all(
+                        symbol in frame and target in frame.index
+                        and pd.notna(frame.at[target, symbol])
+                        and np.isfinite(frame.at[target, symbol])
+                        and frame.at[target, symbol] > 0
+                        for frame in repaired[:3]
+                    ):
+                        continue
+                    for destination, source in zip((prices, raw_closes, volumes, splits), repaired):
+                        destination.at[target, symbol] = source.at[target, symbol]
+        except Exception as error:
+            # The full-history result survives a transient latest-session error.
+            error_types.append(type(error).__name__)
+        pending = missing_symbols()
+        if pending and attempt < config.retry_count:
+            time.sleep(config.retry_backoff_seconds)
+    prices = prices.dropna(axis=1, how="all")
+    columns = prices.columns
+    return (prices, raw_closes.reindex(columns=columns), volumes.reindex(columns=columns),
+            splits.reindex(columns=columns).fillna(0.0)), {
+        "latestSessionTarget": config.end_date,
+        "latestSessionAttempts": attempts,
+        "latestSessionRepairedCount": originally_missing - len(pending),
+        "latestSessionMissingSymbols": pending,
+        "latestSessionErrorTypes": error_types,
+    }
+
+
 def _download_yfinance_chunk(
     symbols: list[str],
     config: RunConfig,
@@ -865,7 +946,9 @@ def _download_yfinance_chunk(
         symbols=symbols,
     )
     if cached is not None:
-        prices, raw_closes, volumes, stock_splits = cached
+        (prices, raw_closes, volumes, stock_splits), latest_diagnostics = (
+            _repair_yfinance_latest_session(symbols, config, cached)
+        )
         return (
             prices,
             raw_closes,
@@ -877,6 +960,7 @@ def _download_yfinance_chunk(
                 "error": None,
                 "cache_path": str(cache_path),
                 "cache_format": "csv+json",
+                "latest_session": latest_diagnostics,
             },
         )
 
@@ -897,6 +981,11 @@ def _download_yfinance_chunk(
                 timeout=YFINANCE_DOWNLOAD_TIMEOUT_SECONDS,
             )
             prices, raw_closes, volumes, stock_splits = _extract_yfinance(raw, symbols)
+            (prices, raw_closes, volumes, stock_splits), latest_diagnostics = (
+                _repair_yfinance_latest_session(
+                    symbols, config, (prices, raw_closes, volumes, stock_splits)
+                )
+            )
             _write_price_cache(
                 cache_path,
                 prices,
@@ -917,6 +1006,7 @@ def _download_yfinance_chunk(
                     "error": None,
                     "cache_path": str(cache_path),
                     "cache_format": "csv+json",
+                    "latest_session": latest_diagnostics,
                 },
             )
         except Exception as exc:  # pragma: no cover - network dependent
@@ -978,6 +1068,7 @@ def _download_yfinance(
                     "yfinance Adj Close is used for factor returns; raw Close and raw Volume "
                     "are retained separately for historical dollar-volume evidence."
                 ),
+                "note": json.dumps(status.get("latest_session", {}), sort_keys=True),
             }
         )
     prices = pd.concat(price_frames, axis=1) if price_frames else pd.DataFrame()

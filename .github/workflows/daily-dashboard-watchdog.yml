@@ -4,10 +4,9 @@ on:
   workflow_dispatch:
     # Manual dispatch remains available when a reviewed refresh is needed.
   schedule:
-    # 08:30/10:30/12:30 KST Tue-Sat: 1-2 hour freshness-gated fallback checks.
-    - cron: "30 23 * * 1-5"
-    - cron: "30 1 * * 2-6"
-    - cron: "30 3 * * 2-6"
+    # 10:47/14:17 KST Tue-Sat: bounded, staggered freshness-gated retries.
+    - cron: "47 1 * * 2-6"
+    - cron: "17 5 * * 2-6"
 
 concurrency:
   group: daily-momentum-dashboard-watchdog-${{ github.ref }}
@@ -59,6 +58,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -euo pipefail
+          active="$(gh run list --repo "${GITHUB_REPOSITORY}" \
+            --workflow daily-dashboard.yml --branch "${DEFAULT_BRANCH:-main}" \
+            --limit 100 --json status --jq '[.[] | select(.status != "completed")] | length')"
+          if [[ "$active" != 0 ]]; then
+            echo "A daily refresh is queued or running; preserving its attempt without dispatching a duplicate."
+            exit 0
+          fi
           echo "Dashboard is stale: ${{ steps.freshness.outputs.reason }}"
           echo "Latest run KST: ${{ steps.freshness.outputs.latest_run_kst }}"
           echo "Cutoff KST: ${{ steps.freshness.outputs.cutoff_kst }}"

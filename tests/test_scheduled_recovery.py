@@ -151,3 +151,22 @@ def test_scheduler_exit_distinguishes_failure_from_valid_no_selection(
     })
     config = Path(".github/momentum-dashboard-config.json")
     assert cli.main(["scheduled-dashboard", "--config", str(config), "--json"]) == expected
+
+
+def test_partial_latest_session_is_rejected_before_analysis(tmp_path, monkeypatch):
+    site = saved_site(tmp_path)
+    dates = pd.to_datetime(['2026-09-18', '2026-09-21'])
+    symbols = [f'S{i:04d}' for i in range(2700)]
+    prices = pd.DataFrame(100., index=dates, columns=symbols)
+    prices.loc[dates[-1], symbols[16:]] = float('nan')
+    market = SimpleNamespace(candidate_symbols=symbols, prices=prices)
+    monkeypatch.setattr(cli, 'expected_recent_us_close_date', lambda now: dates[-1].date())
+    monkeypatch.setattr(cli, 'load_market_data', lambda config: market)
+    monkeypatch.setattr(cli, 'write_market_data_snapshot', lambda *args: {})
+    monkeypatch.setattr(cli, '_compute_payload', lambda *args: pytest.fail('must not analyze'))
+    summary = run_grid(site, tmp_path)
+    status = summary['automationStatus']
+    assert status['reasonCode'] == 'incomplete_market_data'
+    assert status['diagnostics']['targetSessionPricedCandidateCount'] == 16
+    assert status['publication']['lastGoodPreserved'] is True
+    assert json.loads((site / 'data/dashboard.json').read_text())['data']['asOf'] == '2026-09-16'

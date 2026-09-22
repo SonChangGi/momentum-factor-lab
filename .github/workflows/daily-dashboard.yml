@@ -9,8 +9,8 @@ on:
         default: false
         type: boolean
   schedule:
-    # 06:30 KST Tue-Sat: first refresh after the prior U.S. regular session close settles.
-    - cron: "30 21 * * 1-5"
+    # 07:17 KST Tue-Sat: staggered after the completed U.S. session.
+    - cron: "17 22 * * 1-5"
 
 concurrency:
   group: daily-momentum-dashboard-${{ github.ref }}
@@ -20,9 +20,24 @@ permissions:
   contents: read
 
 jobs:
-  update-dashboard:
+  admission:
+    if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Wait for earlier data pipelines
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/automation_admission.py --max-wait-seconds 2700
+
+  update-dashboard:
+    needs: admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
     permissions:
       contents: write
     outputs:
@@ -142,7 +157,7 @@ jobs:
                   --status-path "${remote_automation_status}" > "${precommit_freshness}" || true
                 cat "${precommit_freshness}"
                 if grep -q '^skip=true$' "${precommit_freshness}"; then
-                  echo "Remote branch already has a dashboard execution after 06:30 KST; skipping duplicate commit."
+                  echo "Remote branch already has a dashboard execution after 07:17 KST; skipping duplicate commit."
                   exit 0
                 fi
               fi

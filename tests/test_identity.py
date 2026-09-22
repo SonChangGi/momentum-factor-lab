@@ -177,6 +177,7 @@ def test_operational_paths_refresh_and_ttl_do_not_change_research_inputs(tmp_pat
         site_dir=tmp_path / "other-site",
         cache_dir=tmp_path / "other-cache",
         refresh_market_data=True,
+        require_current_session=True,
         market_cache_max_age_hours=1.0,
     )
     assert normalized_research_inputs(first) == normalized_research_inputs(second)

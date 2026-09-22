@@ -171,3 +171,24 @@ def test_stale_repository_still_requests_the_collector() -> None:
     assert "if: steps.freshness.outputs.skip != 'true'" in block
     assert "gh workflow run daily-dashboard.yml" in block
     assert "watchdog_origin=true" in block
+
+
+@pytest.mark.parametrize('active,expected_dispatch', [('1', False), ('0', True)])
+def test_watchdog_does_not_duplicate_an_active_collection(tmp_path, active, expected_dispatch):
+    workflow = (ROOT / '.github/workflows/daily-dashboard-watchdog.yml').read_text()
+    block = workflow.split('      - name: Dispatch daily dashboard workflow\n', 1)[1].split(
+        '      - name: Recover publication', 1)[0]
+    script = textwrap.dedent(block.split('        run: |\n', 1)[1])
+    for key in ('reason', 'latest_run_kst', 'cutoff_kst'):
+        script = script.replace('${{ steps.freshness.outputs.' + key + ' }}', 'stale')
+    mock = '''gh() {
+      if [[ "$1 $2" == 'run list' ]]; then printf '%s\\n' "$ACTIVE";
+      elif [[ "$1 $2" == 'workflow run' ]]; then echo DISPATCH;
+      else return 99; fi
+    }
+    '''
+    result = subprocess.run(['bash', '-c', mock + script], capture_output=True, text=True,
+        env={**os.environ, 'ACTIVE': active, 'GITHUB_REPOSITORY': 'SonChangGi/momentum-factor-lab',
+             'DEFAULT_BRANCH': 'main'})
+    assert result.returncode == 0, result.stderr
+    assert ('DISPATCH' in result.stdout) is expected_dispatch

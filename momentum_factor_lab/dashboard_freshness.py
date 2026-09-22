@@ -11,8 +11,8 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as xcals
 
 KST = ZoneInfo("Asia/Seoul")
-DEFAULT_CUTOFF_HOUR_KST = 6
-DEFAULT_CUTOFF_MINUTE_KST = 30
+DEFAULT_CUTOFF_HOUR_KST = 7
+DEFAULT_CUTOFF_MINUTE_KST = 17
 AUTOMATION_STATUS_CONTRACT = "momentum-dashboard-automation-status"
 AUTOMATION_STATUS_SCHEMA_VERSION = 1
 

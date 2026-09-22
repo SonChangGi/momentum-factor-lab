@@ -997,6 +997,7 @@ def _build_scheduled_grid(
     # Resolve the rolling request once, before any provider is called. An
     # unbounded latest download can otherwise include an unfinished session.
     base_config.end_date = target_data_as_of
+    base_config.require_current_session = True
 
     base_inputs = ResearchInputs.from_config(base_config)
     base_market = load_market_data(base_config)
@@ -1022,6 +1023,31 @@ def _build_scheduled_grid(
             ),
             diagnostics={"observedDataAsOf": observed},
         )
+
+    # A few repaired quotes can advance the maximum date while most holdings
+    # remain unpriced. Reject that partial session before expensive analysis.
+    prior_rows = base_market.prices.loc[base_market.prices.index < sessions[-1]]
+    if not prior_rows.empty:
+        candidates = [symbol for symbol in base_market.candidate_symbols
+                      if symbol in base_market.prices.columns]
+        previous = prior_rows.iloc[-1].reindex(candidates)
+        recent = previous.gt(0) & previous.lt(float("inf"))
+        current = base_market.prices.iloc[-1].reindex(candidates)
+        present = current.gt(0) & current.lt(float("inf"))
+        expected_count = int(recent.sum())
+        available_count = int((recent & present).sum())
+        if expected_count and available_count / expected_count < 0.90:
+            return _failed_scheduled_summary(
+                site_dir=site_dir, target=target_data_as_of, reason="incomplete_market_data",
+                diagnostics={
+                    "observedDataAsOf": observed,
+                    "previousSessionPricedCandidateCount": expected_count,
+                    "targetSessionPricedCandidateCount": available_count,
+                    "targetSessionCoverageRatio": available_count / expected_count,
+                    "minimumTargetSessionCoverageRatio": 0.90,
+                    "missingTargetSymbols": list(current.index[recent & ~present])[:100],
+                },
+            )
 
     artifacts: list[StaticGridArtifact] = []
     results: dict[str, tuple[dict[str, Any], Path]] = {}

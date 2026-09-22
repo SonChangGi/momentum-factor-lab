@@ -32,6 +32,7 @@ _NON_RESULT_CONFIG_FIELDS = {
     "export_input_snapshot",
     "market_cache_max_age_hours",
     "refresh_market_data",
+    "require_current_session",
     "price_chunk_size",
     "yahoo_chart_fallback_limit",
     "nasdaq_fallback_limit",

@@ -136,6 +136,7 @@ class RunConfig:
     export_input_snapshot: bool = False
     market_cache_max_age_hours: float = 24.0
     refresh_market_data: bool = False
+    require_current_session: bool = False
 
     max_price_symbols: int | None = None
     price_chunk_size: int = 25
