@@ -40,6 +40,7 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: write
+      actions: read
     outputs:
       pages_source_sha: ${{ steps.pages-request.outputs.source_sha }}
       should_deploy_pages: ${{ steps.pages-request.outputs.should_deploy }}
@@ -51,6 +52,12 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.ref_name }}
+
+      - name: Recheck admission when only failed jobs are rerun
+        if: github.run_attempt != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/automation_admission.py --max-wait-seconds 300
 
       - name: Refresh checkout to latest branch head
         run: |
