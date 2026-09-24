@@ -4,7 +4,7 @@
     "fallbackFactorSelected": false,
     "guardrailsRelaxed": false
   },
-  "attemptedAtUtc": "2026-09-24T07:18:14.437836Z",
+  "attemptedAtUtc": "2026-09-24T10:32:35.287636Z",
   "contract": "momentum-dashboard-automation-status",
   "diagnostics": {
     "errorType": "ValueError"
