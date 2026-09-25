@@ -598,6 +598,7 @@ def test_scheduled_grid_recomputes_every_declared_input_and_market_offset_preset
     base_market = SimpleNamespace(
         candidate_symbols=[f"S{index:04d}" for index in range(2_700)],
         prices=pd.DataFrame({"SPY": 100.0}, index=dates),
+        comparison_prices=pd.DataFrame(index=dates),
         requested_through=dates[-1].date().isoformat(),
     )
     read_configs = []
@@ -741,6 +742,7 @@ def test_scheduled_grid_preserves_last_good_when_no_factor_is_eligible(
     base_market = SimpleNamespace(
         candidate_symbols=[f"S{index:04d}" for index in range(2_700)],
         prices=pd.DataFrame({"SPY": 100.0}, index=dates),
+        comparison_prices=pd.DataFrame(index=dates),
         requested_through=dates[-1].date().isoformat(),
         as_of=dates[-1],
     )

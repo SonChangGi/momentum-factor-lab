@@ -1392,6 +1392,91 @@ def _download_nasdaq_symbol(
     return None, None, str(last_error), "failed", str(cache_path), config.retry_count
 
 
+def _repair_nasdaq_composite_gaps(
+    prices: pd.DataFrame,
+    raw_closes: pd.DataFrame,
+    config: RunConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Recover missing ^IXIC observations from the publisher's COMP index.
+
+    Unlike stock/ETF closes, this price index has no split/dividend adjustment.
+    Require matching surrounding observations before accepting any missing cell;
+    never overwrite Yahoo observations or infer a price/volume through a gap.
+    """
+    symbol = "^IXIC"
+    if (not config.require_current_session or config.end_date is None
+            or symbol not in config.comparison_benchmarks or symbol not in prices):
+        return prices, raw_closes, pd.DataFrame()
+    series = pd.to_numeric(prices[symbol], errors="coerce")
+    valid = series.where(np.isfinite(series) & series.gt(0)).dropna()
+    if valid.empty:
+        return prices, raw_closes, pd.DataFrame()
+    window = series.loc[valid.index.min():pd.Timestamp(config.end_date)]
+    missing = window.index[~(np.isfinite(window) & window.gt(0))]
+    if missing.empty:
+        return prices, raw_closes, pd.DataFrame()
+    # Bound recovery work. A broadly invalid series remains unavailable.
+    if len(missing) > 31:
+        return prices, raw_closes, _source_frame([{
+            "source": "nasdaq-composite-history-repair", "status": "failed", "records": 0,
+            "error": "more than 31 missing index sessions; bounded repair refused",
+        }])
+    start = max(pd.Timestamp(config.start_date), missing.min() - pd.Timedelta(days=7))
+    end = min(pd.Timestamp(config.end_date), missing.max() + pd.Timedelta(days=7))
+    params = urlencode({"assetclass": "index", "fromdate": str(start.date()),
+                        "todate": str(end.date()), "limit": "9999"})
+    url = f"https://api.nasdaq.com/api/quote/COMP/historical?{params}"
+    error = "index history not received"
+    for attempt in range(config.retry_count + 1):
+        try:
+            request = Request(url, headers={"User-Agent": "Mozilla/5.0",
+                "Accept": "application/json", "Origin": "https://www.nasdaq.com",
+                "Referer": "https://www.nasdaq.com/"})
+            with urlopen(request, timeout=YAHOO_CHART_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if (payload.get("data", {}).get("symbol") != "COMP"
+                    or payload.get("status", {}).get("rCode") != 200):
+                raise ValueError("Nasdaq response is not successful COMP index history")
+            frame, parse_error = _frame_from_nasdaq_payload(payload, "COMP")
+            if frame is None:
+                raise ValueError(parse_error)
+            if frame["Date"].duplicated().any():
+                raise ValueError("duplicate dates in COMP index history")
+            official = frame.set_index("Date")["Close"].loc[start:end]
+            overlap = official.index.intersection(valid.index)
+            if len(overlap) < 2 or not np.allclose(
+                official.loc[overlap], valid.loc[overlap], rtol=1e-7, atol=0.01
+            ):
+                raise ValueError("COMP history does not match adjacent Yahoo index observations")
+            recovered = official.reindex(missing)
+            if not (np.isfinite(recovered) & recovered.gt(0)).all():
+                raise ValueError("COMP history does not cover every missing index session")
+            repaired = prices.copy()
+            raw = raw_closes.reindex(index=prices.index, columns=prices.columns).copy()
+            repaired.loc[missing, symbol] = recovered
+            raw.loc[missing, symbol] = recovered
+            return repaired, raw, _source_frame([{
+                "source": "nasdaq-composite-history-repair", "status": "fetched",
+                "records": len(missing), "requested_symbols": symbol,
+                "returned_symbols": symbol, "retries": attempt,
+                "as_of_min": str(missing.min().date()), "as_of_max": str(missing.max().date()),
+                "provider_adjustment_note": "Official COMP price-index close; no security adjustment or volume inference.",
+                "note": json.dumps({"url": url, "fetchedAtUtc": datetime.now(UTC).isoformat(),
+                    "overlapObservations": len(overlap),
+                    "repairedCloses": {str(day.date()): float(value)
+                                       for day, value in recovered.items()}}),
+            }])
+        except Exception as exc:
+            error = str(exc)
+            if attempt < config.retry_count:
+                time.sleep(config.retry_backoff_seconds)
+    return prices, raw_closes, _source_frame([{
+        "source": "nasdaq-composite-history-repair", "status": "failed", "records": 0,
+        "requested_symbols": symbol, "missing_symbols": symbol,
+        "retries": config.retry_count, "error": error,
+    }])
+
+
 def _apply_nasdaq_latest_repair(
     prices: pd.DataFrame,
     volumes: pd.DataFrame,
@@ -2046,6 +2131,10 @@ def download_live_data(config: RunConfig) -> MarketData:
     if prices.empty:
         raise RuntimeError("live download returned no prices; synthetic fallback is forbidden")
 
+    prices, raw_closes, index_repair_sources = _repair_nasdaq_composite_gaps(
+        prices, raw_closes, config
+    )
+
     benchmark = normalize_symbol(config.benchmark)
     comparator_symbols = set(_comparator_symbols(config))
     requested_candidate_symbols = [
@@ -2108,6 +2197,8 @@ def download_live_data(config: RunConfig) -> MarketData:
             source = "finance-datareader-close-fallback"
         else:
             source = "yfinance-adjusted-daily"
+        if symbol == "^IXIC" and _has_positive_records(index_repair_sources):
+            source += "+nasdaq-composite-history-repair"
         price_source_rows.append(
             {
                 "symbol": symbol,
@@ -2142,6 +2233,9 @@ def download_live_data(config: RunConfig) -> MarketData:
         yahoo_chart_sources,
         nasdaq_sources,
     )
+    if _has_positive_records(index_repair_sources):
+        provider += "+nasdaq-composite-history-repair"
+        data_quality["provider"] = provider
     returned_symbols = [
         symbol
         for symbol in symbols
@@ -2220,6 +2314,7 @@ def download_live_data(config: RunConfig) -> MarketData:
             yf_sources,
             yahoo_chart_sources,
             nasdaq_sources,
+            index_repair_sources,
             stooq_sources,
             finance_datareader_sources,
             summary,

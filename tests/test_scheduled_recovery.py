@@ -100,6 +100,7 @@ def test_historical_preset_failure_keeps_the_current_run_target(tmp_path, monkey
     market = SimpleNamespace(
         candidate_symbols=[f"S{i:04d}" for i in range(2700)],
         prices=pd.DataFrame({"SPY": 100.0}, index=dates), as_of=dates[-1],
+        comparison_prices=pd.DataFrame(index=dates),
     )
     monkeypatch.setattr(cli, "expected_recent_us_close_date", lambda now: dates[-1].date())
     monkeypatch.setattr(cli, "load_market_data", lambda config: market)
@@ -170,3 +171,23 @@ def test_partial_latest_session_is_rejected_before_analysis(tmp_path, monkeypatc
     assert status['diagnostics']['targetSessionPricedCandidateCount'] == 16
     assert status['publication']['lastGoodPreserved'] is True
     assert json.loads((site / 'data/dashboard.json').read_text())['data']['asOf'] == '2026-09-16'
+
+
+def test_missing_comparison_history_is_rejected_before_backtests(tmp_path, monkeypatch):
+    site = saved_site(tmp_path)
+    original = (site / 'data/dashboard.json').read_bytes()
+    dates = pd.to_datetime(['2026-09-21', '2026-09-22', '2026-09-23'])
+    market = SimpleNamespace(
+        candidate_symbols=[f'S{i:04d}' for i in range(2700)],
+        prices=pd.DataFrame({'SPY': 100.}, index=dates),
+        comparison_prices=pd.DataFrame({'^IXIC': [27122.09, float('nan'), 26936.04]}, index=dates),
+    )
+    monkeypatch.setattr(cli, 'expected_recent_us_close_date', lambda now: dates[-1].date())
+    monkeypatch.setattr(cli, 'load_market_data', lambda config: market)
+    monkeypatch.setattr(cli, 'write_market_data_snapshot', lambda *args: {})
+    monkeypatch.setattr(cli, '_compute_payload', lambda *args: pytest.fail('must not analyze'))
+    status = run_grid(site, tmp_path)['automationStatus']
+    assert status['reasonCode'] == 'incomplete_market_data'
+    assert status['diagnostics']['missingComparisonDates'] == ['2026-09-22']
+    assert status['publication']['lastGoodPreserved'] is True
+    assert (site / 'data/dashboard.json').read_bytes() == original

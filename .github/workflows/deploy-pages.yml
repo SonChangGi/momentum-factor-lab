@@ -124,6 +124,7 @@ jobs:
             tests/test_publication_security.py \
             tests/test_automation_admission.py \
             tests/test_latest_session_repair.py \
+            tests/test_index_history_repair.py \
             tests/test_scheduled_recovery.py
           python -m momentum_factor_lab.publication_security docs
           node --check docs/assets/dashboard.js

@@ -1049,6 +1049,24 @@ def _build_scheduled_grid(
                 },
             )
 
+    # Every published preset needs the full comparison curve, including the
+    # prior-session preset. Reject unresolved history before running backtests.
+    comparison = base_market.comparison_prices
+    history_count = max(
+        preset.research_inputs.apply(base_config).evaluation_window_days
+        + 1 + preset.market_session_offset for preset in presets
+    )
+    required_dates = base_market.prices.index[-history_count:]
+    if "^IXIC" in base_config.comparison_benchmarks and "^IXIC" in comparison:
+        index_prices = comparison["^IXIC"].reindex(required_dates)
+        gaps = index_prices.index[~(index_prices.gt(0) & index_prices.lt(float("inf")))]
+        if len(gaps):
+            return _failed_scheduled_summary(
+                site_dir=site_dir, target=target_data_as_of, reason="incomplete_market_data",
+                diagnostics={"comparisonSymbol": "^IXIC",
+                             "missingComparisonDates": [str(day.date()) for day in gaps]},
+            )
+
     artifacts: list[StaticGridArtifact] = []
     results: dict[str, tuple[dict[str, Any], Path]] = {}
     preset_receipts: list[dict[str, Any]] = []
