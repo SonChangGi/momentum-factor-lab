@@ -1,5 +1,7 @@
 import json
+import sys
 from io import BytesIO
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
@@ -102,6 +104,7 @@ def test_acquisition_retains_repair_provenance(monkeypatch):
                               'asset_type': ['stock'], 'exchange': ['NASDAQ']})
     config.yahoo_chart_fallback_limit = config.nasdaq_fallback_limit = 0
     config.stooq_fallback_limit = config.finance_datareader_fallback_limit = 0
+    monkeypatch.setitem(sys.modules, 'yfinance', SimpleNamespace())
     monkeypatch.setattr(live_data, '_candidate_universe', lambda config: (candidate, pd.DataFrame()))
     monkeypatch.setattr(live_data, '_requested_symbols', lambda *a: (list(prices.columns), False))
     monkeypatch.setattr(live_data, '_download_yfinance', lambda *a: (
