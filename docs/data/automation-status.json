@@ -2,27 +2,26 @@
   "affectedPresetId": null,
   "analysis": {
     "fallbackFactorSelected": false,
-    "guardrailsRelaxed": false
+    "guardrailVersion": "absolute-factor-v2",
+    "guardrailsRelaxed": false,
+    "presetCount": 3
   },
-  "attemptedAtUtc": "2026-09-25T01:07:53.518933Z",
+  "attemptedAtUtc": "2026-09-25T03:55:08.940595Z",
   "contract": "momentum-dashboard-automation-status",
-  "diagnostics": {
-    "errorType": "ValueError"
-  },
   "lastGood": {
-    "dataAsOf": "2026-09-22",
-    "generatedAtUtc": "2026-09-23T01:09:10.565782+00:00",
+    "dataAsOf": "2026-09-24",
+    "generatedAtUtc": "2026-09-25T03:42:26.591799+00:00",
     "path": "data/dashboard.json",
-    "resultKey": "f08e8fabec21bd58bd0ffefea72a51cd7c647ffb267ea6aa3974ec0338cc46e3"
+    "resultKey": "30d8077b4f479698bcc21c7e79bdd960b2f3a076179b18fae74482c347b8809b"
   },
   "project": "momentum-factor-lab",
   "publication": {
-    "lastGoodPreserved": true,
-    "policy": "preserve_last_good",
-    "updated": false
+    "lastGoodPreserved": false,
+    "policy": "validated_static_grid",
+    "updated": true
   },
-  "reasonCode": "execution_failed",
+  "reasonCode": "published",
   "schemaVersion": 1,
-  "state": "failed",
+  "state": "available",
   "targetDataAsOf": "2026-09-24"
 }
